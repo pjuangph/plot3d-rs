@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use serde::Serialize;
+
 use crate::{
     block::Block,
     block_face_functions::{create_face_from_diagonals, get_outer_faces, split_face, Face},
@@ -13,7 +15,7 @@ const DEFAULT_TOL: f64 = 1e-6;
 /// in `2` refer to the second face. Indices are Plot3D structured-grid indices.
 
 /// Pointwise correspondence between two block faces.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct MatchPoint {
     pub i1: usize,
     pub j1: usize,
@@ -24,7 +26,7 @@ pub struct MatchPoint {
 }
 
 /// Compact record describing a face on a particular block.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct FaceRecord {
     pub block_index: usize,
     pub imin: usize,
@@ -118,7 +120,7 @@ impl FaceRecordTraits for Vec<FaceRecord> {
 ///
 /// Each entry stores the corner ranges (on both blocks) and every coincident
 /// node that was found for that interface.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct FaceMatch {
     pub block1: FaceRecord,
     pub block2: FaceRecord,

@@ -921,7 +921,7 @@ pub fn reduce_blocks(blocks: &[Block], factor: usize) -> Vec<Block> {
     if factor <= 1 {
         return blocks.to_vec();
     }
-    blocks
+    return blocks
         .iter()
         .map(|block| {
             let si = (block.imax - 1) / factor + 1;
@@ -942,7 +942,7 @@ pub fn reduce_blocks(blocks: &[Block], factor: usize) -> Vec<Block> {
             }
             Block::new(si, sj, sk, x, y, z)
         })
-        .collect()
+        .collect(); // Final expression is the return value
 }
 
 /// Rotate a block using a 3×3 rotation matrix.
@@ -967,7 +967,7 @@ pub fn rotate_block(block: &Block, rotation: [[f64; 3]; 3]) -> Block {
             }
         }
     }
-    Block::new(block.imax, block.jmax, block.kmax, x, y, z)
+    return Block::new(block.imax, block.jmax, block.kmax, x, y, z);
 }
 
 /// Compute the global bounds across all blocks.
