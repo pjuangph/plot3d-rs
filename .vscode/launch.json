@@ -1,0 +1,36 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "name": "Debug unit tests in library 'plot3d'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": ["test"]
+            },
+            "cwd": "${workspaceFolder}",
+            "env":{"RUST_BACKTRACE":"1"}
+        },
+        {
+            "name": "Debug read_write_fortran_binary_roundtrip",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": ["test", "--no-run", "--lib", "--package", "plot3d"]
+            },
+            "program": "${cargo:program}",
+            "args": [
+                "read_write_fortran_binary_roundtrip",
+                "--nocapture",
+                "--test-threads=1",
+                "--exact"
+            ],
+            "cwd": "${workspaceFolder}",
+            "env": { "RUST_BACKTRACE": "1" }
+        }
+  ]
+}

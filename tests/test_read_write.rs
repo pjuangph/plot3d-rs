@@ -1,11 +1,10 @@
 use plot3d::{
-    read_plot3d_ascii, read_plot3d_binary, write_plot3d, BinaryFormat, Block, Endian,
-    FloatPrecision,
+    read_plot3d_ascii, read_plot3d_binary, write_plot3d, BinaryFormat, Endian, FloatPrecision,
 };
 
 #[test]
 fn read_write_fortran_binary_roundtrip() {
-    // download once
+    // download mesh
     let url = "https://nasa-public-data.s3.amazonaws.com/plot3d_utilities/VSPT_ASCII.xyz";
     let ascii_path = "VSPT_ASCII.xyz";
     if !std::path::Path::new(ascii_path).exists() {
@@ -15,7 +14,7 @@ fn read_write_fortran_binary_roundtrip() {
 
     // read ASCII
     let blocks = read_plot3d_ascii(ascii_path).unwrap();
-    assert!(blocks.len() >= 1);
+    assert!(blocks.len() == 2);
 
     // quick shape sanity
     for b in &blocks {

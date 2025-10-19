@@ -23,9 +23,9 @@ pub struct MatchPoint {
     pub k2: usize,
 }
 
-/// Corner definition for a matched face.
+/// Compact record describing a face on a particular block.
 #[derive(Clone, Debug)]
-pub struct FaceCorner {
+pub struct FaceRecord {
     pub block_index: usize,
     pub imin: usize,
     pub jmin: usize,
@@ -36,7 +36,7 @@ pub struct FaceCorner {
     pub id: Option<usize>,
 }
 
-impl FaceCorner {
+impl FaceRecord {
     /// Build a corner description from matching points.
     ///
     /// * `block_index` – Owning block index.
@@ -85,29 +85,80 @@ impl FaceCorner {
     }
 }
 
+/// Helper trait to print summaries of face records.
+pub trait FaceRecordTraits {
+    fn print(&self);
+}
+
+impl FaceRecordTraits for [FaceRecord] {
+    fn print(&self) {
+        for face in self {
+            println!(
+                "face block{} id {:?}: [{},{},{} → {},{},{}]",
+                face.block_index,
+                face.id,
+                face.imin,
+                face.jmin,
+                face.kmin,
+                face.imax,
+                face.jmax,
+                face.kmax
+            );
+        }
+    }
+}
+
+impl FaceRecordTraits for Vec<FaceRecord> {
+    fn print(&self) {
+        self.as_slice().print();
+    }
+}
+
 /// Aggregates the matching data between two faces.
 ///
 /// Each entry stores the corner ranges (on both blocks) and every coincident
 /// node that was found for that interface.
 #[derive(Clone, Debug)]
 pub struct FaceMatch {
-    pub block1: FaceCorner,
-    pub block2: FaceCorner,
+    pub block1: FaceRecord,
+    pub block2: FaceRecord,
     pub points: Vec<MatchPoint>,
 }
 
-/// Serializable outer-face record.
-/// Persistent face identifier used in connectivity exports.
-#[derive(Clone, Debug)]
-pub struct OuterFaceRecord {
-    pub block_index: usize,
-    pub id: usize,
-    pub imin: usize,
-    pub jmin: usize,
-    pub kmin: usize,
-    pub imax: usize,
-    pub jmax: usize,
-    pub kmax: usize,
+/// Helper trait to print summaries of face matches.
+pub trait FaceMatchPrinter {
+    fn print(&self);
+}
+
+impl FaceMatchPrinter for [FaceMatch] {
+    fn print(&self) {
+        for (idx, m) in self.iter().enumerate() {
+            println!(
+                "match #{idx}: block{} [{},{},{} → {},{},{}] ↔ block{} [{},{},{} → {},{},{}] ({} nodes)",
+                m.block1.block_index,
+                m.block1.imin,
+                m.block1.jmin,
+                m.block1.kmin,
+                m.block1.imax,
+                m.block1.jmax,
+                m.block1.kmax,
+                m.block2.block_index,
+                m.block2.imin,
+                m.block2.jmin,
+                m.block2.kmin,
+                m.block2.imax,
+                m.block2.jmax,
+                m.block2.kmax,
+                m.points.len()
+            );
+        }
+    }
+}
+
+impl FaceMatchPrinter for Vec<FaceMatch> {
+    fn print(&self) {
+        self.as_slice().print();
+    }
 }
 
 /// Structured-grid node on a face, capturing indices and XYZ coordinate.
@@ -463,7 +514,7 @@ fn combinations_of_nearest_blocks(blocks: &[Block], nearest_nblocks: usize) -> V
 /// Tuple `(matches, outer_faces)` where `matches` enumerates face interfaces
 /// and `outer_faces` records the remaining external surfaces at the original
 /// resolution.
-pub fn connectivity_fast(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<OuterFaceRecord>) {
+pub fn connectivity_fast(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
     let mut gcd_array = Vec::with_capacity(blocks.len());
     for block in blocks {
         let gcd = gcd_three(block.imax - 1, block.jmax - 1, block.kmax - 1);
@@ -472,6 +523,7 @@ pub fn connectivity_fast(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<OuterFaceReco
     let gcd_to_use = gcd_array.into_iter().min().unwrap_or(1).max(1);
     let reduced_blocks = crate::block_face_functions::reduce_blocks(blocks, gcd_to_use);
     let (mut matches, mut outer_faces) = connectivity(&reduced_blocks);
+    // Scale back to origional size
     for face in &mut matches {
         face.block1.imin *= gcd_to_use;
         face.block1.jmin *= gcd_to_use;
@@ -506,7 +558,7 @@ pub fn connectivity_fast(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<OuterFaceReco
 /// # Returns
 /// Tuple `(matches, outer_faces)` representing matched interfaces and the
 /// formatted list of outer faces.
-pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<OuterFaceRecord>) {
+pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
     let mut block_outer_faces: Vec<Vec<Face>> = blocks
         .iter()
         .enumerate()
@@ -564,8 +616,8 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<OuterFaceRecord>) 
             matches_to_remove.insert(face1.index_key());
             matches_to_remove.insert(face2.index_key());
 
-            let corner1 = FaceCorner::from_match_points(i, &points, true).unwrap();
-            let corner2 = FaceCorner::from_match_points(j, &points, false).unwrap();
+            let corner1 = FaceRecord::from_match_points(i, &points, true).unwrap();
+            let corner2 = FaceRecord::from_match_points(j, &points, false).unwrap();
             matches.push(FaceMatch {
                 block1: corner1,
                 block2: corner2,
@@ -621,7 +673,7 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<OuterFaceRecord>) 
     for (idx, block) in blocks.iter().enumerate() {
         let (_, self_matches) = get_outer_faces(block);
         for (face_a, face_b) in self_matches {
-            let mut corner1 = FaceCorner {
+            let mut corner1 = FaceRecord {
                 block_index: idx,
                 imin: face_a.imin(),
                 jmin: face_a.jmin(),
@@ -631,7 +683,7 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<OuterFaceRecord>) 
                 kmax: face_a.kmax(),
                 id: face_a.id(),
             };
-            let corner2 = FaceCorner {
+            let corner2 = FaceRecord {
                 block_index: idx,
                 imin: face_b.imin(),
                 jmin: face_b.jmin(),
@@ -653,15 +705,15 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<OuterFaceRecord>) 
     let mut formatted = Vec::new();
     let mut id_counter = 1;
     for face in outer_faces {
-        formatted.push(OuterFaceRecord {
+        formatted.push(FaceRecord {
             block_index: face.block_index().unwrap_or(usize::MAX),
-            id: id_counter,
             imin: face.imin(),
             jmin: face.jmin(),
             kmin: face.kmin(),
             imax: face.imax(),
             jmax: face.jmax(),
             kmax: face.kmax(),
+            id: Some(id_counter),
         });
         id_counter += 1;
     }

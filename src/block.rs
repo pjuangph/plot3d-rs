@@ -87,4 +87,10 @@ impl Block {
         let sum_z: f64 = self.z.iter().sum();
         (sum_x / n, sum_y / n, sum_z / n)
     }
+
+    /// Print the XYZ coordinates at `(i, j, k)` in a readable format.
+    pub fn print_xyz(&self, i: usize, j: usize, k: usize) {
+        let (x, y, z) = self.xyz(i, j, k);
+        println!("XYZ at (i={i}, j={j}, k={k}) is ({x:.6}, {y:.6}, {z:.6})");
+    }
 }

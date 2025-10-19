@@ -924,28 +924,22 @@ pub fn reduce_blocks(blocks: &[Block], factor: usize) -> Vec<Block> {
     blocks
         .iter()
         .map(|block| {
-            let mut x = Vec::new();
-            let mut y = Vec::new();
-            let mut z = Vec::new();
-            let mut i = 0;
-            while i < block.imax {
-                let mut j = 0;
-                while j < block.jmax {
-                    let mut k = 0;
-                    while k < block.kmax {
+            let si = (block.imax - 1) / factor + 1;
+            let sj = (block.jmax - 1) / factor + 1;
+            let sk = (block.kmax - 1) / factor + 1;
+            let mut x = Vec::with_capacity(si * sj * sk);
+            let mut y = Vec::with_capacity(si * sj * sk);
+            let mut z = Vec::with_capacity(si * sj * sk);
+            for k in (0..block.kmax).step_by(factor) {
+                for j in (0..block.jmax).step_by(factor) {
+                    for i in (0..block.imax).step_by(factor) {
                         let (px, py, pz) = block.xyz(i, j, k);
                         x.push(px);
                         y.push(py);
                         z.push(pz);
-                        k += factor;
                     }
-                    j += factor;
                 }
-                i += factor;
             }
-            let si = (block.imax - 1) / factor + 1;
-            let sj = (block.jmax - 1) / factor + 1;
-            let sk = (block.kmax - 1) / factor + 1;
             Block::new(si, sj, sk, x, y, z)
         })
         .collect()

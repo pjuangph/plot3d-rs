@@ -156,7 +156,7 @@ fn write_fortran(
 }
 
 fn write_vec_num(
-    mut w: &mut impl Write,
+    w: &mut impl Write,
     v: &[f64],
     precision: FloatPrecision,
     endian: Endian,
