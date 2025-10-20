@@ -1,15 +1,13 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::block::Block;
-
-/// Dictionary-style representation used by the original Python utilities.
-pub type FaceDict = HashMap<String, usize>;
-/// Pair of dictionary faces that describe a matched interface.
-pub type MatchedFaceDict = HashMap<String, FaceDict>;
+use crate::{
+    block::Block,
+    connectivity::{FaceMatch, FaceRecord},
+};
 
 const DEFAULT_TOL: f64 = 1e-8;
 
-/// Enumeration describing which index remains constant over a face.
+/// Enumeration describing which index remains constant over a structured face.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum FaceAxis {
     /// I-direction is constant.
@@ -305,22 +303,18 @@ impl Face {
         (shared as f64) / denom >= min_shared_frac
     }
 
-    /// Export a dictionary-form representation that mirrors the Python API.
-    pub fn to_dict(&self) -> FaceDict {
-        let mut out = FaceDict::new();
-        out.insert("IMIN".into(), self.imin());
-        out.insert("IMAX".into(), self.imax());
-        out.insert("JMIN".into(), self.jmin());
-        out.insert("JMAX".into(), self.jmax());
-        out.insert("KMIN".into(), self.kmin());
-        out.insert("KMAX".into(), self.kmax());
-        if let Some(idx) = self.block_index {
-            out.insert("block_index".into(), idx);
+    /// Export a [`FaceRecord`] representation mirroring the Python dictionary API.
+    pub fn to_record(&self) -> FaceRecord {
+        FaceRecord {
+            block_index: self.block_index.unwrap_or(usize::MAX),
+            imin: self.imin(),
+            jmin: self.jmin(),
+            kmin: self.kmin(),
+            imax: self.imax(),
+            jmax: self.jmax(),
+            kmax: self.kmax(),
+            id: self.id,
         }
-        if let Some(id) = self.id {
-            out.insert("id".into(), id);
-        }
-        out
     }
 
     pub fn index_key(&self) -> (usize, usize, usize, usize, usize, usize, usize) {
@@ -333,6 +327,18 @@ impl Face {
             self.jmax(),
             self.kmax(),
         )
+    }
+
+    /// Scale all stored index values by `factor`.
+    pub fn scale_indices(&mut self, factor: usize) {
+        if factor <= 1 {
+            return;
+        }
+        for idx in &mut self.indices {
+            idx[0] *= factor;
+            idx[1] *= factor;
+            idx[2] *= factor;
+        }
     }
 }
 
@@ -660,42 +666,40 @@ pub fn create_face_from_diagonals(
     face
 }
 
-/// Convert serialized face dictionaries back into `Face` instances.
+/// Convert serialized face records back into `Face` instances.
 ///
 /// # Arguments
 /// * `blocks` - Blocks interpreted at the reduced resolution.
-/// * `outer_faces` - Collection of serialized faces.
+/// * `outer_faces` - Collection of serialized face records.
 /// * `gcd` - Grid reduction factor applied to the blocks.
 ///
 /// # Returns
 /// Converted faces with block indices preserved.
-pub fn outer_face_dict_to_list(
+pub fn outer_face_records_to_list(
     blocks: &[Block],
-    outer_faces: &[FaceDict],
+    outer_faces: &[FaceRecord],
     gcd: usize,
 ) -> Vec<Face> {
     let mut faces = Vec::new();
     for record in outer_faces {
-        let Some(&block_idx) = record.get("block_index") else {
-            continue;
-        };
+        let block_idx = record.block_index;
         if block_idx >= blocks.len() {
             continue;
         }
         let block = &blocks[block_idx];
-        let get = |key: &str| record.get(key).cloned().unwrap_or(0);
+        let scale = gcd.max(1);
         let mut face = create_face_from_diagonals(
             block,
-            get("IMIN") / gcd.max(1),
-            get("JMIN") / gcd.max(1),
-            get("KMIN") / gcd.max(1),
-            get("IMAX") / gcd.max(1),
-            get("JMAX") / gcd.max(1),
-            get("KMAX") / gcd.max(1),
+            record.imin / scale,
+            record.jmin / scale,
+            record.kmin / scale,
+            record.imax / scale,
+            record.jmax / scale,
+            record.kmax / scale,
         );
         face.set_block_index(block_idx);
-        if let Some(id) = record.get("id") {
-            face.set_id(*id);
+        if let Some(id) = record.id {
+            face.set_id(id);
         }
         faces.push(face);
     }
@@ -706,28 +710,20 @@ pub fn outer_face_dict_to_list(
 ///
 /// # Arguments
 /// * `blocks` - Blocks interpreted at the reduced resolution.
-/// * `matched_faces` - Pair dictionaries describing matched interfaces.
+/// * `matched_faces` - Matched face descriptors describing interfaces.
 /// * `gcd` - Grid reduction factor applied to the blocks.
 ///
 /// # Returns
 /// Flattened list of faces representing every entry in `matched_faces`.
-pub fn match_faces_dict_to_list(
-    blocks: &[Block],
-    matched_faces: &[MatchedFaceDict],
-    gcd: usize,
-) -> Vec<Face> {
+pub fn match_faces_to_list(blocks: &[Block], matched_faces: &[FaceMatch], gcd: usize) -> Vec<Face> {
     let mut out = Vec::new();
     for record in matched_faces {
-        let f1 = record.get("block1").and_then(|d| {
-            outer_face_dict_to_list(blocks, &[d.clone()], gcd)
-                .into_iter()
-                .next()
-        });
-        let f2 = record.get("block2").and_then(|d| {
-            outer_face_dict_to_list(blocks, &[d.clone()], gcd)
-                .into_iter()
-                .next()
-        });
+        let f1 = outer_face_records_to_list(blocks, &[record.block1.clone()], gcd)
+            .into_iter()
+            .next();
+        let f2 = outer_face_records_to_list(blocks, &[record.block2.clone()], gcd)
+            .into_iter()
+            .next();
         if let Some(face) = f1 {
             out.push(face);
         }
@@ -1034,7 +1030,7 @@ impl Default for BlockConnectionOptions {
 ///
 /// # Arguments
 /// * `blocks` - Original block list.
-/// * `outer_faces` - Optional pre-computed outer faces (dictionary format).
+/// * `outer_faces` - Optional pre-computed outer faces (face records).
 /// * `tol` - Compatibility parameter maintained for parity with Python (unused).
 /// * `options` - Node matching thresholds and sampling strides.
 ///
@@ -1042,7 +1038,7 @@ impl Default for BlockConnectionOptions {
 /// Four symmetric adjacency matrices for overall connectivity and each axis-specific match.
 pub fn block_connection_matrix(
     blocks: &[Block],
-    outer_faces: &[FaceDict],
+    outer_faces: &[FaceRecord],
     tol: f64,
     options: BlockConnectionOptions,
 ) -> (Vec<Vec<i8>>, Vec<Vec<i8>>, Vec<Vec<i8>>, Vec<Vec<i8>>) {
@@ -1073,7 +1069,7 @@ pub fn block_connection_matrix(
                 .collect();
         }
     } else {
-        for face in outer_face_dict_to_list(&reduced, outer_faces, gcd) {
+        for face in outer_face_records_to_list(&reduced, outer_faces, gcd) {
             if let Some(idx) = face.block_index() {
                 if idx < faces_by_block.len() {
                     faces_by_block[idx].push(face);
@@ -1344,12 +1340,12 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 /// Tuple containing serialized faces and raw face objects for the lower and upper planes.
 pub fn find_bounding_faces(
     blocks: &[Block],
-    outer_faces_dicts: &[FaceDict],
+    outer_faces_records: &[FaceRecord],
     direction: &str,
     side: &str,
     tol_rel: f64,
     node_tol_xyz: f64,
-) -> (Vec<FaceDict>, Vec<FaceDict>, Vec<Face>, Vec<Face>) {
+) -> (Vec<FaceRecord>, Vec<FaceRecord>, Vec<Face>, Vec<Face>) {
     if blocks.is_empty() {
         return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     }
@@ -1369,7 +1365,7 @@ pub fn find_bounding_faces(
         .unwrap_or(1);
     let reduced = reduce_blocks(blocks, gcd);
 
-    let outer_faces = if outer_faces_dicts.is_empty() {
+    let outer_faces = if outer_faces_records.is_empty() {
         reduced
             .iter()
             .enumerate()
@@ -1382,7 +1378,7 @@ pub fn find_bounding_faces(
             })
             .collect::<Vec<_>>()
     } else {
-        outer_face_dict_to_list(&reduced, outer_faces_dicts, gcd)
+        outer_face_records_to_list(&reduced, outer_faces_records, gcd)
     };
 
     let axis_range = global_axis_bounds(&reduced, axis).unwrap_or((0.0, 0.0));
@@ -1398,8 +1394,8 @@ pub fn find_bounding_faces(
         upper = collect_boundary_faces(&outer_faces, &reduced, axis, false, tol_abs, node_tol_xyz);
     }
 
-    let lower_export = lower.iter().map(Face::to_dict).collect();
-    let upper_export = upper.iter().map(Face::to_dict).collect();
+    let lower_export = lower.iter().map(Face::to_record).collect();
+    let upper_export = upper.iter().map(Face::to_record).collect();
     (lower_export, upper_export, lower, upper)
 }
 
@@ -1629,26 +1625,23 @@ pub fn common_neighbor(
         .copied()
 }
 
-/// Convert matched-face dictionaries into an adjacency map.
+/// Convert face matches into an adjacency map.
 ///
 /// # Arguments
-/// * `connectivities` - Matched face descriptions (Python-style dictionaries).
+/// * `connectivities` - Matched face descriptions (block1/block2 pairings).
 ///
 /// # Returns
 /// Undirected adjacency map between block indices.
-pub fn build_connectivity_graph(
-    connectivities: &[MatchedFaceDict],
-) -> HashMap<usize, HashSet<usize>> {
+pub fn build_connectivity_graph(connectivities: &[FaceMatch]) -> HashMap<usize, HashSet<usize>> {
     let mut graph: HashMap<usize, HashSet<usize>> = HashMap::new();
     for pair in connectivities {
-        let Some(block1) = pair.get("block1").and_then(|d| d.get("block_index")) else {
+        let block1 = pair.block1.block_index;
+        let block2 = pair.block2.block_index;
+        if block1 == usize::MAX || block2 == usize::MAX {
             continue;
-        };
-        let Some(block2) = pair.get("block2").and_then(|d| d.get("block_index")) else {
-            continue;
-        };
-        graph.entry(*block1).or_default().insert(*block2);
-        graph.entry(*block2).or_default().insert(*block1);
+        }
+        graph.entry(block1).or_default().insert(block2);
+        graph.entry(block2).or_default().insert(block1);
     }
     graph
 }

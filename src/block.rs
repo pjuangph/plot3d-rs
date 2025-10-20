@@ -93,4 +93,34 @@ impl Block {
         let (x, y, z) = self.xyz(i, j, k);
         println!("XYZ at (i={i}, j={j}, k={k}) is ({x:.6}, {y:.6}, {z:.6})");
     }
+
+    pub fn shifted(&self, amount: f64, axis: char) -> Block {
+        let mut new = self.clone();
+        new.shift_in_place(amount, axis);
+        new
+    }
+
+    pub fn shift_in_place(&mut self, amount: f64, axis: char) {
+        if amount == 0.0 {
+            return;
+        }
+        match axis.to_ascii_lowercase() {
+            'x' => {
+                for v in &mut self.x {
+                    *v += amount;
+                }
+            }
+            'y' => {
+                for v in &mut self.y {
+                    *v += amount;
+                }
+            }
+            'z' => {
+                for v in &mut self.z {
+                    *v += amount;
+                }
+            }
+            _ => {}
+        }
+    }
 }

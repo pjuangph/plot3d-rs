@@ -85,6 +85,62 @@ impl FaceRecord {
             id: None,
         })
     }
+
+    /// Construct a record from a Face instance.
+    pub fn from_face(face: &crate::block_face_functions::Face) -> Self {
+        Self {
+            block_index: face.block_index().unwrap_or(usize::MAX),
+            imin: face.imin(),
+            jmin: face.jmin(),
+            kmin: face.kmin(),
+            imax: face.imax(),
+            jmax: face.jmax(),
+            kmax: face.kmax(),
+            id: face.id(),
+        }
+    }
+
+    /// Scale the index ranges by `factor`.
+    pub fn scale_indices(&mut self, factor: usize) {
+        if factor <= 1 {
+            return;
+        }
+        self.imin *= factor;
+        self.jmin *= factor;
+        self.kmin *= factor;
+        self.imax *= factor;
+        self.jmax *= factor;
+        self.kmax *= factor;
+    }
+
+    /// Reduce the index ranges by `divisor`.
+    pub fn divide_indices(&mut self, divisor: usize) {
+        if divisor <= 1 {
+            return;
+        }
+        self.imin /= divisor;
+        self.jmin /= divisor;
+        self.kmin /= divisor;
+        self.imax /= divisor;
+        self.jmax /= divisor;
+        self.kmax /= divisor;
+    }
+
+    /// Reconstruct a Face from this record using the provided blocks.
+    pub fn to_face(
+        &self,
+        blocks: &[crate::block::Block],
+    ) -> Option<crate::block_face_functions::Face> {
+        let block = blocks.get(self.block_index)?;
+        let mut face = crate::block_face_functions::create_face_from_diagonals(
+            block, self.imin, self.jmin, self.kmin, self.imax, self.jmax, self.kmax,
+        );
+        face.set_block_index(self.block_index);
+        if let Some(id) = self.id {
+            face.set_id(id);
+        }
+        Some(face)
+    }
 }
 
 /// Helper trait to print summaries of face records.
@@ -125,6 +181,20 @@ pub struct FaceMatch {
     pub block1: FaceRecord,
     pub block2: FaceRecord,
     pub points: Vec<MatchPoint>,
+}
+
+impl FaceMatch {
+    /// Downscale both participating face records by `divisor`.
+    pub fn divide_indices(&mut self, divisor: usize) {
+        self.block1.divide_indices(divisor);
+        self.block2.divide_indices(divisor);
+    }
+
+    /// Upscale both participating face records by `factor`.
+    pub fn scale_indices(&mut self, factor: usize) {
+        self.block1.scale_indices(factor);
+        self.block2.scale_indices(factor);
+    }
 }
 
 /// Helper trait to print summaries of face matches.

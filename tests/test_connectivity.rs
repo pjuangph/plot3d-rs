@@ -1,4 +1,6 @@
-use plot3d::{block_face_functions, read_plot3d_ascii, connectivity_fast, FaceMatchPrinter, FaceRecordTraits};
+use plot3d::{
+    block_face_functions, connectivity_fast, read_plot3d_ascii, FaceMatchPrinter, FaceRecordTraits,
+};
 #[test]
 fn test_connectivity() {
     // download mesh
