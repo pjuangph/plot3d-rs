@@ -3,7 +3,7 @@ use plot3d::{
 };
 
 #[test]
-fn read_write_fortran_binary_roundtrip() {
+fn test_read_write_roundtrip() {
     // download mesh
     let url = "https://nasa-public-data.s3.amazonaws.com/plot3d_utilities/VSPT_ASCII.xyz";
     let ascii_path = "VSPT_ASCII.xyz";

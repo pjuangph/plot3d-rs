@@ -1,6 +1,4 @@
-use plot3d::{
-    block_face_functions, connectivity_fast, read_plot3d_ascii, FaceMatchPrinter, FaceRecordTraits,
-};
+use plot3d::{block_face_functions, connectivity_fast, read_plot3d_ascii, FaceRecord};
 #[test]
 fn test_connectivity() {
     // download mesh
@@ -41,6 +39,50 @@ fn test_connectivity() {
 
     // // Find Connectivity
     let (matches, outer_faces) = connectivity_fast(&blocks);
-    matches.print();
-    outer_faces.print();
+
+    fn face_summary(face: &FaceRecord) -> (usize,usize,usize,usize,usize,usize,usize,Option<usize>) {
+        (
+            face.block_index,
+            face.imin,
+            face.jmin,
+            face.kmin,
+            face.imax,
+            face.jmax,
+            face.kmax,
+            face.id,
+        )
+    }
+
+    let matches_summary: Vec<_> = matches
+        .iter()
+        .map(|m| (face_summary(&m.block1), face_summary(&m.block2), m.points.len()))
+        .collect();
+
+    let expected_matches = vec![
+        (
+            (0, 128, 0, 32, 256, 100, 32, None),
+            (1, 40, 0, 0, 168, 100, 0, None),
+            858,
+        ),
+        (
+            (0, 0, 0, 0, 0, 100, 32, None),
+            (0, 256, 0, 0, 256, 100, 32, None),
+            0,
+        ),
+    ];
+    assert_eq!(matches_summary, expected_matches);
+
+    let outer_faces_summary: Vec<_> = outer_faces.iter().map(face_summary).collect();
+    let expected_outer_faces = vec![
+        (0, 0, 0, 0, 256, 0, 32, Some(1)),
+        (0, 0, 100, 0, 256, 100, 32, Some(2)),
+        (0, 0, 0, 0, 256, 100, 0, Some(3)),
+        (0, 0, 0, 32, 128, 100, 32, Some(4)),
+        (1, 268, 0, 0, 268, 100, 52, Some(5)),
+        (1, 0, 0, 0, 268, 0, 52, Some(6)),
+        (1, 0, 100, 0, 268, 100, 52, Some(7)),
+        (1, 0, 0, 52, 268, 100, 52, Some(8)),
+        (1, 0, 0, 0, 40, 100, 0, Some(9)),
+    ];
+    assert_eq!(outer_faces_summary, expected_outer_faces);
 }

@@ -59,7 +59,7 @@ pub struct PeriodicPair {
 }
 
 /// Detect rotational periodicity after reducing grids by the minimum shared GCD.
-pub fn periodicity_fast(
+pub fn rotational_periodicity_fast(
     blocks: &[Block],
     outer_faces: &[FaceRecord],
     matched_faces: &[FaceMatch],
@@ -91,7 +91,7 @@ pub fn periodicity_fast(
     }
 
     let (mut periodic_export, mut outer_export, mut periodic_pairs, mut outer_faces_all) =
-        periodicity(
+        rotational_periodicity(
             &reduced_blocks,
             &outer_scaled,
             &matched_scaled,
@@ -118,7 +118,7 @@ pub fn periodicity_fast(
         scale_face_indices(face, gcd_to_use);
     }
 
-    (
+    return (
         periodic_export,
         outer_export,
         periodic_pairs,
@@ -127,7 +127,7 @@ pub fn periodicity_fast(
 }
 
 /// Identify rotationally periodic face pairs without pre-scaling the mesh.
-pub fn periodicity(
+pub fn rotational_periodicity(
     blocks: &[Block],
     outer_faces: &[FaceRecord],
     matched_faces: &[FaceMatch],

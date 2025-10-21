@@ -15,8 +15,8 @@ pub use connectivity::{
 };
 pub use read::{read_plot3d_ascii, read_plot3d_binary, BinaryFormat, FloatPrecision};
 pub use rotational_periodicity::{
-    create_rotation_matrix, periodicity, periodicity_fast, rotate_block_with_matrix,
-    rotated_periodicity, PeriodicPair, PeriodicPairExport,
+    create_rotation_matrix, rotational_periodicity, rotational_periodicity_fast,
+    rotate_block_with_matrix, rotated_periodicity, PeriodicPair, PeriodicPairExport,
 };
 pub use translational_periodicity::{
     translational_periodicity, TranslationalPair, TranslationalPairExport,

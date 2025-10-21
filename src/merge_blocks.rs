@@ -12,6 +12,12 @@ use crate::{
 pub type CombinedBlocks = (Vec<Block>, Vec<usize>);
 
 /// Merge two compatible blocks by aligning and stacking matched faces.
+///
+/// This is a fairly literal translation of the Python logic. Given a face pair
+/// reported by `find_matching_faces`, we permute/flip the second block so the
+/// matching faces line up, ensure both blocks increase in the same physical
+/// direction along the stacking axis, trim the overlapping slice, then
+/// concatenate before re-standardising orientation.
 pub fn combine_2_blocks_mixed_pairing(block1: &Block, block2: &Block, tol: f64) -> Block {
     let Some((face1, face2, (flip_ud, flip_lr))) = find_matching_faces(block1, block2, tol) else {
         return block1.clone();
@@ -52,6 +58,12 @@ pub fn combine_2_blocks_mixed_pairing(block1: &Block, block2: &Block, tol: f64) 
 }
 
 /// Attempt to merge as many blocks as possible from an initial set.
+///
+/// Starting from the provided block list (typically ≤ 8 items), this makes
+/// repeated passes trying to merge any pair whose faces match. The search is
+/// greedy, mirroring the original Python helper: once a pair is merged it is
+/// replaced by the new block and the pass restarts until no further reductions
+/// occur or `max_tries` is hit.
 pub fn combine_blocks_mixed_pairs(
     blocks: &[Block],
     tol: f64,
@@ -105,6 +117,12 @@ pub fn combine_blocks_mixed_pairs(
 }
 
 /// Merge all discoverable n×n×n cube groupings using connectivity data.
+///
+/// `connectivities` should be the face matches returned by `connectivity`/
+/// `connectivity_fast`. The routine builds a graph, performs BFS to locate
+/// candidate cube groupings (`cube_size^3` nodes), merges their blocks using
+/// `combine_blocks_mixed_pairs`, and keeps track of which original indices fed
+/// each merged component.
 pub fn combine_nxnxn_cubes_mixed_pairs(
     blocks: &[Block],
     connectivities: &[FaceMatch],
@@ -195,6 +213,8 @@ pub fn combine_nxnxn_cubes_mixed_pairs(
     merged_groups
 }
 
+/// Perform a breadth-first search from `seed` to find a cube-sized group that
+/// has not yet been merged or marked as used.
 fn find_nxnxn_group(
     seed: usize,
     graph: &HashMap<usize, HashSet<usize>>,
@@ -229,6 +249,7 @@ fn find_nxnxn_group(
     }
 }
 
+/// Map a face name to its corresponding axis (0/1/2) and sign direction.
 fn face_axis_info(face: &str) -> (usize, i32) {
     match face {
         "imin" => (0, -1),
@@ -241,6 +262,7 @@ fn face_axis_info(face: &str) -> (usize, i32) {
     }
 }
 
+/// Reorder the block axes according to `perm`, returning a new block.
 fn permute_block_axes(block: &Block, perm: [usize; 3]) -> Block {
     let dims = [block.imax, block.jmax, block.kmax];
     let new_dims = [
@@ -271,6 +293,7 @@ fn permute_block_axes(block: &Block, perm: [usize; 3]) -> Block {
     Block::new(new_dims[0], new_dims[1], new_dims[2], x, y, z)
 }
 
+/// Apply the up/down and left/right flips implied by `flip_ud`/`flip_lr`.
 fn apply_face_flips(block: &Block, face: &str, flip_ud: bool, flip_lr: bool) -> Block {
     let mut result = block.clone();
     match face {
@@ -303,6 +326,7 @@ fn apply_face_flips(block: &Block, face: &str, flip_ud: bool, flip_lr: bool) -> 
     result
 }
 
+/// Determine which coordinate changes the most along `axis`.
 fn dominant_step(block: &Block, axis: usize) -> f64 {
     let steps = [
         coordinate_step(block, axis, 0),
@@ -316,6 +340,8 @@ fn dominant_step(block: &Block, axis: usize) -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Compute the signed step between the first and last plane along `axis`
+/// for the requested coordinate component (0 → X, 1 → Y, 2 → Z).
 fn coordinate_step(block: &Block, axis: usize, component: usize) -> f64 {
     let dims = [block.imax, block.jmax, block.kmax];
     if dims[axis] <= 1 {
@@ -338,6 +364,7 @@ fn component_value(block: &Block, idx: [usize; 3], component: usize) -> f64 {
     }
 }
 
+/// Create a copy of the block with the specified axis reversed.
 fn flip_block_axis(block: &Block, axis: usize) -> Block {
     let dims = [block.imax, block.jmax, block.kmax];
     let mut x = vec![0.0; block.npoints()];
@@ -361,6 +388,7 @@ fn flip_block_axis(block: &Block, axis: usize) -> Block {
     Block::new(dims[0], dims[1], dims[2], x, y, z)
 }
 
+/// Drop the overlapping slice along `axis` (front or back) before concatenation.
 fn trim_block_along_axis(block: &Block, axis: usize, drop_first: bool) -> Block {
     let dims = [block.imax, block.jmax, block.kmax];
     if dims[axis] <= 1 {
@@ -391,6 +419,7 @@ fn trim_block_along_axis(block: &Block, axis: usize, drop_first: bool) -> Block 
     Block::new(new_dims[0], new_dims[1], new_dims[2], x, y, z)
 }
 
+/// Concatenate two blocks along `axis`, assuming matching cross-sections.
 fn concat_blocks_along_axis(a: &Block, b: &Block, axis: usize) -> Block {
     let dims_a = [a.imax, a.jmax, a.kmax];
     let dims_b = [b.imax, b.jmax, b.kmax];
