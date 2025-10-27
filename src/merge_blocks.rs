@@ -64,11 +64,7 @@ pub fn combine_2_blocks_mixed_pairing(block1: &Block, block2: &Block, tol: f64) 
 /// greedy, mirroring the original Python helper: once a pair is merged it is
 /// replaced by the new block and the pass restarts until no further reductions
 /// occur or `max_tries` is hit.
-pub fn combine_blocks_mixed_pairs(
-    blocks: &[Block],
-    tol: f64,
-    max_tries: usize,
-) -> CombinedBlocks {
+pub fn combine_blocks_mixed_pairs(blocks: &[Block], tol: f64, max_tries: usize) -> CombinedBlocks {
     let mut merged_blocks: Vec<Block> = blocks.to_vec();
     let mut tries = 0usize;
 
@@ -166,7 +162,8 @@ pub fn combine_nxnxn_cubes_mixed_pairs(
             let mut sorted_group: Vec<usize> = group.iter().copied().collect();
             sorted_group.sort_unstable();
 
-            let group_blocks: Vec<Block> = sorted_group.iter().map(|&i| blocks[i].clone()).collect();
+            let group_blocks: Vec<Block> =
+                sorted_group.iter().map(|&i| blocks[i].clone()).collect();
             let (partial_merges, local_indices) =
                 combine_blocks_mixed_pairs(&group_blocks, tol, cube_size);
 
@@ -265,11 +262,7 @@ fn face_axis_info(face: &str) -> (usize, i32) {
 /// Reorder the block axes according to `perm`, returning a new block.
 fn permute_block_axes(block: &Block, perm: [usize; 3]) -> Block {
     let dims = [block.imax, block.jmax, block.kmax];
-    let new_dims = [
-        dims[perm[0]],
-        dims[perm[1]],
-        dims[perm[2]],
-    ];
+    let new_dims = [dims[perm[0]], dims[perm[1]], dims[perm[2]]];
     let mut x = vec![0.0; new_dims[0] * new_dims[1] * new_dims[2]];
     let mut y = x.clone();
     let mut z = x.clone();

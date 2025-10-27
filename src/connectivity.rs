@@ -271,6 +271,19 @@ fn face_nodes(face: &Face, block: &Block) -> Vec<FaceNode> {
     for &i in &i_vals {
         for &j in &j_vals {
             for &k in &k_vals {
+                if !(i < block.imax && j < block.jmax && k < block.kmax) {
+                    eprintln!(
+                        "face_nodes index out of bounds: face {:?}, attempting ({}, {}, {}), block dims ({}, {}, {})",
+                        face,
+                        i,
+                        j,
+                        k,
+                        block.imax,
+                        block.jmax,
+                        block.kmax
+                    );
+                    continue;
+                }
                 let (x, y, z) = block.xyz(i, j, k);
                 nodes.push(FaceNode {
                     i,
@@ -718,23 +731,38 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
     }
     for faces in by_block.values() {
         for (a_idx, face_a) in faces.iter().enumerate() {
-            let key_a = face_a.index_key();
+            let dims_a = [
+                face_a.imin(),
+                face_a.jmin(),
+                face_a.kmin(),
+                face_a.imax(),
+                face_a.jmax(),
+                face_a.kmax(),
+            ];
             for (b_idx, face_b) in faces.iter().enumerate() {
                 if a_idx == b_idx {
                     continue;
                 }
-                let key_b = face_b.index_key();
-                let same = key_a.0 == key_b.0
-                    && key_a.2 == key_b.2
-                    && key_a.3 == key_b.3
-                    && key_a.5 == key_b.5
-                    && key_a.6 == key_b.6;
-                if same {
-                    if face_b.diagonal_length() > face_a.diagonal_length() {
-                        outer_faces_to_remove.insert(key_b);
+                let dims_b = [
+                    face_b.imin(),
+                    face_b.jmin(),
+                    face_b.kmin(),
+                    face_b.imax(),
+                    face_b.jmax(),
+                    face_b.kmax(),
+                ];
+                let equal_components = dims_a
+                    .iter()
+                    .zip(dims_b.iter())
+                    .filter(|(a, b)| a == b)
+                    .count();
+                if equal_components == 5 {
+                    let remove_key = if face_b.diagonal_length() > face_a.diagonal_length() {
+                        face_b.index_key()
                     } else {
-                        outer_faces_to_remove.insert(key_a);
-                    }
+                        face_a.index_key()
+                    };
+                    outer_faces_to_remove.insert(remove_key);
                 }
             }
         }

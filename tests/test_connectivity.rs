@@ -40,7 +40,18 @@ fn test_connectivity() {
     // // Find Connectivity
     let (matches, outer_faces) = connectivity_fast(&blocks);
 
-    fn face_summary(face: &FaceRecord) -> (usize,usize,usize,usize,usize,usize,usize,Option<usize>) {
+    fn face_summary(
+        face: &FaceRecord,
+    ) -> (
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        Option<usize>,
+    ) {
         (
             face.block_index,
             face.imin,
@@ -55,7 +66,13 @@ fn test_connectivity() {
 
     let matches_summary: Vec<_> = matches
         .iter()
-        .map(|m| (face_summary(&m.block1), face_summary(&m.block2), m.points.len()))
+        .map(|m| {
+            (
+                face_summary(&m.block1),
+                face_summary(&m.block2),
+                m.points.len(),
+            )
+        })
         .collect();
 
     let expected_matches = vec![
@@ -78,11 +95,13 @@ fn test_connectivity() {
         (0, 0, 100, 0, 256, 100, 32, Some(2)),
         (0, 0, 0, 0, 256, 100, 0, Some(3)),
         (0, 0, 0, 32, 128, 100, 32, Some(4)),
-        (1, 268, 0, 0, 268, 100, 52, Some(5)),
-        (1, 0, 0, 0, 268, 0, 52, Some(6)),
-        (1, 0, 100, 0, 268, 100, 52, Some(7)),
-        (1, 0, 0, 52, 268, 100, 52, Some(8)),
-        (1, 0, 0, 0, 40, 100, 0, Some(9)),
+        (1, 0, 0, 0, 0, 100, 52, Some(5)),
+        (1, 268, 0, 0, 268, 100, 52, Some(6)),
+        (1, 0, 0, 0, 268, 0, 52, Some(7)),
+        (1, 0, 100, 0, 268, 100, 52, Some(8)),
+        (1, 0, 0, 52, 268, 100, 52, Some(9)),
+        (1, 0, 0, 0, 40, 100, 0, Some(10)),
+        (1, 168, 0, 0, 268, 100, 0, Some(11)),
     ];
     assert_eq!(outer_faces_summary, expected_outer_faces);
 }

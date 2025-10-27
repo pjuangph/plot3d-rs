@@ -1,5 +1,5 @@
 use plot3d::{
-    create_rotation_matrix, read_plot3d_ascii, rotate_block_with_matrix,
+    block, connectivity_fast, create_rotation_matrix, read_plot3d_ascii, rotate_block_with_matrix, rotated_periodicity, rotational_periodicity_fast, FaceMatchPrinter, FaceRecordTraits
 };
 
 #[test]
@@ -30,5 +30,20 @@ fn rotational_periodicity_test() {
 
     assert_eq!(rotated_blocks.len(), blocks.len() * copies);
 
-    
+    let (face_matches, outer_faces) = connectivity_fast(&blocks);
+
+    // face_matches.print();
+
+    let (periodic_faces, outer_faces_rotated) = rotated_periodicity(
+        &blocks,
+        &face_matches,
+        &outer_faces,
+        rotation_angle,
+        'x',
+        true,
+    );
+    println!("Printing Periodic faces");
+    periodic_faces.print();
+
+
 }

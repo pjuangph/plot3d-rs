@@ -1,4 +1,3 @@
-use serde::Serialize;
 use std::collections::HashSet;
 use std::f64::consts::PI;
 
@@ -40,25 +39,34 @@ pub fn create_rotation_matrix(angle: f64, axis: char) -> [[f64; 3]; 3] {
 }
 
 /// Rotate a block using a precomputed rotation matrix.
+///
+/// # Arguments
+/// * `block` - Source block supplying the original coordinates.
+/// * `rotation` - 3×3 rotation matrix in row-major order.
+///
+/// # Returns
+/// A new [`Block`] whose nodes are the rotated copy of `block`.
 pub fn rotate_block_with_matrix(block: &Block, rotation: [[f64; 3]; 3]) -> Block {
     crate::block_face_functions::rotate_block(block, rotation)
 }
 
 /// Exportable description of a periodic face pairing.
-#[derive(Clone, Debug, Serialize)]
-pub struct PeriodicPairExport {
-    pub block1: FaceRecord,
-    pub block2: FaceRecord,
-}
-
-/// In-memory face pairing with the original face objects retained.
-#[derive(Clone, Debug)]
-pub struct PeriodicPair {
-    pub face1: Face,
-    pub face2: Face,
-}
+pub type PeriodicPair = FaceMatch;
 
 /// Detect rotational periodicity after reducing grids by the minimum shared GCD.
+/// A more versatile version is [`rotated_periodicity`].
+///
+/// # Arguments
+/// * `blocks` - Full-resolution blocks that define the geometry.
+/// * `outer_faces` - Faces that remain exposed after connectivity processing.
+/// * `matched_faces` - Interfaces already known to match between blocks.
+/// * `periodic_direction` - Axis (`"i"`, `"j"`, or `"k"`) along which periodicity is expected.
+/// * `rotation_axis` - Axis of rotation (`'x'`, `'y'`, or `'z'`).
+/// * `nblades` - Number of periodic copies; controls the rotation increment.
+///
+/// # Returns
+/// Tuple of `(periodic_pairs, outer_faces)` where the first element lists periodic matches as
+/// [`PeriodicPair`] records and the second contains the remaining outer faces.
 pub fn rotational_periodicity_fast(
     blocks: &[Block],
     outer_faces: &[FaceRecord],
@@ -66,12 +74,7 @@ pub fn rotational_periodicity_fast(
     periodic_direction: &str,
     rotation_axis: char,
     nblades: usize,
-) -> (
-    Vec<PeriodicPairExport>,
-    Vec<FaceRecord>,
-    Vec<PeriodicPair>,
-    Vec<Face>,
-) {
+) -> (Vec<PeriodicPair>, Vec<FaceRecord>) {
     let mut gcds = Vec::new();
     for block in blocks {
         gcds.push(gcd_three(block.imax - 1, block.jmax - 1, block.kmax - 1));
@@ -90,56 +93,47 @@ pub fn rotational_periodicity_fast(
         dict.divide_indices(gcd_to_use);
     }
 
-    let (mut periodic_export, mut outer_export, mut periodic_pairs, mut outer_faces_all) =
-        rotational_periodicity(
-            &reduced_blocks,
-            &outer_scaled,
-            &matched_scaled,
-            periodic_direction,
-            rotation_axis,
-            nblades,
-        );
+    let (mut periodic_export, mut outer_export) = rotational_periodicity(
+        &reduced_blocks,
+        &matched_scaled,
+        &outer_scaled,
+        periodic_direction,
+        rotation_axis,
+        nblades,
+    );
 
     for rec in &mut periodic_export {
         rec.block1.scale_indices(gcd_to_use);
         rec.block2.scale_indices(gcd_to_use);
     }
 
-    for pair in &mut periodic_pairs {
-        scale_face_indices(&mut pair.face1, gcd_to_use);
-        scale_face_indices(&mut pair.face2, gcd_to_use);
-    }
-
     for dict in &mut outer_export {
         dict.scale_indices(gcd_to_use);
     }
 
-    for face in &mut outer_faces_all {
-        scale_face_indices(face, gcd_to_use);
-    }
-
-    return (
-        periodic_export,
-        outer_export,
-        periodic_pairs,
-        outer_faces_all,
-    )
+    return (periodic_export, outer_export);
 }
 
 /// Identify rotationally periodic face pairs without pre-scaling the mesh.
+///
+/// # Arguments
+/// * `blocks` - Blocks evaluated at their current resolution.
+/// * `matched_faces` - Pre-existing matched face records.
+/// * `outer_faces` - Remaining outer faces for each block.
+/// * `periodic_direction` - Axis (`"i"`, `"j"`, or `"k"`) that should stay constant across matches.
+/// * `rotation_axis` - Physical rotation axis (`'x'`, `'y'`, or `'z'`).
+/// * `nblades` - Number of equally spaced instances expected in the periodic set.
+///
+/// # Returns
+/// `(periodic_pairs, outer_faces)` containing the periodic matches and the filtered outer faces.
 pub fn rotational_periodicity(
     blocks: &[Block],
-    outer_faces: &[FaceRecord],
     matched_faces: &[FaceMatch],
+    outer_faces: &[FaceRecord],
     periodic_direction: &str,
     rotation_axis: char,
     nblades: usize,
-) -> (
-    Vec<PeriodicPairExport>,
-    Vec<FaceRecord>,
-    Vec<PeriodicPair>,
-    Vec<Face>,
-) {
+) -> (Vec<PeriodicPair>, Vec<FaceRecord>) {
     let rotation_angle = if nblades == 0 {
         0.0
     } else {
@@ -148,7 +142,6 @@ pub fn rotational_periodicity(
     let rot_forward = create_rotation_matrix(rotation_angle, rotation_axis);
     let rot_backward = create_rotation_matrix(-rotation_angle, rotation_axis);
 
-    let mut periodic_pairs = Vec::new();
     let mut periodic_exports = Vec::new();
 
     let mut outer_faces_all = outer_face_records_to_list(blocks, outer_faces, 1);
@@ -164,7 +157,7 @@ pub fn rotational_periodicity(
 
         let mut removal_keys: Option<Vec<FaceKey>> = None;
         let mut new_splits: Vec<Face> = Vec::new();
-
+        // The ' is the loop label
         'outer_loop: for (idx_a, idx_b) in combos {
             if idx_a >= outer_faces_all.len() || idx_b >= outer_faces_all.len() {
                 continue;
@@ -199,13 +192,10 @@ pub fn rotational_periodicity(
                 }
                 seen_pair_keys.insert(pair_key);
                 removal_keys = Some(collect_removal_keys(&face_a, &face_b, &pair_faces));
-                periodic_exports.push(PeriodicPairExport {
+                periodic_exports.push(FaceMatch {
                     block1: FaceRecord::from_face(&pair_faces[0]),
                     block2: FaceRecord::from_face(&pair_faces[1]),
-                });
-                periodic_pairs.push(PeriodicPair {
-                    face1: pair_faces[0].clone(),
-                    face2: pair_faces[1].clone(),
+                    points: Vec::new(),
                 });
                 new_splits = splits;
                 changed = true;
@@ -221,13 +211,10 @@ pub fn rotational_periodicity(
                 }
                 seen_pair_keys.insert(pair_key);
                 removal_keys = Some(collect_removal_keys(&face_a, &face_b, &pair_faces));
-                periodic_exports.push(PeriodicPairExport {
+                periodic_exports.push(FaceMatch {
                     block1: FaceRecord::from_face(&pair_faces[0]),
                     block2: FaceRecord::from_face(&pair_faces[1]),
-                });
-                periodic_pairs.push(PeriodicPair {
-                    face1: pair_faces[0].clone(),
-                    face2: pair_faces[1].clone(),
+                    points: Vec::new(),
                 });
                 new_splits = splits;
                 changed = true;
@@ -254,15 +241,22 @@ pub fn rotational_periodicity(
         outer_exports.push(face.to_record());
     }
 
-    (
-        periodic_exports,
-        outer_exports,
-        periodic_pairs,
-        outer_faces_all,
-    )
+    (periodic_exports, outer_exports)
 }
 
 /// Rotate the entire mesh by an arbitrary angle and recover periodic matches.
+///
+/// # Arguments
+/// * `blocks` - Baseline blocks before rotation.
+/// * `matched_faces` - Known face matches between blocks.
+/// * `outer_faces` - Exposed faces supplied from connectivity.
+/// * `rotation_angle_deg` - Rotation angle in degrees applied to the candidate block.
+/// * `rotation_axis` - Axis about which the rotation occurs.
+/// * `reduce_mesh` - When `true`, down-sample the mesh by a shared GCD prior to matching.
+///
+/// # Returns
+/// `(periodic_pairs, outer_faces)` mirroring [`rotational_periodicity`], but driven by the supplied
+/// angle instead of the blade count.
 pub fn rotated_periodicity(
     blocks: &[Block],
     matched_faces: &[FaceMatch],
@@ -270,12 +264,7 @@ pub fn rotated_periodicity(
     rotation_angle_deg: f64,
     rotation_axis: char,
     reduce_mesh: bool,
-) -> (
-    Vec<PeriodicPairExport>,
-    Vec<FaceRecord>,
-    Vec<PeriodicPair>,
-    Vec<Face>,
-) {
+) -> (Vec<PeriodicPair>, Vec<FaceRecord>) {
     let mut gcd_to_use = 1usize;
     let mut working_blocks: Vec<Block> = blocks.to_vec();
     if reduce_mesh {
@@ -296,8 +285,19 @@ pub fn rotated_periodicity(
     let mut outer_faces_all = outer_face_records_to_list(&working_blocks, outer_faces, gcd_to_use);
     let matched_faces_all = match_faces_to_list(&working_blocks, matched_faces, gcd_to_use);
 
+    eprintln!(
+        "Initial outer faces count {} (block distribution: {:?})",
+        outer_faces_all.len(),
+        outer_faces_all
+            .iter()
+            .fold(std::collections::HashMap::new(), |mut acc, face| {
+                let idx = face.block_index().unwrap_or(usize::MAX);
+                *acc.entry(idx).or_insert(0usize) += 1;
+                acc
+            })
+    );
+
     let mut periodic_exports = Vec::new();
-    let mut periodic_pairs = Vec::new();
     let mut seen_pair_keys: HashSet<(FaceKey, FaceKey)> = HashSet::new();
     let mut non_matching: HashSet<(usize, usize)> = HashSet::new();
 
@@ -333,12 +333,56 @@ pub fn rotated_periodicity(
                 Some(idx) => idx,
                 None => continue,
             };
+            debug_assert_eq!(block_idx_a, face_a.block_index().unwrap());
+            debug_assert_eq!(block_idx_b, face_b.block_index().unwrap());
             if block_idx_a >= working_blocks.len() || block_idx_b >= working_blocks.len() {
                 continue;
             }
 
             let rotated_block = &rotated_blocks[block_idx_a];
             let base_block = &working_blocks[block_idx_b];
+
+            let check_face = |face: &Face, block: &Block| -> bool {
+                face.imin() < block.imax
+                    && face.imax() < block.imax
+                    && face.jmin() < block.jmax
+                    && face.jmax() < block.jmax
+                    && face.kmin() < block.kmax
+                    && face.kmax() < block.kmax
+            };
+            if !check_face(&face_a, rotated_block) || !check_face(&face_b, base_block) {
+                eprintln!(
+                    "Face index out of bounds before periodicity_check: block_idx_a {}, block_idx_b {}, face_a {:?} block dims ({}, {}, {}), face_b {:?} dims ({}, {}, {}), idx_a {}, idx_b {}",
+                    block_idx_a,
+                    block_idx_b,
+                    face_a,
+                    rotated_block.imax,
+                    rotated_block.jmax,
+                    rotated_block.kmax,
+                    face_b,
+                    base_block.imax,
+                    base_block.jmax,
+                    base_block.kmax,
+                    idx_a,
+                    idx_b
+                );
+                non_matching.insert((idx_a, idx_b));
+                continue;
+            }
+
+            eprintln!(
+                "Checking faces A block{} {:?} dims ({},{},{}) and B block{} {:?} dims ({},{},{})",
+                block_idx_a,
+                face_a,
+                rotated_block.imax,
+                rotated_block.jmax,
+                rotated_block.kmax,
+                block_idx_b,
+                face_b,
+                base_block.imax,
+                base_block.jmax,
+                base_block.kmax
+            );
 
             if let Some((pair_faces, splits)) =
                 periodicity_check(&face_a, &face_b, rotated_block, base_block)
@@ -349,13 +393,10 @@ pub fn rotated_periodicity(
                 }
                 seen_pair_keys.insert(pair_key);
                 removal_keys = Some(collect_removal_keys(&face_a, &face_b, &pair_faces));
-                periodic_exports.push(PeriodicPairExport {
+                periodic_exports.push(FaceMatch {
                     block1: FaceRecord::from_face(&pair_faces[0]),
                     block2: FaceRecord::from_face(&pair_faces[1]),
-                });
-                periodic_pairs.push(PeriodicPair {
-                    face1: pair_faces[0].clone(),
-                    face2: pair_faces[1].clone(),
+                    points: Vec::new(),
                 });
                 new_splits = splits;
                 changed = true;
@@ -374,6 +415,7 @@ pub fn rotated_periodicity(
                     .collect();
             }
             outer_faces_all.extend(new_splits.drain(..));
+            non_matching.clear();
         }
     }
 
@@ -387,29 +429,54 @@ pub fn rotated_periodicity(
             rec.block1.scale_indices(gcd_to_use);
             rec.block2.scale_indices(gcd_to_use);
         }
-        for pair in &mut periodic_pairs {
-            scale_face_indices(&mut pair.face1, gcd_to_use);
-            scale_face_indices(&mut pair.face2, gcd_to_use);
-        }
         for dict in &mut outer_export {
             dict.scale_indices(gcd_to_use);
         }
-        for face in &mut outer_faces_all {
-            scale_face_indices(face, gcd_to_use);
-        }
     }
 
-    (
-        periodic_exports,
-        outer_export,
-        periodic_pairs,
-        outer_faces_all,
-    )
+    eprintln!("periodic_exports len {}", periodic_exports.len());
+    for (idx, m) in periodic_exports.iter().enumerate() {
+        eprintln!(
+            "pair #{idx}: block{} [{},{},{} -> {},{},{}] vs block{} [{},{},{} -> {},{},{}]",
+            m.block1.block_index,
+            m.block1.imin,
+            m.block1.jmin,
+            m.block1.kmin,
+            m.block1.imax,
+            m.block1.jmax,
+            m.block1.kmax,
+            m.block2.block_index,
+            m.block2.imin,
+            m.block2.jmin,
+            m.block2.kmin,
+            m.block2.imax,
+            m.block2.jmax,
+            m.block2.kmax
+        );
+    }
+    eprintln!(
+        "outer_export len {} (distribution {:?})",
+        outer_export.len(),
+        outer_export
+            .iter()
+            .fold(std::collections::HashMap::new(), |mut acc, face| {
+                *acc.entry(face.block_index).or_insert(0usize) += 1;
+                acc
+            })
+    );
+
+    (periodic_exports, outer_export)
 }
 
 type FaceKey = (usize, usize, usize, usize, usize, usize, usize);
 
 /// Build a comparable key from face indices and block identifier.
+///
+/// # Arguments
+/// * `face` - Face used to derive the key.
+///
+/// # Returns
+/// Tuple identifying the face location and owning block.
 fn face_key(face: &Face) -> FaceKey {
     (
         face.block_index().unwrap_or(usize::MAX),
@@ -423,6 +490,12 @@ fn face_key(face: &Face) -> FaceKey {
 }
 
 /// Order a pair of keys so the smallest always comes first.
+///
+/// # Arguments
+/// * `a`, `b` - Keys to order.
+///
+/// # Returns
+/// `(min, max)` ensuring deterministic ordering.
 fn ordered_pair(a: FaceKey, b: FaceKey) -> (FaceKey, FaceKey) {
     if a <= b {
         (a, b)
@@ -432,6 +505,13 @@ fn ordered_pair(a: FaceKey, b: FaceKey) -> (FaceKey, FaceKey) {
 }
 
 /// Check whether both faces are constant along the requested periodic direction.
+///
+/// # Arguments
+/// * `face_a`, `face_b` - Candidate faces to compare.
+/// * `direction` - Periodic direction string (`"i"`, `"j"`, or `"k"`).
+///
+/// # Returns
+/// `true` when both faces hold constant indices along `direction`.
 fn faces_support_direction(face_a: &Face, face_b: &Face, direction: &str) -> bool {
     let dir = direction.trim().to_ascii_lowercase();
     match dir.as_str() {
@@ -443,6 +523,12 @@ fn faces_support_direction(face_a: &Face, face_b: &Face, direction: &str) -> boo
 }
 
 /// Returns `true` when both faces hold a constant index along at least one axis.
+///
+/// # Arguments
+/// * `face_a`, `face_b` - Faces tested for flatness along any axis.
+///
+/// # Returns
+/// `true` when the faces are planar along a shared axis.
 fn faces_support_any(face_a: &Face, face_b: &Face) -> bool {
     (face_a.imin() == face_a.imax() && face_b.imin() == face_b.imax())
         || (face_a.jmin() == face_a.jmax() && face_b.jmin() == face_b.jmax())
@@ -450,6 +536,13 @@ fn faces_support_any(face_a: &Face, face_b: &Face) -> bool {
 }
 
 /// Gather all face keys involved in a successful periodic match for removal.
+///
+/// # Arguments
+/// * `face_a`, `face_b` - Faces that triggered the match.
+/// * `pair_faces` - Matched faces returned by [`periodicity_check`].
+///
+/// # Returns
+/// Sorted, deduplicated list of keys to remove from future consideration.
 fn collect_removal_keys(face_a: &Face, face_b: &Face, pair_faces: &[Face]) -> Vec<FaceKey> {
     let mut keys = Vec::new();
     keys.push(face_key(face_a));
@@ -463,12 +556,33 @@ fn collect_removal_keys(face_a: &Face, face_b: &Face, pair_faces: &[Face]) -> Ve
 }
 
 /// Attempt to intersect two faces after rotation and return the matching subfaces when successful.
+///
+/// # Arguments
+/// * `face1`, `face2` - Faces inspected for overlap.
+/// * `block1`, `block2` - Blocks providing geometric detail for each face.
+///
+/// # Returns
+/// `Some((matched_faces, splits))` when an overlap exists, where `matched_faces` contains the
+/// oriented interface pair and `splits` lists any child faces created during splitting. Returns
+/// `None` when the faces do not meet the matching criteria.
 fn periodicity_check(
     face1: &Face,
     face2: &Face,
     block1: &Block,
     block2: &Block,
 ) -> Option<(Vec<Face>, Vec<Face>)> {
+    debug_assert!(face1.imin() < block1.imax);
+    debug_assert!(face1.jmin() < block1.jmax);
+    debug_assert!(face1.kmin() < block1.kmax);
+    debug_assert!(face1.imax() < block1.imax);
+    debug_assert!(face1.jmax() < block1.jmax);
+    debug_assert!(face1.kmax() < block1.kmax);
+    debug_assert!(face2.imin() < block2.imax);
+    debug_assert!(face2.jmin() < block2.jmax);
+    debug_assert!(face2.kmin() < block2.kmax);
+    debug_assert!(face2.imax() < block2.imax);
+    debug_assert!(face2.jmax() < block2.jmax);
+    debug_assert!(face2.kmax() < block2.kmax);
     let mut face_a = face1.clone();
     let mut face_b = face2.clone();
     let mut swapped = false;
@@ -514,6 +628,13 @@ fn periodicity_check(
 }
 
 /// Determine the bounds of matching points for either the first or second face.
+///
+/// # Arguments
+/// * `matches` - Point-to-point matches returned by connectivity.
+/// * `first` - When `true`, consider the first face indices; otherwise use the second.
+///
+/// # Returns
+/// `(imin, imax, jmin, jmax, kmin, kmax)` describing the bounding box.
 fn match_bounds(
     matches: &[crate::connectivity::MatchPoint],
     first: bool,
@@ -540,12 +661,9 @@ fn match_bounds(
     (imin, imax, jmin, jmax, kmin, kmax)
 }
 
-fn scale_face_indices(face: &mut Face, factor: usize) {
-    face.scale_indices(factor);
-}
-
 const MATCH_TOL: f64 = 1e-6;
 
+/// Compute the greatest common divisor of two numbers.
 fn gcd_two(mut a: usize, mut b: usize) -> usize {
     while b != 0 {
         let r = a % b;
@@ -555,10 +673,18 @@ fn gcd_two(mut a: usize, mut b: usize) -> usize {
     a
 }
 
+/// Compute the greatest common divisor of three numbers.
 fn gcd_three(a: usize, b: usize, c: usize) -> usize {
     gcd_two(gcd_two(a, b), c)
 }
 
+/// Generate all permutations `(i, j)` for `len`, excluding pairs where `i == j`.
+///
+/// # Arguments
+/// * `len` - Number of elements to permute.
+///
+/// # Returns
+/// Vector of ordered index pairs suitable for exhaustive comparisons.
 fn permutations_indices(len: usize) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     for i in 0..len {

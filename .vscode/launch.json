@@ -31,6 +31,23 @@
             ],
             "cwd": "${workspaceFolder}",
             "env": { "RUST_BACKTRACE": "1" }
+        },
+        {
+            "name": "Debug rotational periodicity",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": ["test", "--no-run", "--lib", "--package", "plot3d"]
+            },
+            "program": "${cargo:program}",
+            "args": [
+                "rotational_periodicity_test",
+                "--nocapture",
+                "--test-threads=1",
+                "--exact"
+            ],
+            "cwd": "${workspaceFolder}",
+            "env": { "RUST_BACKTRACE": "1" }
         }
   ]
 }

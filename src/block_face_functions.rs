@@ -207,6 +207,7 @@ impl Face {
                 if matched[idx] {
                     continue;
                 }
+                // deference and copy the values of v and o
                 if distance(*v, *o) <= tol {
                     matched[idx] = true;
                     found = true;
