@@ -272,16 +272,6 @@ fn face_nodes(face: &Face, block: &Block) -> Vec<FaceNode> {
         for &j in &j_vals {
             for &k in &k_vals {
                 if !(i < block.imax && j < block.jmax && k < block.kmax) {
-                    eprintln!(
-                        "face_nodes index out of bounds: face {:?}, attempting ({}, {}, {}), block dims ({}, {}, {})",
-                        face,
-                        i,
-                        j,
-                        k,
-                        block.imax,
-                        block.jmax,
-                        block.kmax
-                    );
                     continue;
                 }
                 let (x, y, z) = block.xyz(i, j, k);

@@ -142,7 +142,8 @@ pub fn rotational_periodicity(
     let rot_forward = create_rotation_matrix(rotation_angle, rotation_axis);
     let rot_backward = create_rotation_matrix(-rotation_angle, rotation_axis);
 
-    let mut periodic_exports = Vec::new();
+    let mut periodic_pairs: Vec<(Face, Face)> = Vec::new();
+    let mut periodic_exports: Vec<FaceMatch> = Vec::new();
 
     let mut outer_faces_all = outer_face_records_to_list(blocks, outer_faces, 1);
     let matched_faces_all = match_faces_to_list(blocks, matched_faces, 1);
@@ -192,6 +193,7 @@ pub fn rotational_periodicity(
                 }
                 seen_pair_keys.insert(pair_key);
                 removal_keys = Some(collect_removal_keys(&face_a, &face_b, &pair_faces));
+                periodic_pairs.push((pair_faces[0].clone(), pair_faces[1].clone()));
                 periodic_exports.push(FaceMatch {
                     block1: FaceRecord::from_face(&pair_faces[0]),
                     block2: FaceRecord::from_face(&pair_faces[1]),
@@ -211,6 +213,7 @@ pub fn rotational_periodicity(
                 }
                 seen_pair_keys.insert(pair_key);
                 removal_keys = Some(collect_removal_keys(&face_a, &face_b, &pair_faces));
+                periodic_pairs.push((pair_faces[0].clone(), pair_faces[1].clone()));
                 periodic_exports.push(FaceMatch {
                     block1: FaceRecord::from_face(&pair_faces[0]),
                     block2: FaceRecord::from_face(&pair_faces[1]),
@@ -285,32 +288,19 @@ pub fn rotated_periodicity(
     let mut outer_faces_all = outer_face_records_to_list(&working_blocks, outer_faces, gcd_to_use);
     let matched_faces_all = match_faces_to_list(&working_blocks, matched_faces, gcd_to_use);
 
-    eprintln!(
-        "Initial outer faces count {} (block distribution: {:?})",
-        outer_faces_all.len(),
-        outer_faces_all
-            .iter()
-            .fold(std::collections::HashMap::new(), |mut acc, face| {
-                let idx = face.block_index().unwrap_or(usize::MAX);
-                *acc.entry(idx).or_insert(0usize) += 1;
-                acc
-            })
-    );
-
-    let mut periodic_exports = Vec::new();
-    let mut seen_pair_keys: HashSet<(FaceKey, FaceKey)> = HashSet::new();
+    let mut periodic_pairs: Vec<(Face, Face)> = Vec::new();
     let mut non_matching: HashSet<(usize, usize)> = HashSet::new();
 
-    let mut changed = true;
-    while changed {
-        changed = false;
-        let combos = permutations_indices(outer_faces_all.len())
+    let mut periodic_found = true;
+    while periodic_found {
+        periodic_found = false;
+        let combos: Vec<(usize, usize)> = permutations_indices(outer_faces_all.len())
             .into_iter()
             .filter(|pair| !non_matching.contains(pair))
-            .collect::<Vec<_>>();
+            .collect();
 
-        let mut removal_keys: Option<Vec<FaceKey>> = None;
-        let mut new_splits: Vec<Face> = Vec::new();
+        let mut removal_faces: Vec<Face> = Vec::new();
+        let mut split_faces: Vec<Face> = Vec::new();
 
         'outer_loop: for (idx_a, idx_b) in combos {
             if idx_a >= outer_faces_all.len() || idx_b >= outer_faces_all.len() {
@@ -333,8 +323,6 @@ pub fn rotated_periodicity(
                 Some(idx) => idx,
                 None => continue,
             };
-            debug_assert_eq!(block_idx_a, face_a.block_index().unwrap());
-            debug_assert_eq!(block_idx_b, face_b.block_index().unwrap());
             if block_idx_a >= working_blocks.len() || block_idx_b >= working_blocks.len() {
                 continue;
             }
@@ -342,7 +330,7 @@ pub fn rotated_periodicity(
             let rotated_block = &rotated_blocks[block_idx_a];
             let base_block = &working_blocks[block_idx_b];
 
-            let check_face = |face: &Face, block: &Block| -> bool {
+            let valid_face = |face: &Face, block: &Block| -> bool {
                 face.imin() < block.imax
                     && face.imax() < block.imax
                     && face.jmin() < block.jmax
@@ -350,77 +338,62 @@ pub fn rotated_periodicity(
                     && face.kmin() < block.kmax
                     && face.kmax() < block.kmax
             };
-            if !check_face(&face_a, rotated_block) || !check_face(&face_b, base_block) {
-                eprintln!(
-                    "Face index out of bounds before periodicity_check: block_idx_a {}, block_idx_b {}, face_a {:?} block dims ({}, {}, {}), face_b {:?} dims ({}, {}, {}), idx_a {}, idx_b {}",
-                    block_idx_a,
-                    block_idx_b,
-                    face_a,
-                    rotated_block.imax,
-                    rotated_block.jmax,
-                    rotated_block.kmax,
-                    face_b,
-                    base_block.imax,
-                    base_block.jmax,
-                    base_block.kmax,
-                    idx_a,
-                    idx_b
-                );
+            if !valid_face(&face_a, rotated_block) || !valid_face(&face_b, base_block) {
                 non_matching.insert((idx_a, idx_b));
                 continue;
             }
 
-            eprintln!(
-                "Checking faces A block{} {:?} dims ({},{},{}) and B block{} {:?} dims ({},{},{})",
-                block_idx_a,
-                face_a,
-                rotated_block.imax,
-                rotated_block.jmax,
-                rotated_block.kmax,
-                block_idx_b,
-                face_b,
-                base_block.imax,
-                base_block.jmax,
-                base_block.kmax
-            );
-
             if let Some((pair_faces, splits)) =
                 periodicity_check(&face_a, &face_b, rotated_block, base_block)
             {
-                let pair_key = ordered_pair(face_key(&pair_faces[0]), face_key(&pair_faces[1]));
-                if seen_pair_keys.contains(&pair_key) {
-                    continue;
-                }
-                seen_pair_keys.insert(pair_key);
-                removal_keys = Some(collect_removal_keys(&face_a, &face_b, &pair_faces));
-                periodic_exports.push(FaceMatch {
-                    block1: FaceRecord::from_face(&pair_faces[0]),
-                    block2: FaceRecord::from_face(&pair_faces[1]),
-                    points: Vec::new(),
-                });
-                new_splits = splits;
-                changed = true;
+                periodic_pairs.push((pair_faces[0].clone(), pair_faces[1].clone()));
+                removal_faces.push(face_a);
+                removal_faces.push(face_b);
+                removal_faces.extend(pair_faces.into_iter());
+                split_faces.extend(splits);
+                periodic_found = true;
                 break 'outer_loop;
             } else {
                 non_matching.insert((idx_a, idx_b));
             }
         }
 
-        if changed {
-            if let Some(keys) = removal_keys {
-                let removal: HashSet<FaceKey> = keys.into_iter().collect();
-                outer_faces_all = outer_faces_all
-                    .into_iter()
-                    .filter(|f| !removal.contains(&face_key(f)))
-                    .collect();
-            }
-            outer_faces_all.extend(new_splits.drain(..));
+        if periodic_found {
+            let removal_keys: HashSet<FaceKey> = removal_faces.iter().map(face_key).collect();
+            outer_faces_all = outer_faces_all
+                .into_iter()
+                .filter(|f| !removal_keys.contains(&face_key(f)))
+                .collect();
+            outer_faces_all.extend(split_faces.into_iter());
             non_matching.clear();
         }
     }
 
-    let matched_keys: HashSet<FaceKey> = matched_faces_all.iter().map(face_key).collect();
-    outer_faces_all.retain(|f| !matched_keys.contains(&face_key(f)));
+    let mut removal_keys: HashSet<FaceKey> = HashSet::new();
+    for (face_a, face_b) in &periodic_pairs {
+        removal_keys.insert(face_key(face_a));
+        removal_keys.insert(face_key(face_b));
+    }
+    for face in &matched_faces_all {
+        removal_keys.insert(face_key(face));
+    }
+    outer_faces_all.retain(|f| !removal_keys.contains(&face_key(f)));
+
+    // Remove duplicate periodic pairs (order-insensitive)
+    let mut dedup: HashSet<(FaceKey, FaceKey)> = HashSet::new();
+    periodic_pairs.retain(|(a, b)| {
+        let key = ordered_pair(face_key(a), face_key(b));
+        dedup.insert(key)
+    });
+
+    let mut periodic_exports: Vec<FaceMatch> = periodic_pairs
+        .into_iter()
+        .map(|(a, b)| FaceMatch {
+            block1: FaceRecord::from_face(&a),
+            block2: FaceRecord::from_face(&b),
+            points: Vec::new(),
+        })
+        .collect();
 
     let mut outer_export: Vec<FaceRecord> = outer_faces_all.iter().map(Face::to_record).collect();
 
@@ -433,37 +406,6 @@ pub fn rotated_periodicity(
             dict.scale_indices(gcd_to_use);
         }
     }
-
-    eprintln!("periodic_exports len {}", periodic_exports.len());
-    for (idx, m) in periodic_exports.iter().enumerate() {
-        eprintln!(
-            "pair #{idx}: block{} [{},{},{} -> {},{},{}] vs block{} [{},{},{} -> {},{},{}]",
-            m.block1.block_index,
-            m.block1.imin,
-            m.block1.jmin,
-            m.block1.kmin,
-            m.block1.imax,
-            m.block1.jmax,
-            m.block1.kmax,
-            m.block2.block_index,
-            m.block2.imin,
-            m.block2.jmin,
-            m.block2.kmin,
-            m.block2.imax,
-            m.block2.jmax,
-            m.block2.kmax
-        );
-    }
-    eprintln!(
-        "outer_export len {} (distribution {:?})",
-        outer_export.len(),
-        outer_export
-            .iter()
-            .fold(std::collections::HashMap::new(), |mut acc, face| {
-                *acc.entry(face.block_index).or_insert(0usize) += 1;
-                acc
-            })
-    );
 
     (periodic_exports, outer_export)
 }
