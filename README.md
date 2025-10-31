@@ -1,4 +1,4 @@
-# plot3d-rs
+# Plot3D Rust version
 
 Rust utilities for reading, writing, and analysing NASA PLOT3D structured grids. The crate draws heavily on the excellent [plot3d Python project](https://github.com/nasa/plot3d_utilities) maintained by NASA. If you are looking for a battle-tested Python implementation with a rich set of examples, start there. This repository is a Rust reimagining that keeps the same data model while taking advantage of Rust’s type safety, performance, and interoperability.
 
