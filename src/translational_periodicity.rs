@@ -1,3 +1,10 @@
+//! Translational periodicity utilities that mirror the original Python implementation.
+//!
+//! While there is not yet a dedicated Rust integration test, the `tests/test_rotational_periodicity.rs`
+//! fixture demonstrates the expected data flow for the periodicity modules and should be referenced
+//! when extending this module. Run `cargo doc --open` to view these notes alongside the generated API
+//! documentation.
+
 use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
@@ -30,6 +37,11 @@ pub struct TranslationalPair {
 
 /// Detect translational periodicity along an axis.
 /// Discover translational periodicity along a chosen axis.
+///
+/// # Testing
+/// End-to-end validation is planned to follow the pattern established in
+/// `tests/test_rotational_periodicity.rs`. Until then, exercising this function in a binary or
+/// ad-hoc script is recommended to mirror the original Python examples.
 pub fn translational_periodicity(
     blocks: &[Block],
     outer_faces: &[FaceRecord],
