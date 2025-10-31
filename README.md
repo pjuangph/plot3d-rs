@@ -22,6 +22,8 @@ Add the crate to your `Cargo.toml`:
 plot3d = "0.1"
 ```
 
+Can also do add by running `cargo add plot3d` 
+
 The crate uses the 2021 edition of Rust and depends on common ecosystem crates such as `serde`, `ndarray`, and `reqwest` for optional test helpers.
 
 ## Quick Start
