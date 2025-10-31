@@ -152,9 +152,7 @@ pub fn rotational_periodicity(
     let mut changed = true;
     while changed {
         changed = false;
-        let combos: Vec<(usize, usize)> = (0..outer_faces_all.len())
-            .flat_map(|i| (i..outer_faces_all.len()).map(move |j| (i, j)))
-            .collect();
+        let combos: Vec<(usize, usize)> = permutations_indices(outer_faces_all.len());
 
         let mut removal_keys: Option<Vec<FaceKey>> = None;
         let mut new_splits: Vec<Face> = Vec::new();
@@ -270,8 +268,8 @@ pub fn rotated_periodicity(
 ) -> (Vec<PeriodicPair>, Vec<FaceRecord>) {
     let mut gcd_to_use = 1usize;
     let mut working_blocks: Vec<Block> = blocks.to_vec();
-    if reduce_mesh {
-        let mut gcds = Vec::new();
+    if reduce_mesh && !blocks.is_empty() {
+        let mut gcds = Vec::with_capacity(blocks.len());
         for block in blocks {
             gcds.push(gcd_three(block.imax - 1, block.jmax - 1, block.kmax - 1));
         }
@@ -279,10 +277,17 @@ pub fn rotated_periodicity(
         working_blocks = crate::block_face_functions::reduce_blocks(blocks, gcd_to_use);
     }
 
-    let rotation_matrix = create_rotation_matrix(rotation_angle_deg.to_radians(), rotation_axis);
-    let rotated_blocks: Vec<Block> = working_blocks
+    let rotation_angle_rad = rotation_angle_deg.to_radians();
+    let rotation_matrix_forward = create_rotation_matrix(rotation_angle_rad, rotation_axis);
+    let rotation_matrix_reverse = create_rotation_matrix(-rotation_angle_rad, rotation_axis);
+
+    let rotated_blocks_forward: Vec<Block> = working_blocks
         .iter()
-        .map(|b| rotate_block_with_matrix(b, rotation_matrix))
+        .map(|b| rotate_block_with_matrix(b, rotation_matrix_forward))
+        .collect();
+    let rotated_blocks_reverse: Vec<Block> = working_blocks
+        .iter()
+        .map(|b| rotate_block_with_matrix(b, rotation_matrix_reverse))
         .collect();
 
     let mut outer_faces_all = outer_face_records_to_list(&working_blocks, outer_faces, gcd_to_use);
@@ -290,19 +295,19 @@ pub fn rotated_periodicity(
 
     let mut periodic_pairs: Vec<(Face, Face)> = Vec::new();
     let mut non_matching: HashSet<(usize, usize)> = HashSet::new();
-
     let mut periodic_found = true;
+
     while periodic_found {
         periodic_found = false;
-        let combos: Vec<(usize, usize)> = permutations_indices(outer_faces_all.len())
+        let combos_all = permutations_indices(outer_faces_all.len());
+        let combos: Vec<(usize, usize)> = combos_all
             .into_iter()
             .filter(|pair| !non_matching.contains(pair))
             .collect();
-
-        let mut removal_faces: Vec<Face> = Vec::new();
+        let mut outer_faces_to_remove: Vec<Face> = Vec::new();
         let mut split_faces: Vec<Face> = Vec::new();
 
-        'outer_loop: for (idx_a, idx_b) in combos {
+        'combo_loop: for (idx_a, idx_b) in combos {
             if idx_a >= outer_faces_all.len() || idx_b >= outer_faces_all.len() {
                 continue;
             }
@@ -323,11 +328,13 @@ pub fn rotated_periodicity(
                 Some(idx) => idx,
                 None => continue,
             };
+
             if block_idx_a >= working_blocks.len() || block_idx_b >= working_blocks.len() {
                 continue;
             }
 
-            let rotated_block = &rotated_blocks[block_idx_a];
+            let rotated_block_forward = &rotated_blocks_forward[block_idx_a];
+            let rotated_block_reverse = &rotated_blocks_reverse[block_idx_a];
             let base_block = &working_blocks[block_idx_b];
 
             let valid_face = |face: &Face, block: &Block| -> bool {
@@ -338,46 +345,69 @@ pub fn rotated_periodicity(
                     && face.kmin() < block.kmax
                     && face.kmax() < block.kmax
             };
-            if !valid_face(&face_a, rotated_block) || !valid_face(&face_b, base_block) {
+
+            let face_a_valid_forward = valid_face(&face_a, rotated_block_forward);
+            let face_a_valid_reverse = valid_face(&face_a, rotated_block_reverse);
+            if (!face_a_valid_forward && !face_a_valid_reverse)
+                || !valid_face(&face_b, base_block)
+            {
                 non_matching.insert((idx_a, idx_b));
                 continue;
             }
 
-            if let Some((pair_faces, splits)) =
-                periodicity_check(&face_a, &face_b, rotated_block, base_block)
-            {
+            let mut matched = None;
+            if face_a_valid_forward {
+                if let Some((pair_faces, splits)) =
+                    periodicity_check(&face_a, &face_b, rotated_block_forward, base_block)
+                {
+                    matched = Some((pair_faces, splits));
+                }
+            }
+            if matched.is_none() && face_a_valid_reverse {
+                if let Some((pair_faces, splits)) =
+                    periodicity_check(&face_a, &face_b, rotated_block_reverse, base_block)
+                {
+                    matched = Some((pair_faces, splits));
+                }
+            }
+
+            if let Some((pair_faces, splits)) = matched {
                 periodic_pairs.push((pair_faces[0].clone(), pair_faces[1].clone()));
-                removal_faces.push(face_a);
-                removal_faces.push(face_b);
-                removal_faces.extend(pair_faces.into_iter());
+                outer_faces_to_remove.push(face_a);
+                outer_faces_to_remove.push(face_b);
+                outer_faces_to_remove.extend(pair_faces.into_iter());
                 split_faces.extend(splits);
                 periodic_found = true;
-                break 'outer_loop;
-            } else {
-                non_matching.insert((idx_a, idx_b));
+                break 'combo_loop;
             }
+
+            non_matching.insert((idx_a, idx_b));
         }
 
         if periodic_found {
-            let removal_keys: HashSet<FaceKey> = removal_faces.iter().map(face_key).collect();
+            let removal_keys: HashSet<FaceKey> =
+                outer_faces_to_remove.iter().map(face_key).collect();
+
             outer_faces_all = outer_faces_all
                 .into_iter()
-                .filter(|f| !removal_keys.contains(&face_key(f)))
+                .filter(|face| !removal_keys.contains(&face_key(face)))
                 .collect();
-            outer_faces_all.extend(split_faces.into_iter());
+
+            if !split_faces.is_empty() {
+                outer_faces_all.extend(split_faces.into_iter());
+            }
+
             non_matching.clear();
         }
     }
 
-    let mut removal_keys: HashSet<FaceKey> = HashSet::new();
+    let mut removal_keys: HashSet<FaceKey> = matched_faces_all.iter().map(face_key).collect();
+
     for (face_a, face_b) in &periodic_pairs {
         removal_keys.insert(face_key(face_a));
         removal_keys.insert(face_key(face_b));
     }
-    for face in &matched_faces_all {
-        removal_keys.insert(face_key(face));
-    }
-    outer_faces_all.retain(|f| !removal_keys.contains(&face_key(f)));
+    outer_faces_all.retain(|face| !removal_keys.contains(&face_key(face)));
 
     // Remove duplicate periodic pairs (order-insensitive)
     let mut dedup: HashSet<(FaceKey, FaceKey)> = HashSet::new();

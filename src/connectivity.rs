@@ -205,23 +205,28 @@ pub trait FaceMatchPrinter {
 impl FaceMatchPrinter for [FaceMatch] {
     fn print(&self) {
         for (idx, m) in self.iter().enumerate() {
+            let block1 = &m.block1;
+            let block2 = &m.block2;
+            let node_count = m.points.len();
+            let node_label = if node_count == 1 { "node" } else { "nodes" };
             println!(
-                "match #{idx}: block{} [{},{},{} → {},{},{}] ↔ block{} [{},{},{} → {},{},{}] ({} nodes)",
-                m.block1.block_index,
-                m.block1.imin,
-                m.block1.jmin,
-                m.block1.kmin,
-                m.block1.imax,
-                m.block1.jmax,
-                m.block1.kmax,
-                m.block2.block_index,
-                m.block2.imin,
-                m.block2.jmin,
-                m.block2.kmin,
-                m.block2.imax,
-                m.block2.jmax,
-                m.block2.kmax,
-                m.points.len()
+                "match #{idx}: block{block1_idx:02} [{imin1:03},{jmin1:03},{kmin1:03} -> {imax1:03},{jmax1:03},{kmax1:03}] <-> block{block2_idx:02} [{imin2:03},{jmin2:03},{kmin2:03} -> {imax2:03},{jmax2:03},{kmax2:03}] ({node_count} {node_label})",
+                block1_idx = block1.block_index,
+                imin1 = block1.imin,
+                jmin1 = block1.jmin,
+                kmin1 = block1.kmin,
+                imax1 = block1.imax,
+                jmax1 = block1.jmax,
+                kmax1 = block1.kmax,
+                block2_idx = block2.block_index,
+                imin2 = block2.imin,
+                jmin2 = block2.jmin,
+                kmin2 = block2.kmin,
+                imax2 = block2.imax,
+                jmax2 = block2.jmax,
+                kmax2 = block2.kmax,
+                node_count = node_count,
+                node_label = node_label,
             );
         }
     }
