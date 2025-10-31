@@ -1,3 +1,9 @@
+//! Utilities for detecting rotational periodicity in structured multi-block grids.
+//!
+//! This module mirrors the behaviour of the original Python tooling and is covered end-to-end by
+//! the integration test in `tests/test_rotational_periodicity.rs`. Generate HTML documentation with
+//! `cargo doc --open` to browse rendered versions of these notes alongside the Rust API surface.
+
 use std::collections::HashSet;
 use std::f64::consts::PI;
 
@@ -67,6 +73,10 @@ pub type PeriodicPair = FaceMatch;
 /// # Returns
 /// Tuple of `(periodic_pairs, outer_faces)` where the first element lists periodic matches as
 /// [`PeriodicPair`] records and the second contains the remaining outer faces.
+///
+/// # Testing
+/// The integration test `tests/test_rotational_periodicity.rs::rotational_periodicity_test`
+/// exercises this helper as part of the publicly documented workflow.
 pub fn rotational_periodicity_fast(
     blocks: &[Block],
     outer_faces: &[FaceRecord],
@@ -126,6 +136,10 @@ pub fn rotational_periodicity_fast(
 ///
 /// # Returns
 /// `(periodic_pairs, outer_faces)` containing the periodic matches and the filtered outer faces.
+///
+/// # Testing
+/// See `tests/test_rotational_periodicity.rs::rotational_periodicity_test` for an end-to-end
+/// example that builds the mesh, invokes this routine, and inspects the exported matches.
 pub fn rotational_periodicity(
     blocks: &[Block],
     matched_faces: &[FaceMatch],

@@ -1,3 +1,10 @@
+//! Plot3D utilities for mesh connectivity, periodicity detection, and I/O.
+//!
+//! The crate deliberately mirrors the structure of the legacy Python tooling. For a walkthrough of
+//! the rotational periodicity workflow refer to the integration test
+//! `tests/test_rotational_periodicity.rs::rotational_periodicity_test`, which doubles as a usage
+//! example in the generated documentation (`cargo doc --open`).
+
 pub mod block;
 pub mod block_face_functions;
 pub mod connectivity;
