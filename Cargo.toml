@@ -3,6 +3,7 @@ name = "plot3d"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+description = "Utilities for reading, writing, and manipulating NASA PLOT3D structured grids."
 
 [lib]
 name = "plot3d"
