@@ -1,13 +1,10 @@
 use plot3d::{
-    Block,
-    read_plot3d_ascii, read_plot3d_binary,
-    write_plot3d,
-    BinaryFormat, FloatPrecision, Endian
+    read_plot3d_ascii, read_plot3d_binary, write_plot3d, BinaryFormat, Endian, FloatPrecision,
 };
 
 #[test]
-fn read_write_fortran_binary_roundtrip() {
-    // download once
+fn test_read_write_roundtrip() {
+    // download mesh
     let url = "https://nasa-public-data.s3.amazonaws.com/plot3d_utilities/VSPT_ASCII.xyz";
     let ascii_path = "VSPT_ASCII.xyz";
     if !std::path::Path::new(ascii_path).exists() {
@@ -17,13 +14,13 @@ fn read_write_fortran_binary_roundtrip() {
 
     // read ASCII
     let blocks = read_plot3d_ascii(ascii_path).unwrap();
-    assert!(blocks.len() >= 1);
+    assert!(blocks.len() == 2);
 
     // quick shape sanity
     for b in &blocks {
-        assert_eq!(b.x.len(), b.imax*b.jmax*b.kmax);
-        assert_eq!(b.y.len(), b.imax*b.jmax*b.kmax);
-        assert_eq!(b.z.len(), b.imax*b.jmax*b.kmax);
+        assert_eq!(b.x.len(), b.imax * b.jmax * b.kmax);
+        assert_eq!(b.y.len(), b.imax * b.jmax * b.kmax);
+        assert_eq!(b.z.len(), b.imax * b.jmax * b.kmax);
     }
 
     // write Fortran-record binary (Float32 LE)
@@ -34,8 +31,9 @@ fn read_write_fortran_binary_roundtrip() {
         true,
         plot3d::write::BinaryFormat::Fortran,
         plot3d::write::FloatPrecision::F32,
-        Endian::Little
-    ).unwrap();
+        Endian::Little,
+    )
+    .unwrap();
 
     assert!(std::path::Path::new(bin_path).exists());
     let size = std::fs::metadata(bin_path).unwrap().len();
@@ -46,11 +44,12 @@ fn read_write_fortran_binary_roundtrip() {
         bin_path,
         BinaryFormat::Fortran,
         FloatPrecision::F32,
-        Endian::Little
-    ).unwrap();
+        Endian::Little,
+    )
+    .unwrap();
 
     assert_eq!(round.len(), blocks.len());
-    for (a,b) in blocks.iter().zip(round.iter()) {
+    for (a, b) in blocks.iter().zip(round.iter()) {
         assert_eq!(a.imax, b.imax);
         assert_eq!(a.jmax, b.jmax);
         assert_eq!(a.kmax, b.kmax);

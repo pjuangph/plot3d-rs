@@ -1,13 +1,19 @@
-use std::fs::File;
-use std::io::{Write, BufWriter};
 use crate::block::Block;
-use crate::utils::{self, Endian, write_fortran_record};
+use crate::utils::{self, write_fortran_record, Endian};
+use std::fs::File;
+use std::io::{BufWriter, Write};
 
 #[derive(Copy, Clone, Debug)]
-pub enum BinaryFormat { Fortran, Raw }
+pub enum BinaryFormat {
+    Fortran,
+    Raw,
+}
 
 #[derive(Copy, Clone, Debug)]
-pub enum FloatPrecision { F32, F64 }
+pub enum FloatPrecision {
+    F32,
+    F64,
+}
 
 pub fn write_plot3d(
     path: &str,
@@ -48,19 +54,28 @@ fn write_var_ascii(w: &mut impl Write, v: &[f64]) -> std::io::Result<()> {
     for val in v {
         write!(w, "{:.8} ", val)?;
         col += 1;
-        if col % 6 == 0 { writeln!(w)?; }
+        if col % 6 == 0 {
+            writeln!(w)?;
+        }
     }
-    if col % 6 != 0 { writeln!(w)?; }
+    if col % 6 != 0 {
+        writeln!(w)?;
+    }
     Ok(())
 }
 
-fn write_raw(mut w: &mut impl Write, blocks: &[Block], precision: FloatPrecision, endian: Endian) -> std::io::Result<()> {
-    use byteorder::{WriteBytesExt, LittleEndian, BigEndian};
+fn write_raw(
+    mut w: &mut impl Write,
+    blocks: &[Block],
+    precision: FloatPrecision,
+    endian: Endian,
+) -> std::io::Result<()> {
+    use byteorder::{BigEndian, LittleEndian, WriteBytesExt};
 
     // header
     match endian {
         Endian::Little => w.write_u32::<LittleEndian>(blocks.len() as u32)?,
-        Endian::Big    => w.write_u32::<BigEndian>(blocks.len() as u32)?,
+        Endian::Big => w.write_u32::<BigEndian>(blocks.len() as u32)?,
     }
     for b in blocks {
         match endian {
@@ -86,7 +101,12 @@ fn write_raw(mut w: &mut impl Write, blocks: &[Block], precision: FloatPrecision
     Ok(())
 }
 
-fn write_fortran(mut w: &mut impl Write, blocks: &[Block], precision: FloatPrecision, endian: Endian) -> std::io::Result<()> {
+fn write_fortran(
+    mut w: &mut impl Write,
+    blocks: &[Block],
+    precision: FloatPrecision,
+    endian: Endian,
+) -> std::io::Result<()> {
     // header: [nblocks] as a record
     let mut nb = [0u8; 4];
     utils::Endian::write_u32(&mut nb, blocks.len() as u32, endian);
@@ -95,8 +115,8 @@ fn write_fortran(mut w: &mut impl Write, blocks: &[Block], precision: FloatPreci
     // dims as one record per block
     for b in blocks {
         let mut rec = [0u8; 12];
-        utils::Endian::write_u32(&mut rec[0..4],  b.imax as u32, endian);
-        utils::Endian::write_u32(&mut rec[4..8],  b.jmax as u32, endian);
+        utils::Endian::write_u32(&mut rec[0..4], b.imax as u32, endian);
+        utils::Endian::write_u32(&mut rec[4..8], b.jmax as u32, endian);
         utils::Endian::write_u32(&mut rec[8..12], b.kmax as u32, endian);
         write_fortran_record(&mut w, &rec, endian)?;
     }
@@ -105,11 +125,20 @@ fn write_fortran(mut w: &mut impl Write, blocks: &[Block], precision: FloatPreci
     for b in blocks {
         match precision {
             FloatPrecision::F32 => {
-                let xb = utils::Endian::write_f32_slice(&b.x.iter().map(|v| *v as f32).collect::<Vec<f32>>(), endian);
+                let xb = utils::Endian::write_f32_slice(
+                    &b.x.iter().map(|v| *v as f32).collect::<Vec<f32>>(),
+                    endian,
+                );
                 write_fortran_record(&mut w, &xb, endian)?;
-                let yb = utils::Endian::write_f32_slice(&b.y.iter().map(|v| *v as f32).collect::<Vec<f32>>(), endian);
+                let yb = utils::Endian::write_f32_slice(
+                    &b.y.iter().map(|v| *v as f32).collect::<Vec<f32>>(),
+                    endian,
+                );
                 write_fortran_record(&mut w, &yb, endian)?;
-                let zb = utils::Endian::write_f32_slice(&b.z.iter().map(|v| *v as f32).collect::<Vec<f32>>(), endian);
+                let zb = utils::Endian::write_f32_slice(
+                    &b.z.iter().map(|v| *v as f32).collect::<Vec<f32>>(),
+                    endian,
+                );
                 write_fortran_record(&mut w, &zb, endian)?;
             }
             FloatPrecision::F64 => {
@@ -126,13 +155,34 @@ fn write_fortran(mut w: &mut impl Write, blocks: &[Block], precision: FloatPreci
     Ok(())
 }
 
-fn write_vec_num(mut w: &mut impl Write, v: &[f64], precision: FloatPrecision, endian: Endian) -> std::io::Result<()> {
-    use byteorder::{WriteBytesExt, LittleEndian, BigEndian};
+fn write_vec_num(
+    w: &mut impl Write,
+    v: &[f64],
+    precision: FloatPrecision,
+    endian: Endian,
+) -> std::io::Result<()> {
+    use byteorder::{BigEndian, LittleEndian, WriteBytesExt};
     match (precision, endian) {
-        (FloatPrecision::F32, Endian::Little) => for &f in v { w.write_f32::<LittleEndian>(f as f32)?; },
-        (FloatPrecision::F32, Endian::Big)    => for &f in v { w.write_f32::<BigEndian>(f as f32)?; },
-        (FloatPrecision::F64, Endian::Little) => for &f in v { w.write_f64::<LittleEndian>(f)?; },
-        (FloatPrecision::F64, Endian::Big)    => for &f in v { w.write_f64::<BigEndian>(f)?; },
+        (FloatPrecision::F32, Endian::Little) => {
+            for &f in v {
+                w.write_f32::<LittleEndian>(f as f32)?;
+            }
+        }
+        (FloatPrecision::F32, Endian::Big) => {
+            for &f in v {
+                w.write_f32::<BigEndian>(f as f32)?;
+            }
+        }
+        (FloatPrecision::F64, Endian::Little) => {
+            for &f in v {
+                w.write_f64::<LittleEndian>(f)?;
+            }
+        }
+        (FloatPrecision::F64, Endian::Big) => {
+            for &f in v {
+                w.write_f64::<BigEndian>(f)?;
+            }
+        }
     }
     Ok(())
 }
