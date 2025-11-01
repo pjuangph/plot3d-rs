@@ -1647,7 +1647,7 @@ dependencies = [
 
 [[package]]
 name = "plot3d"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "byteorder",
  "itertools 0.12.1",
