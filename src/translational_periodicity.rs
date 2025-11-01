@@ -5,35 +5,13 @@
 //! when extending this module. Run `cargo doc --open` to view these notes alongside the generated API
 //! documentation.
 
-use std::collections::{HashMap, HashSet};
-
-use serde::Serialize;
+use std::collections::HashSet;
 
 use crate::{
     block::Block,
     block_face_functions::{find_bounding_faces, outer_face_records_to_list, Face},
-    connectivity::FaceRecord,
+    connectivity::{FaceMatch, FaceRecord},
 };
-
-/// Exportable record for a translationally periodic face pair.
-/// Serialized pairing of translation-periodic faces, including index mapping metadata.
-#[derive(Clone, Debug, Serialize)]
-pub struct TranslationalPairExport {
-    pub block1: FaceRecord,
-    pub block2: FaceRecord,
-    pub mapping: HashMap<String, String>,
-    pub mode: String,
-}
-
-/// Detailed periodic pair including Faces and index mapping.
-/// Detailed pairing retaining the full face objects and the discovered mapping.
-#[derive(Clone, Debug)]
-pub struct TranslationalPair {
-    pub face1: Face,
-    pub face2: Face,
-    pub mapping: HashMap<String, String>,
-    pub mode: String,
-}
 
 /// Detect translational periodicity along an axis.
 /// Discover translational periodicity along a chosen axis.
@@ -52,13 +30,9 @@ pub fn translational_periodicity(
     min_shared_abs: usize,
     stride_u: usize,
     stride_v: usize,
-) -> (
-    Vec<TranslationalPairExport>,
-    Vec<TranslationalPair>,
-    Vec<FaceRecord>,
-) {
+) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
     if blocks.is_empty() {
-        return (Vec::new(), Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new());
     }
 
     let axis = translational_direction.trim().to_ascii_lowercase();
@@ -137,8 +111,7 @@ pub fn translational_periodicity(
         .map(|b| b.shifted(-delta_axis, axis.chars().next().unwrap()))
         .collect();
 
-    let mut periodic_exports = Vec::new();
-    let mut periodic_pairs = Vec::new();
+    let mut periodic_matches = Vec::new();
 
     let lower_pool = dedup_faces(lower_faces);
     let mut upper_pool = dedup_faces(upper_faces);
@@ -161,27 +134,18 @@ pub fn translational_periodicity(
             )
             .map(|mode| (idx, mode))
         });
-        if let Some((pos, mode)) = candidate {
+        if let Some((pos, _mode)) = candidate {
             let face_u = upper_pool.remove(pos);
-            let mapping = mapping_minmax(&face_l, &face_u);
-
-            periodic_exports.push(TranslationalPairExport {
+            periodic_matches.push(FaceMatch {
                 block1: FaceRecord::from_face(&face_l),
                 block2: FaceRecord::from_face(&face_u),
-                mapping: mapping.clone(),
-                mode: mode.clone(),
-            });
-            periodic_pairs.push(TranslationalPair {
-                face1: face_l.clone(),
-                face2: face_u.clone(),
-                mapping,
-                mode,
+                points: Vec::new(),
             });
         }
     }
 
     let mut periodic_keys = HashSet::new();
-    for rec in &periodic_exports {
+    for rec in &periodic_matches {
         periodic_keys.insert(face_record_key(&rec.block1));
         periodic_keys.insert(face_record_key(&rec.block2));
     }
@@ -194,20 +158,16 @@ pub fn translational_periodicity(
     }
 
     if gcd_to_use > 1 {
-        for rec in &mut periodic_exports {
+        for rec in &mut periodic_matches {
             rec.block1.scale_indices(gcd_to_use);
             rec.block2.scale_indices(gcd_to_use);
-        }
-        for pair in &mut periodic_pairs {
-            pair.face1.scale_indices(gcd_to_use);
-            pair.face2.scale_indices(gcd_to_use);
         }
         for record in &mut remaining {
             record.scale_indices(gcd_to_use);
         }
     }
 
-    (periodic_exports, periodic_pairs, remaining)
+    (periodic_matches, remaining)
 }
 
 /// Assess one lower/upper face combo and return the match mode when successful.
@@ -390,52 +350,6 @@ fn project_plane(points: &[[f64; 3]], axis: &str) -> Vec<[f64; 2]> {
             _ => [p[0], p[1]],
         })
         .collect()
-}
-
-/// Derive the I/J/K orientation mapping between two matched faces.
-fn mapping_minmax(face_a: &Face, face_b: &Face) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for axis in ["I", "J", "K"] {
-        let amin = axis_min(face_a, axis);
-        let amax = axis_max(face_a, axis);
-        let bmin = axis_min(face_b, axis);
-        let bmax = axis_max(face_b, axis);
-        let value = if amin == bmin && amax == bmax {
-            "min->min"
-        } else if amin == bmax && amax == bmin {
-            "min->max"
-        } else {
-            let mm_cost =
-                (amin as isize - bmin as isize).abs() + (amax as isize - bmax as isize).abs();
-            let mm_flip_cost =
-                (amin as isize - bmax as isize).abs() + (amax as isize - bmin as isize).abs();
-            if mm_cost <= mm_flip_cost {
-                "min->min"
-            } else {
-                "min->max"
-            }
-        };
-        map.insert(axis.to_string(), value.to_string());
-    }
-    map
-}
-
-/// Convenience accessor for the minimum index along `axis`.
-fn axis_min(face: &Face, axis: &str) -> usize {
-    match axis {
-        "I" => face.imin(),
-        "J" => face.jmin(),
-        _ => face.kmin(),
-    }
-}
-
-/// Convenience accessor for the maximum index along `axis`.
-fn axis_max(face: &Face, axis: &str) -> usize {
-    match axis {
-        "I" => face.imax(),
-        "J" => face.jmax(),
-        _ => face.kmax(),
-    }
 }
 
 /// Remove duplicate faces while preserving the first occurrence.
