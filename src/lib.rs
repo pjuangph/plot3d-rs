@@ -28,8 +28,6 @@ pub use rotational_periodicity::{
     create_rotation_matrix, rotate_block_with_matrix, rotated_periodicity, rotational_periodicity,
     rotational_periodicity_fast, PeriodicPair,
 };
-pub use translational_periodicity::{
-    translational_periodicity, TranslationalPair, TranslationalPairExport,
-};
+pub use translational_periodicity::translational_periodicity;
 pub use utils::Endian; // <- works now because Endian is pub
 pub use write::write_plot3d;

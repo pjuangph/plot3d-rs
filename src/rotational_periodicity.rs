@@ -362,8 +362,7 @@ pub fn rotated_periodicity(
 
             let face_a_valid_forward = valid_face(&face_a, rotated_block_forward);
             let face_a_valid_reverse = valid_face(&face_a, rotated_block_reverse);
-            if (!face_a_valid_forward && !face_a_valid_reverse)
-                || !valid_face(&face_b, base_block)
+            if (!face_a_valid_forward && !face_a_valid_reverse) || !valid_face(&face_b, base_block)
             {
                 non_matching.insert((idx_a, idx_b));
                 continue;
