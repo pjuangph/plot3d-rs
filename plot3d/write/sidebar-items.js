@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["BinaryFormat","FloatPrecision"],"fn":["write_plot3d"]};

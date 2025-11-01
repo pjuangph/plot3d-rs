@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create_rotation_matrix","rotate_block_with_matrix","rotated_periodicity","rotational_periodicity","rotational_periodicity_fast"],"type":["PeriodicPair"]};

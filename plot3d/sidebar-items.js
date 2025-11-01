@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["block","block_face_functions","connectivity","merge_blocks","read","rotational_periodicity","translational_periodicity","utils","write"]};
