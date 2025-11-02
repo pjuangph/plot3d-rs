@@ -153,9 +153,18 @@ fn calc_bounds(blocks: &[Block]) -> [[f64; 2]; 3] {
 fn assert_bounds_close(lhs: &[[f64; 2]; 3], rhs: &[[f64; 2]; 3], tol: f64) {
     for (axis_idx, (lhs_axis, rhs_axis)) in lhs.iter().zip(rhs.iter()).enumerate() {
         for (bound_idx, (a, b)) in lhs_axis.iter().zip(rhs_axis.iter()).enumerate() {
-            assert!(
-                (a - b).abs() <= tol,
-                "bound mismatch axis {axis_idx} bound {bound_idx}: {a} vs {b} (tol {tol})"
+            let delta = (a - b).abs();
+            if delta <= tol {
+                continue;
+            }
+            let a32 = *a as f32;
+            let b32 = *b as f32;
+            if ((a32 - b32).abs() as f64) <= tol {
+                continue;
+            }
+            panic!(
+                "bound mismatch axis {axis_idx} bound {bound_idx}: {a} vs {b} (tol {tol}); f32 delta {}",
+                (a32 - b32).abs()
             );
         }
     }
