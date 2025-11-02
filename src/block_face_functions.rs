@@ -918,18 +918,40 @@ pub fn reduce_blocks(blocks: &[Block], factor: usize) -> Vec<Block> {
     if factor <= 1 {
         return blocks.to_vec();
     }
-    return blocks
+
+    fn sampled_indices(max: usize, stride: usize) -> Vec<usize> {
+        if max == 0 {
+            return Vec::new();
+        }
+        let mut indices: Vec<usize> = (0..max).step_by(stride).collect();
+        if let Some(&last) = indices.last() {
+            if last != max - 1 {
+                indices.push(max - 1);
+            }
+        } else {
+            indices.push(max - 1);
+        }
+        indices
+    }
+
+    blocks
         .iter()
         .map(|block| {
-            let si = (block.imax - 1) / factor + 1;
-            let sj = (block.jmax - 1) / factor + 1;
-            let sk = (block.kmax - 1) / factor + 1;
+            let i_idx = sampled_indices(block.imax, factor);
+            let j_idx = sampled_indices(block.jmax, factor);
+            let k_idx = sampled_indices(block.kmax, factor);
+
+            let si = i_idx.len();
+            let sj = j_idx.len();
+            let sk = k_idx.len();
+
             let mut x = Vec::with_capacity(si * sj * sk);
             let mut y = Vec::with_capacity(si * sj * sk);
             let mut z = Vec::with_capacity(si * sj * sk);
-            for k in (0..block.kmax).step_by(factor) {
-                for j in (0..block.jmax).step_by(factor) {
-                    for i in (0..block.imax).step_by(factor) {
+
+            for &k in &k_idx {
+                for &j in &j_idx {
+                    for &i in &i_idx {
                         let (px, py, pz) = block.xyz(i, j, k);
                         x.push(px);
                         y.push(py);
@@ -937,9 +959,10 @@ pub fn reduce_blocks(blocks: &[Block], factor: usize) -> Vec<Block> {
                     }
                 }
             }
+
             Block::new(si, sj, sk, x, y, z)
         })
-        .collect(); // Final expression is the return value
+        .collect()
 }
 
 /// Rotate a block using a 3×3 rotation matrix.
