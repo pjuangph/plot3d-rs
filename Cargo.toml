@@ -1,6 +1,6 @@
 [package]
 name = "plot3d"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "MIT"
 description = "Utilities for reading, writing, and manipulating NASA PLOT3D structured grids."
