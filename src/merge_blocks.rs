@@ -123,8 +123,9 @@ pub fn combine_nxnxn_cubes_mixed_pairs(
     blocks: &[Block],
     connectivities: &[FaceMatch],
     cube_size: usize,
-    tol: f64,
+    tol: Option<f64>,
 ) -> Vec<(Block, HashSet<usize>)> {
+    let tol = tol.unwrap_or(1e-8);
     if cube_size == 0 {
         return Vec::new();
     }
