@@ -1,38 +1,97 @@
-use plot3d::write::{BinaryFormat, FloatPrecision};
-use plot3d::Endian;
+use std::path::Path;
+
 use plot3d::{
-    combine_nxnxn_cubes_mixed_pairs, connectivity_fast, read_plot3d_ascii, write_plot3d, Block,
+    block_face_functions,
+    combine_nxnxn_cubes_mixed_pairs,
+    connectivity_fast,
+    read_plot3d_ascii,
+    read_plot3d_binary,
+    write_plot3d,
+    BinaryFormat as ReadBinaryFormat,
+    FloatPrecision as ReadFloatPrecision,
+    Block,
+    Endian,
 };
+use plot3d::write::{BinaryFormat as WriteBinaryFormat, FloatPrecision as WriteFloatPrecision};
 
 #[test]
 fn merge_block_test() {
     let ascii_path = "weld_ascii.xyz";
-    let blocks = read_plot3d_ascii(ascii_path).unwrap();
-    // Capture the source bounds so we can confirm merged/exported geometry stays consistent.
+    let binary_path = "weld_binary.xyz";
+
+    if !Path::new(binary_path).exists() {
+        let ascii_blocks = read_plot3d_ascii(ascii_path).unwrap();
+        write_plot3d(
+            binary_path,
+            &ascii_blocks,
+            false,
+            WriteBinaryFormat::Raw,
+            WriteFloatPrecision::F32,
+            Endian::Little,
+        )
+        .unwrap();
+    }
+
+    let blocks = read_plot3d_binary(
+        binary_path,
+        ReadBinaryFormat::Raw,
+        ReadFloatPrecision::F32,
+        Endian::Little,
+    )
+    .unwrap();
+
     let original_bounds = calc_bounds(&blocks);
 
-    let (face_matches, _outer_faces) = connectivity_fast(&blocks);
+    let gcd = blocks
+        .iter()
+        .map(|b| gcd_three(b.imax - 1, b.jmax - 1, b.kmax - 1))
+        .min()
+        .unwrap_or(1)
+        .max(1);
 
-    // Collect merged blocks from the connectivity-driven cube grouping.
-    let merged = combine_nxnxn_cubes_mixed_pairs(&blocks, &face_matches, 3, None);
+    let reduced_blocks = if gcd > 1 {
+        block_face_functions::reduce_blocks(&blocks, gcd)
+    } else {
+        blocks.clone()
+    };
+
+    let reduced_path = "weld_binary_reduced.xyz";
+    write_plot3d(
+        reduced_path,
+        &reduced_blocks,
+        false,
+        WriteBinaryFormat::Raw,
+        WriteFloatPrecision::F32,
+        Endian::Little,
+    )
+    .unwrap();
+
+    let (face_matches, _outer_faces) = connectivity_fast(&reduced_blocks);
+
+    let merged = combine_nxnxn_cubes_mixed_pairs(&reduced_blocks, &face_matches, 3, None);
 
     let merged_blocks: Vec<_> = merged.into_iter().map(|(block, _ids)| block).collect();
 
     let (_face_matches_merged, _outer_faces_merged) = connectivity_fast(&merged_blocks);
 
-    let output_path = "weld_ascii_3x3x3_out.xyz";
-    // Persist merged geometry to disk so we can verify the round-trip readback.
+    let output_path = "weld_binary_reduced_3x3x3_out.xyz";
     write_plot3d(
         output_path,
         &merged_blocks,
         false,
-        BinaryFormat::Raw,
-        FloatPrecision::F32,
+        WriteBinaryFormat::Raw,
+        WriteFloatPrecision::F32,
         Endian::Little,
     )
     .unwrap();
 
-    let exported_blocks = read_plot3d_ascii(output_path).unwrap();
+    let exported_blocks = read_plot3d_binary(
+        output_path,
+        ReadBinaryFormat::Raw,
+        ReadFloatPrecision::F32,
+        Endian::Little,
+    )
+    .unwrap();
 
     assert_eq!(merged_blocks.len(), exported_blocks.len());
     assert_blocks_match(&merged_blocks, &exported_blocks, 1e-8);
@@ -40,7 +99,6 @@ fn merge_block_test() {
     let merged_bounds = calc_bounds(&merged_blocks);
     let exported_bounds = calc_bounds(&exported_blocks);
 
-    // Bounds should be unchanged across the original, merged, and exported versions.
     assert_bounds_close(&merged_bounds, &original_bounds, 1e-8);
     assert_bounds_close(&exported_bounds, &original_bounds, 1e-8);
 }
@@ -102,4 +160,17 @@ fn assert_bounds_close(lhs: &[[f64; 2]; 3], rhs: &[[f64; 2]; 3], tol: f64) {
             );
         }
     }
+}
+
+fn gcd_two(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    a
+}
+
+fn gcd_three(a: usize, b: usize, c: usize) -> usize {
+    gcd_two(gcd_two(a, b), c)
 }
