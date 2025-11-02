@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["combine_2_blocks_mixed_pairing","combine_blocks_mixed_pairs","combine_nxnxn_cubes_mixed_pairs"],"type":["CombinedBlocks"]};
