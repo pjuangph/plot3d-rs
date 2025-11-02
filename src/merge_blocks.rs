@@ -18,6 +18,9 @@ pub type CombinedBlocks = (Vec<Block>, Vec<usize>);
 /// matching faces line up, ensure both blocks increase in the same physical
 /// direction along the stacking axis, trim the overlapping slice, then
 /// concatenate before re-standardising orientation.
+///
+/// Returns a merged block, or `block1` unchanged when no compatible merge can
+/// be produced (mirroring the Python helper's behaviour).
 pub fn combine_2_blocks_mixed_pairing(block1: &Block, block2: &Block, tol: f64) -> Block {
     let Some((face1, face2, (flip_ud, flip_lr))) = find_matching_faces(block1, block2, tol) else {
         return block1.clone();
@@ -28,30 +31,53 @@ pub fn combine_2_blocks_mixed_pairing(block1: &Block, block2: &Block, tol: f64) 
 
     let mut base = block1.clone();
     let mut other = block2.clone();
+    let mut face_label = face2.to_string();
 
     if axis1 != axis2 {
         let mut perm = [0usize, 1, 2];
         perm.swap(axis1, axis2);
         other = permute_block_axes(&other, perm);
+        face_label = remap_face_label(&face_label, perm);
     }
 
-    other = apply_face_flips(&other, face2, flip_ud, flip_lr);
-
     let stack_axis = axis1;
-    let step1 = dominant_step(&base, stack_axis);
-    let step2 = dominant_step(&other, stack_axis);
+    let target_dims = [base.imax, base.jmax, base.kmax];
+    let (other_aligned, perm_opt) = match align_cross_sections(other, target_dims, stack_axis) {
+        Some(result) => result,
+        None => return block1.clone(),
+    };
+    other = other_aligned;
+    if let Some(perm_align) = perm_opt {
+        face_label = remap_face_label(&face_label, perm_align);
+    }
+
+    let (flip_ud_axis, flip_lr_axis) = flip_axes_for_face(&face_label);
+    other = apply_face_flips(&other, flip_ud_axis, flip_lr_axis, flip_ud, flip_lr);
+
+    // Match Python logic: choose the dominant coordinate component based on
+    // block1, then compare block2 on that same component to decide flipping.
+    let steps1 = component_steps(&base, stack_axis);
+    let dominant_idx = argmax_abs(&steps1);
+    let step1 = steps1[dominant_idx];
+    let step2 = component_steps(&other, stack_axis)[dominant_idx];
 
     if step1.signum() != 0.0 && step2.signum() != 0.0 && step1.signum() != step2.signum() {
         base = flip_block_axis(&base, stack_axis);
     }
 
-    let drop_first = face2.ends_with("min");
+    let drop_first = face_label.ends_with("min");
     let trimmed_other = trim_block_along_axis(&other, stack_axis, drop_first);
 
     let merged = if drop_first {
-        concat_blocks_along_axis(&base, &trimmed_other, stack_axis)
+        match concat_blocks_along_axis(&base, &trimmed_other, stack_axis) {
+            Some(block) => block,
+            None => return block1.clone(),
+        }
     } else {
-        concat_blocks_along_axis(&trimmed_other, &base, stack_axis)
+        match concat_blocks_along_axis(&trimmed_other, &base, stack_axis) {
+            Some(block) => block,
+            None => return block1.clone(),
+        }
     };
 
     standardize_block_orientation(&merged)
@@ -69,34 +95,53 @@ pub fn combine_blocks_mixed_pairs(blocks: &[Block], tol: f64, max_tries: usize) 
     let mut tries = 0usize;
 
     while merged_blocks.len() > 1 && tries < max_tries {
-        let mut consumed = vec![false; merged_blocks.len()];
-        let mut next_blocks = Vec::new();
+        let mut new_merged: Vec<Block> = Vec::new();
+        let mut skip: HashSet<usize> = HashSet::new();
         let mut any_merge = false;
+        let mut i = 0usize;
 
-        for i in 0..merged_blocks.len() {
-            if consumed[i] {
+        while i < merged_blocks.len() {
+            if skip.contains(&i) {
+                i += 1;
                 continue;
             }
-            consumed[i] = true;
+
+            let blk_a = merged_blocks[i].clone();
             let mut merged: Option<Block> = None;
+            let mut partner_idx: Option<usize> = None;
+
             for j in (i + 1)..merged_blocks.len() {
-                if consumed[j] {
+                if skip.contains(&j) {
                     continue;
                 }
+
                 if find_matching_faces(&merged_blocks[i], &merged_blocks[j], tol).is_some() {
                     let candidate =
                         combine_2_blocks_mixed_pairing(&merged_blocks[i], &merged_blocks[j], tol);
-                    consumed[j] = true;
                     merged = Some(candidate);
-                    any_merge = true;
+                    partner_idx = Some(j);
                     break;
                 }
             }
 
-            if let Some(m) = merged {
-                next_blocks.push(m);
+            if let Some(block) = merged {
+                new_merged.push(block);
+                skip.insert(i);
+                if let Some(j) = partner_idx {
+                    skip.insert(j);
+                }
+                any_merge = true;
             } else {
-                next_blocks.push(merged_blocks[i].clone());
+                new_merged.push(blk_a);
+                skip.insert(i);
+            }
+
+            i += 1;
+        }
+
+        for k in 0..merged_blocks.len() {
+            if !skip.contains(&k) {
+                new_merged.push(merged_blocks[k].clone());
             }
         }
 
@@ -104,7 +149,7 @@ pub fn combine_blocks_mixed_pairs(blocks: &[Block], tol: f64, max_tries: usize) 
             break;
         }
 
-        merged_blocks = next_blocks;
+        merged_blocks = new_merged;
         tries += 1;
     }
 
@@ -123,8 +168,9 @@ pub fn combine_nxnxn_cubes_mixed_pairs(
     blocks: &[Block],
     connectivities: &[FaceMatch],
     cube_size: usize,
-    tol: f64,
+    tol: Option<f64>,
 ) -> Vec<(Block, HashSet<usize>)> {
+    let tol = tol.unwrap_or(1e-8);
     if cube_size == 0 {
         return Vec::new();
     }
@@ -164,8 +210,10 @@ pub fn combine_nxnxn_cubes_mixed_pairs(
 
             let group_blocks: Vec<Block> =
                 sorted_group.iter().map(|&i| blocks[i].clone()).collect();
+            // Follow Python default: attempt several passes (4) when merging
+            // a candidate group, instead of tying tries to `cube_size`.
             let (partial_merges, local_indices) =
-                combine_blocks_mixed_pairs(&group_blocks, tol, cube_size);
+                combine_blocks_mixed_pairs(&group_blocks, tol, 4);
 
             let index_mapping: HashMap<usize, usize> = sorted_group
                 .iter()
@@ -286,51 +334,64 @@ fn permute_block_axes(block: &Block, perm: [usize; 3]) -> Block {
     Block::new(new_dims[0], new_dims[1], new_dims[2], x, y, z)
 }
 
+/// Ensure the non-stacking axes of `block` match `target_dims`, optionally swapping them.
+fn align_cross_sections(
+    block: Block,
+    target_dims: [usize; 3],
+    stack_axis: usize,
+) -> Option<(Block, Option<[usize; 3]>)> {
+    let dims = [block.imax, block.jmax, block.kmax];
+    let cross_axes: Vec<usize> = (0..3).filter(|&ax| ax != stack_axis).collect();
+    if cross_axes.len() != 2 {
+        return Some((block, None));
+    }
+    let axis_a = cross_axes[0];
+    let axis_b = cross_axes[1];
+    let aligned = dims[axis_a] == target_dims[axis_a] && dims[axis_b] == target_dims[axis_b];
+    if aligned {
+        return Some((block, None));
+    }
+    None
+}
+
 /// Apply the up/down and left/right flips implied by `flip_ud`/`flip_lr`.
-fn apply_face_flips(block: &Block, face: &str, flip_ud: bool, flip_lr: bool) -> Block {
+fn apply_face_flips(
+    block: &Block,
+    flip_ud_axis: usize,
+    flip_lr_axis: usize,
+    flip_ud: bool,
+    flip_lr: bool,
+) -> Block {
     let mut result = block.clone();
-    match face {
-        "imin" | "imax" => {
-            if flip_ud {
-                result = flip_block_axis(&result, 1);
-            }
-            if flip_lr {
-                result = flip_block_axis(&result, 2);
-            }
-        }
-        "jmin" | "jmax" => {
-            if flip_ud {
-                result = flip_block_axis(&result, 0);
-            }
-            if flip_lr {
-                result = flip_block_axis(&result, 2);
-            }
-        }
-        "kmin" | "kmax" => {
-            if flip_ud {
-                result = flip_block_axis(&result, 0);
-            }
-            if flip_lr {
-                result = flip_block_axis(&result, 1);
-            }
-        }
-        _ => {}
+    if flip_ud {
+        result = flip_block_axis(&result, flip_ud_axis);
+    }
+    if flip_lr {
+        result = flip_block_axis(&result, flip_lr_axis);
     }
     result
 }
 
-/// Determine which coordinate changes the most along `axis`.
-fn dominant_step(block: &Block, axis: usize) -> f64 {
-    let steps = [
+/// Compute step magnitudes for X, Y, Z along `axis`.
+fn component_steps(block: &Block, axis: usize) -> [f64; 3] {
+    [
         coordinate_step(block, axis, 0),
         coordinate_step(block, axis, 1),
         coordinate_step(block, axis, 2),
-    ];
-    steps
-        .iter()
-        .copied()
-        .max_by(|a, b| a.abs().partial_cmp(&b.abs()).unwrap())
-        .unwrap_or(0.0)
+    ]
+}
+
+fn argmax_abs(vals: &[f64; 3]) -> usize {
+    let mut best = 0usize;
+    let mut best_abs = vals[0].abs();
+    for (i, v) in vals.iter().enumerate().skip(1) {
+        let a = v.abs();
+        if a > best_abs {
+            best = i;
+            best_abs = a;
+        }
+    }
+    best
 }
 
 /// Compute the signed step between the first and last plane along `axis`
@@ -413,7 +474,8 @@ fn trim_block_along_axis(block: &Block, axis: usize, drop_first: bool) -> Block 
 }
 
 /// Concatenate two blocks along `axis`, assuming matching cross-sections.
-fn concat_blocks_along_axis(a: &Block, b: &Block, axis: usize) -> Block {
+/// Returns `None` when the non-stacking dimensions do not align.
+fn concat_blocks_along_axis(a: &Block, b: &Block, axis: usize) -> Option<Block> {
     let dims_a = [a.imax, a.jmax, a.kmax];
     let dims_b = [b.imax, b.jmax, b.kmax];
     let mut new_dims = dims_a;
@@ -421,7 +483,7 @@ fn concat_blocks_along_axis(a: &Block, b: &Block, axis: usize) -> Block {
 
     for idx in 0..3 {
         if idx != axis && dims_a[idx] != dims_b[idx] {
-            panic!("Block dimensions do not match for concatenation");
+            return None;
         }
     }
 
@@ -449,7 +511,7 @@ fn concat_blocks_along_axis(a: &Block, b: &Block, axis: usize) -> Block {
         }
     }
 
-    Block::new(new_dims[0], new_dims[1], new_dims[2], x, y, z)
+    Some(Block::new(new_dims[0], new_dims[1], new_dims[2], x, y, z))
 }
 
 fn coordinate_from_block(dims_a: [usize; 3], axis: usize, idx: [usize; 3]) -> bool {
@@ -458,4 +520,41 @@ fn coordinate_from_block(dims_a: [usize; 3], axis: usize, idx: [usize; 3]) -> bo
 
 fn linear_index(dims: [usize; 3], idx: [usize; 3]) -> usize {
     (idx[2] * dims[1] + idx[1]) * dims[0] + idx[0]
+}
+
+fn flip_axes_for_face(face: &str) -> (usize, usize) {
+    match face.chars().next().map(|c| c.to_ascii_lowercase()) {
+        Some('i') => (1, 2),
+        Some('j') => (0, 2),
+        Some('k') => (0, 1),
+        _ => (1, 2),
+    }
+}
+
+fn remap_face_label(face: &str, perm: [usize; 3]) -> String {
+    let mut chars = face.chars();
+    let Some(axis_char) = chars.next() else {
+        return face.to_string();
+    };
+    let remainder: String = chars.collect();
+    let orig_axis = match axis_char.to_ascii_lowercase() {
+        'i' => 0,
+        'j' => 1,
+        'k' => 2,
+        _ => return face.to_string(),
+    };
+    let new_axis_idx = perm
+        .iter()
+        .position(|&old_axis| old_axis == orig_axis)
+        .unwrap_or(orig_axis);
+    let mut new_axis_char = match new_axis_idx {
+        0 => 'i',
+        1 => 'j',
+        2 => 'k',
+        _ => axis_char.to_ascii_lowercase(),
+    };
+    if axis_char.is_ascii_uppercase() {
+        new_axis_char = new_axis_char.to_ascii_uppercase();
+    }
+    format!("{new_axis_char}{remainder}")
 }
