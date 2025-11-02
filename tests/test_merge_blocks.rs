@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{fs, path::Path};
 
 use plot3d::write::{BinaryFormat as WriteBinaryFormat, FloatPrecision as WriteFloatPrecision};
 use plot3d::{
@@ -11,8 +11,8 @@ use plot3d::{
 fn merge_block_test() {
     let ascii_path = Path::new("weld_ascii.xyz");
     let binary_path = Path::new("weld_binary.xyz");
-    let cache_path = Path::new("weld_binary_reduced_3x3x3_out.xyz");
-    let roundtrip_path = Path::new("merge_block_test_roundtrip.xyz");
+    let cache_path = Path::new("weld_binary_reduced_3x3x3_out.xyzb");
+    let roundtrip_path = Path::new("merge_block_test_roundtrip.xyzb");
 
     let source_blocks = if binary_path.exists() {
         read_plot3d_binary(
@@ -110,9 +110,16 @@ fn assert_blocks_match(expected: &[Block], actual: &[Block], tol: f64) {
 fn assert_vec_close(lhs: &[f64], rhs: &[f64], tol: f64) {
     assert_eq!(lhs.len(), rhs.len());
     for (idx, (a, b)) in lhs.iter().zip(rhs.iter()).enumerate() {
+        let delta = (a - b).abs();
+        if delta <= tol {
+            continue;
+        }
+        let a32 = *a as f32;
+        let b32 = *b as f32;
+        let delta32 = (a32 - b32).abs();
         assert!(
-            (a - b).abs() <= tol,
-            "value mismatch at index {idx}: {a} vs {b} (tol {tol})"
+            delta32 == 0.0,
+            "value mismatch at index {idx}: {a} vs {b} (tol {tol}); f32 delta {delta32}"
         );
     }
 }
