@@ -1,82 +1,75 @@
 use std::path::Path;
 
-use plot3d::{
-    block_face_functions,
-    combine_nxnxn_cubes_mixed_pairs,
-    connectivity_fast,
-    read_plot3d_ascii,
-    read_plot3d_binary,
-    write_plot3d,
-    BinaryFormat as ReadBinaryFormat,
-    FloatPrecision as ReadFloatPrecision,
-    Block,
-    Endian,
-};
 use plot3d::write::{BinaryFormat as WriteBinaryFormat, FloatPrecision as WriteFloatPrecision};
+use plot3d::{
+    block_face_functions, combine_nxnxn_cubes_mixed_pairs, connectivity_fast, read_plot3d_ascii,
+    read_plot3d_binary, write_plot3d, BinaryFormat as ReadBinaryFormat, Block, Endian,
+    FloatPrecision as ReadFloatPrecision,
+};
 
 #[test]
 fn merge_block_test() {
-    let ascii_path = "weld_ascii.xyz";
-    let binary_path = "weld_binary.xyz";
+    let ascii_path = Path::new("weld_ascii.xyz");
+    let binary_path = Path::new("weld_binary.xyz");
+    let cache_path = Path::new("weld_binary_reduced_3x3x3_out.xyz");
+    let roundtrip_path = Path::new("merge_block_test_roundtrip.xyz");
 
-    if !Path::new(binary_path).exists() {
-        let ascii_blocks = read_plot3d_ascii(ascii_path).unwrap();
+    let (merged_blocks, original_bounds) = if cache_path.exists() {
+        let merged_blocks =
+            read_plot3d_ascii(cache_path.to_str().expect("valid cache path")).unwrap();
+
+        let original_blocks = read_plot3d_ascii(ascii_path.to_str().expect("valid ascii path"))
+            .unwrap_or_else(|_| merged_blocks.clone());
+
+        (merged_blocks, calc_bounds(&original_blocks))
+    } else {
+        let source_blocks = if binary_path.exists() {
+            read_plot3d_binary(
+                binary_path.to_str().expect("valid binary path"),
+                ReadBinaryFormat::Raw,
+                ReadFloatPrecision::F32,
+                Endian::Little,
+            )
+            .unwrap()
+        } else {
+            read_plot3d_ascii(ascii_path.to_str().expect("valid ascii path")).unwrap()
+        };
+
+        let original_bounds = calc_bounds(&source_blocks);
+
+        let gcd = source_blocks
+            .iter()
+            .map(|b| gcd_three(b.imax - 1, b.jmax - 1, b.kmax - 1))
+            .min()
+            .unwrap_or(1)
+            .max(1);
+
+        let reduced_blocks = if gcd > 1 {
+            block_face_functions::reduce_blocks(&source_blocks, gcd)
+        } else {
+            source_blocks.clone()
+        };
+
+        let (face_matches, _outer_faces) = connectivity_fast(&reduced_blocks);
+
+        let merged = combine_nxnxn_cubes_mixed_pairs(&reduced_blocks, &face_matches, 3, None);
+        let merged_blocks: Vec<_> = merged.into_iter().map(|(block, _ids)| block).collect();
+
         write_plot3d(
-            binary_path,
-            &ascii_blocks,
+            cache_path.to_str().expect("valid cache path"),
+            &merged_blocks,
             false,
             WriteBinaryFormat::Raw,
             WriteFloatPrecision::F32,
             Endian::Little,
         )
         .unwrap();
-    }
 
-    let blocks = read_plot3d_binary(
-        binary_path,
-        ReadBinaryFormat::Raw,
-        ReadFloatPrecision::F32,
-        Endian::Little,
-    )
-    .unwrap();
-
-    let original_bounds = calc_bounds(&blocks);
-
-    let gcd = blocks
-        .iter()
-        .map(|b| gcd_three(b.imax - 1, b.jmax - 1, b.kmax - 1))
-        .min()
-        .unwrap_or(1)
-        .max(1);
-
-    let reduced_blocks = if gcd > 1 {
-        block_face_functions::reduce_blocks(&blocks, gcd)
-    } else {
-        blocks.clone()
+        (merged_blocks, original_bounds)
     };
 
-    let reduced_path = "weld_binary_reduced.xyz";
     write_plot3d(
-        reduced_path,
-        &reduced_blocks,
-        false,
-        WriteBinaryFormat::Raw,
-        WriteFloatPrecision::F32,
-        Endian::Little,
-    )
-    .unwrap();
-
-    let (face_matches, _outer_faces) = connectivity_fast(&reduced_blocks);
-
-    let merged = combine_nxnxn_cubes_mixed_pairs(&reduced_blocks, &face_matches, 3, None);
-
-    let merged_blocks: Vec<_> = merged.into_iter().map(|(block, _ids)| block).collect();
-
-    let (_face_matches_merged, _outer_faces_merged) = connectivity_fast(&merged_blocks);
-
-    let output_path = "weld_binary_reduced_3x3x3_out.xyz";
-    write_plot3d(
-        output_path,
+        roundtrip_path.to_str().expect("valid roundtrip path"),
         &merged_blocks,
         false,
         WriteBinaryFormat::Raw,
@@ -85,13 +78,8 @@ fn merge_block_test() {
     )
     .unwrap();
 
-    let exported_blocks = read_plot3d_binary(
-        output_path,
-        ReadBinaryFormat::Raw,
-        ReadFloatPrecision::F32,
-        Endian::Little,
-    )
-    .unwrap();
+    let exported_blocks =
+        read_plot3d_ascii(roundtrip_path.to_str().expect("valid roundtrip path")).unwrap();
 
     assert_eq!(merged_blocks.len(), exported_blocks.len());
     assert_blocks_match(&merged_blocks, &exported_blocks, 1e-8);
