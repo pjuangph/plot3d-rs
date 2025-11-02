@@ -488,8 +488,8 @@ pub fn faces_match(
 
     let corners = |f: &StructuredFace, flip_ud: bool, flip_lr: bool| -> [[f64; 3]; 4] {
         let map = |u: usize, v: usize| {
-            let uu = if flip_lr { ni - 1 - u } else { u };
-            let vv = if flip_ud { nj - 1 - v } else { v };
+            let uu = if flip_ud { ni - 1 - u } else { u };
+            let vv = if flip_lr { nj - 1 - v } else { v };
             f.idx(uu, vv)
         };
         [

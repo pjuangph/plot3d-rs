@@ -31,15 +31,13 @@ pub fn combine_2_blocks_mixed_pairing(block1: &Block, block2: &Block, tol: f64) 
 
     let mut base = block1.clone();
     let mut other = block2.clone();
-    let mut axis_map = [0usize, 1, 2]; // original axis -> current axis index
-
-    let (mut flip_ud_axis, mut flip_lr_axis) = flip_axes_for_face(face2);
+    let mut face_label = face2.to_string();
 
     if axis1 != axis2 {
         let mut perm = [0usize, 1, 2];
         perm.swap(axis1, axis2);
         other = permute_block_axes(&other, perm);
-        update_axis_map(&mut axis_map, perm);
+        face_label = remap_face_label(&face_label, perm);
     }
 
     let stack_axis = axis1;
@@ -50,21 +48,24 @@ pub fn combine_2_blocks_mixed_pairing(block1: &Block, block2: &Block, tol: f64) 
     };
     other = other_aligned;
     if let Some(perm_align) = perm_opt {
-        update_axis_map(&mut axis_map, perm_align);
+        face_label = remap_face_label(&face_label, perm_align);
     }
 
-    flip_ud_axis = axis_map[flip_ud_axis];
-    flip_lr_axis = axis_map[flip_lr_axis];
+    let (flip_ud_axis, flip_lr_axis) = flip_axes_for_face(&face_label);
     other = apply_face_flips(&other, flip_ud_axis, flip_lr_axis, flip_ud, flip_lr);
 
-    let step1 = dominant_step(&base, stack_axis);
-    let step2 = dominant_step(&other, stack_axis);
+    // Match Python logic: choose the dominant coordinate component based on
+    // block1, then compare block2 on that same component to decide flipping.
+    let steps1 = component_steps(&base, stack_axis);
+    let dominant_idx = argmax_abs(&steps1);
+    let step1 = steps1[dominant_idx];
+    let step2 = component_steps(&other, stack_axis)[dominant_idx];
 
     if step1.signum() != 0.0 && step2.signum() != 0.0 && step1.signum() != step2.signum() {
         base = flip_block_axis(&base, stack_axis);
     }
 
-    let drop_first = face2.ends_with("min");
+    let drop_first = face_label.ends_with("min");
     let trimmed_other = trim_block_along_axis(&other, stack_axis, drop_first);
 
     let merged = if drop_first {
@@ -207,9 +208,12 @@ pub fn combine_nxnxn_cubes_mixed_pairs(
             let mut sorted_group: Vec<usize> = group.iter().copied().collect();
             sorted_group.sort_unstable();
 
-            let group_blocks: Vec<Block> = sorted_group.iter().map(|&i| blocks[i].clone()).collect();
+            let group_blocks: Vec<Block> =
+                sorted_group.iter().map(|&i| blocks[i].clone()).collect();
+            // Follow Python default: attempt several passes (4) when merging
+            // a candidate group, instead of tying tries to `cube_size`.
             let (partial_merges, local_indices) =
-                combine_blocks_mixed_pairs(&group_blocks, tol, cube_size);
+                combine_blocks_mixed_pairs(&group_blocks, tol, 4);
 
             let index_mapping: HashMap<usize, usize> = sorted_group
                 .iter()
@@ -332,11 +336,11 @@ fn permute_block_axes(block: &Block, perm: [usize; 3]) -> Block {
 
 /// Ensure the non-stacking axes of `block` match `target_dims`, optionally swapping them.
 fn align_cross_sections(
-    mut block: Block,
+    block: Block,
     target_dims: [usize; 3],
     stack_axis: usize,
 ) -> Option<(Block, Option<[usize; 3]>)> {
-    let mut dims = [block.imax, block.jmax, block.kmax];
+    let dims = [block.imax, block.jmax, block.kmax];
     let cross_axes: Vec<usize> = (0..3).filter(|&ax| ax != stack_axis).collect();
     if cross_axes.len() != 2 {
         return Some((block, None));
@@ -347,19 +351,6 @@ fn align_cross_sections(
     if aligned {
         return Some((block, None));
     }
-
-    let swapped_matches =
-        dims[axis_a] == target_dims[axis_b] && dims[axis_b] == target_dims[axis_a];
-    if swapped_matches {
-        let mut perm = [0usize, 1, 2];
-        perm.swap(axis_a, axis_b);
-        block = permute_block_axes(&block, perm);
-        dims = [block.imax, block.jmax, block.kmax];
-        if dims[axis_a] == target_dims[axis_a] && dims[axis_b] == target_dims[axis_b] {
-            return Some((block, Some(perm)));
-        }
-    }
-
     None
 }
 
@@ -381,18 +372,26 @@ fn apply_face_flips(
     result
 }
 
-/// Determine which coordinate changes the most along `axis`.
-fn dominant_step(block: &Block, axis: usize) -> f64 {
-    let steps = [
+/// Compute step magnitudes for X, Y, Z along `axis`.
+fn component_steps(block: &Block, axis: usize) -> [f64; 3] {
+    [
         coordinate_step(block, axis, 0),
         coordinate_step(block, axis, 1),
         coordinate_step(block, axis, 2),
-    ];
-    steps
-        .iter()
-        .copied()
-        .max_by(|a, b| a.abs().partial_cmp(&b.abs()).unwrap())
-        .unwrap_or(0.0)
+    ]
+}
+
+fn argmax_abs(vals: &[f64; 3]) -> usize {
+    let mut best = 0usize;
+    let mut best_abs = vals[0].abs();
+    for (i, v) in vals.iter().enumerate().skip(1) {
+        let a = v.abs();
+        if a > best_abs {
+            best = i;
+            best_abs = a;
+        }
+    }
+    best
 }
 
 /// Compute the signed step between the first and last plane along `axis`
@@ -523,39 +522,39 @@ fn linear_index(dims: [usize; 3], idx: [usize; 3]) -> usize {
     (idx[2] * dims[1] + idx[1]) * dims[0] + idx[0]
 }
 
-fn compose_perm(new_perm: [usize; 3], current: [usize; 3]) -> [usize; 3] {
-    [
-        current[new_perm[0]],
-        current[new_perm[1]],
-        current[new_perm[2]],
-    ]
-}
-
-fn remap_face_label(face: &str, perm: &[usize; 3]) -> String {
-    if let Some(orig_axis) = face_axis_from_label(face) {
-        if let Some(new_axis) = perm.iter().position(|&axis| axis == orig_axis) {
-            let axis_char = match new_axis {
-                0 => 'i',
-                1 => 'j',
-                2 => 'k',
-                _ => return face.to_string(),
-            };
-            let suffix = &face[1..];
-            return format!("{axis_char}{suffix}");
-        }
+fn flip_axes_for_face(face: &str) -> (usize, usize) {
+    match face.chars().next().map(|c| c.to_ascii_lowercase()) {
+        Some('i') => (1, 2),
+        Some('j') => (0, 2),
+        Some('k') => (0, 1),
+        _ => (1, 2),
     }
-    face.to_string()
 }
 
-fn face_axis_from_label(face: &str) -> Option<usize> {
-    face
-        .chars()
-        .next()
-        .map(|c| match c.to_ascii_lowercase() {
-            'i' => Some(0),
-            'j' => Some(1),
-            'k' => Some(2),
-            _ => None,
-        })
-        .flatten()
+fn remap_face_label(face: &str, perm: [usize; 3]) -> String {
+    let mut chars = face.chars();
+    let Some(axis_char) = chars.next() else {
+        return face.to_string();
+    };
+    let remainder: String = chars.collect();
+    let orig_axis = match axis_char.to_ascii_lowercase() {
+        'i' => 0,
+        'j' => 1,
+        'k' => 2,
+        _ => return face.to_string(),
+    };
+    let new_axis_idx = perm
+        .iter()
+        .position(|&old_axis| old_axis == orig_axis)
+        .unwrap_or(orig_axis);
+    let mut new_axis_char = match new_axis_idx {
+        0 => 'i',
+        1 => 'j',
+        2 => 'k',
+        _ => axis_char.to_ascii_lowercase(),
+    };
+    if axis_char.is_ascii_uppercase() {
+        new_axis_char = new_axis_char.to_ascii_uppercase();
+    }
+    format!("{new_axis_char}{remainder}")
 }
