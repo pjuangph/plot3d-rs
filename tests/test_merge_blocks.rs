@@ -51,7 +51,7 @@ fn merge_block_test() {
         .unwrap()
     } else {
         let (face_matches, _outer_faces) = connectivity_fast(&reduced_blocks);
-        let merged = combine_nxnxn_cubes_mixed_pairs(&reduced_blocks, &face_matches, 3, None);
+        let merged = s(&reduced_blocks, &face_matches, 3, None);
         let merged_blocks: Vec<_> = merged.into_iter().map(|(block, _ids)| block).collect();
 
         write_plot3d(

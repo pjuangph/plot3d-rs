@@ -31,21 +31,31 @@ pub fn combine_2_blocks_mixed_pairing(block1: &Block, block2: &Block, tol: f64) 
 
     let mut base = block1.clone();
     let mut other = block2.clone();
+    let mut axis_map = [0usize, 1, 2]; // original axis -> current axis index
+
+    let (mut flip_ud_axis, mut flip_lr_axis) = flip_axes_for_face(face2);
 
     if axis1 != axis2 {
         let mut perm = [0usize, 1, 2];
         perm.swap(axis1, axis2);
         other = permute_block_axes(&other, perm);
+        update_axis_map(&mut axis_map, perm);
     }
 
     let stack_axis = axis1;
     let target_dims = [base.imax, base.jmax, base.kmax];
-    other = match align_cross_sections(other, target_dims, stack_axis) {
-        Some(block) => block,
+    let (other_aligned, perm_opt) = match align_cross_sections(other, target_dims, stack_axis) {
+        Some(result) => result,
         None => return block1.clone(),
     };
+    other = other_aligned;
+    if let Some(perm_align) = perm_opt {
+        update_axis_map(&mut axis_map, perm_align);
+    }
 
-    other = apply_face_flips(&other, face2, flip_ud, flip_lr);
+    flip_ud_axis = axis_map[flip_ud_axis];
+    flip_lr_axis = axis_map[flip_lr_axis];
+    other = apply_face_flips(&other, flip_ud_axis, flip_lr_axis, flip_ud, flip_lr);
 
     let step1 = dominant_step(&base, stack_axis);
     let step2 = dominant_step(&other, stack_axis);
@@ -321,17 +331,21 @@ fn permute_block_axes(block: &Block, perm: [usize; 3]) -> Block {
 }
 
 /// Ensure the non-stacking axes of `block` match `target_dims`, optionally swapping them.
-fn align_cross_sections(mut block: Block, target_dims: [usize; 3], stack_axis: usize) -> Option<Block> {
+fn align_cross_sections(
+    mut block: Block,
+    target_dims: [usize; 3],
+    stack_axis: usize,
+) -> Option<(Block, Option<[usize; 3]>)> {
     let mut dims = [block.imax, block.jmax, block.kmax];
     let cross_axes: Vec<usize> = (0..3).filter(|&ax| ax != stack_axis).collect();
     if cross_axes.len() != 2 {
-        return Some(block);
+        return Some((block, None));
     }
     let axis_a = cross_axes[0];
     let axis_b = cross_axes[1];
     let aligned = dims[axis_a] == target_dims[axis_a] && dims[axis_b] == target_dims[axis_b];
     if aligned {
-        return Some(block);
+        return Some((block, None));
     }
 
     let swapped_matches =
@@ -342,7 +356,7 @@ fn align_cross_sections(mut block: Block, target_dims: [usize; 3], stack_axis: u
         block = permute_block_axes(&block, perm);
         dims = [block.imax, block.jmax, block.kmax];
         if dims[axis_a] == target_dims[axis_a] && dims[axis_b] == target_dims[axis_b] {
-            return Some(block);
+            return Some((block, Some(perm)));
         }
     }
 
@@ -350,34 +364,19 @@ fn align_cross_sections(mut block: Block, target_dims: [usize; 3], stack_axis: u
 }
 
 /// Apply the up/down and left/right flips implied by `flip_ud`/`flip_lr`.
-fn apply_face_flips(block: &Block, face: &str, flip_ud: bool, flip_lr: bool) -> Block {
+fn apply_face_flips(
+    block: &Block,
+    flip_ud_axis: usize,
+    flip_lr_axis: usize,
+    flip_ud: bool,
+    flip_lr: bool,
+) -> Block {
     let mut result = block.clone();
-    match face {
-        "imin" | "imax" => {
-            if flip_ud {
-                result = flip_block_axis(&result, 1);
-            }
-            if flip_lr {
-                result = flip_block_axis(&result, 2);
-            }
-        }
-        "jmin" | "jmax" => {
-            if flip_ud {
-                result = flip_block_axis(&result, 0);
-            }
-            if flip_lr {
-                result = flip_block_axis(&result, 2);
-            }
-        }
-        "kmin" | "kmax" => {
-            if flip_ud {
-                result = flip_block_axis(&result, 0);
-            }
-            if flip_lr {
-                result = flip_block_axis(&result, 1);
-            }
-        }
-        _ => {}
+    if flip_ud {
+        result = flip_block_axis(&result, flip_ud_axis);
+    }
+    if flip_lr {
+        result = flip_block_axis(&result, flip_lr_axis);
     }
     result
 }
@@ -522,4 +521,41 @@ fn coordinate_from_block(dims_a: [usize; 3], axis: usize, idx: [usize; 3]) -> bo
 
 fn linear_index(dims: [usize; 3], idx: [usize; 3]) -> usize {
     (idx[2] * dims[1] + idx[1]) * dims[0] + idx[0]
+}
+
+fn compose_perm(new_perm: [usize; 3], current: [usize; 3]) -> [usize; 3] {
+    [
+        current[new_perm[0]],
+        current[new_perm[1]],
+        current[new_perm[2]],
+    ]
+}
+
+fn remap_face_label(face: &str, perm: &[usize; 3]) -> String {
+    if let Some(orig_axis) = face_axis_from_label(face) {
+        if let Some(new_axis) = perm.iter().position(|&axis| axis == orig_axis) {
+            let axis_char = match new_axis {
+                0 => 'i',
+                1 => 'j',
+                2 => 'k',
+                _ => return face.to_string(),
+            };
+            let suffix = &face[1..];
+            return format!("{axis_char}{suffix}");
+        }
+    }
+    face.to_string()
+}
+
+fn face_axis_from_label(face: &str) -> Option<usize> {
+    face
+        .chars()
+        .next()
+        .map(|c| match c.to_ascii_lowercase() {
+            'i' => Some(0),
+            'j' => Some(1),
+            'k' => Some(2),
+            _ => None,
+        })
+        .flatten()
 }
