@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SplitDirection"],"fn":["max_aspect_ratio","split_blocks"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Endian"],"fn":["read_fortran_record","write_fortran_record"]};

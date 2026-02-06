@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["connectivity","connectivity_fast","find_matching_blocks","get_face_intersection"],"struct":["FaceMatch","FaceRecord","MatchPoint"],"trait":["FaceMatchPrinter","FaceRecordTraits"]};

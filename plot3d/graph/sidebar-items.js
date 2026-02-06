@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["WeightAggregate"],"fn":["build_weighted_graph_from_face_matches","csr_from_block_graph","write_ddcmp"],"struct":["BlockGraph","CsrGraph"]};

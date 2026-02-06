@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["find_edges","find_face_edges"],"struct":["BlockDiff","FaceDiff"],"type":["DiffPair"]};
