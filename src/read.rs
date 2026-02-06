@@ -270,3 +270,71 @@ fn read_vec_num(
 fn ioerr(msg: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
+
+/// Read an AP NASA Fortran unformatted file.
+///
+/// The AP NASA format stores a single block with header integers
+/// `[il, jl, kl, ile, ite, jtip, nbld]` followed by `jl` records
+/// of interleaved `(x, r, theta)` data (f32).
+///
+/// Returns `(block, nbld)` where `nbld` is the number of blades.
+/// Coordinates are converted from cylindrical `(x, r, theta)` to
+/// Cartesian `(x, y, z)`.
+pub fn read_ap_nasa(path: &str, endian: Endian) -> io::Result<(Block, i32)> {
+    let mut f = File::open(path)?;
+
+    // Record 1: 7 integers [il, jl, kl, ile, ite, jtip, nbld]
+    let int_rec = read_fortran_record(&mut f, endian)?;
+    if int_rec.len() < 28 {
+        return Err(ioerr("AP NASA header too short (expected 7 i32)"));
+    }
+    let il = utils::Endian::read_u32(&int_rec[0..4], endian) as usize;
+    let jl = utils::Endian::read_u32(&int_rec[4..8], endian) as usize;
+    let kl = utils::Endian::read_u32(&int_rec[8..12], endian) as usize;
+    // ile, ite, jtip are at offsets 12, 16, 20 (not needed for block)
+    let nbld = utils::Endian::read_u32(&int_rec[24..28], endian) as i32;
+
+    // Read jl records, each containing 3 * (il * kl) floats (f32)
+    let stride = il * kl;
+    let total = il * jl * kl;
+    let mut meshx = Vec::with_capacity(total);
+    let mut meshr = Vec::with_capacity(total);
+    let mut mesht = Vec::with_capacity(total);
+
+    for _j in 0..jl {
+        let rec = read_fortran_record(&mut f, endian)?;
+        let floats = utils::Endian::read_f32_slice(&rec, endian);
+        if floats.len() < 3 * stride {
+            return Err(ioerr("AP NASA data record too short"));
+        }
+        // Layout per record: [x(il*kl), r(il*kl), theta(il*kl)]
+        for idx in 0..stride {
+            meshx.push(floats[idx] as f64);
+            meshr.push(floats[stride + idx] as f64);
+            mesht.push(floats[2 * stride + idx] as f64);
+        }
+    }
+
+    // Data arrives in (j, k, i) order from reading jl records each of kl*il entries.
+    // Reorder to (i, j, k) with i-fastest for Rust Block convention.
+    // Convert from (x, r, theta) to (x, y, z):
+    //   y = r * cos(theta), z = r * sin(theta)
+    let mut x = Vec::with_capacity(total);
+    let mut y = Vec::with_capacity(total);
+    let mut z = Vec::with_capacity(total);
+
+    for k in 0..kl {
+        for j in 0..jl {
+            for i in 0..il {
+                let src = j * (kl * il) + k * il + i;
+                let r = meshr[src];
+                let theta = mesht[src];
+                x.push(meshx[src]);
+                y.push(r * theta.cos());
+                z.push(r * theta.sin());
+            }
+        }
+    }
+
+    Ok((Block::new(il, jl, kl, x, y, z), nbld))
+}

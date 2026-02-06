@@ -13,6 +13,7 @@ use crate::{
         create_face_from_diagonals, match_faces_to_list, outer_face_records_to_list, Face,
     },
     connectivity::{get_face_intersection, FaceMatch, FaceRecord},
+    utils::gcd_three,
 };
 
 /// Rotation matrix for the requested axis.
@@ -647,21 +648,6 @@ fn match_bounds(
 }
 
 const MATCH_TOL: f64 = 1e-6;
-
-/// Compute the greatest common divisor of two numbers.
-fn gcd_two(mut a: usize, mut b: usize) -> usize {
-    while b != 0 {
-        let r = a % b;
-        a = b;
-        b = r;
-    }
-    a
-}
-
-/// Compute the greatest common divisor of three numbers.
-fn gcd_three(a: usize, b: usize, c: usize) -> usize {
-    gcd_two(gcd_two(a, b), c)
-}
 
 /// Generate all permutations `(i, j)` for `len`, excluding pairs where `i == j`.
 ///

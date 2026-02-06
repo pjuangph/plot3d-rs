@@ -11,6 +11,7 @@ use crate::{
     block::Block,
     block_face_functions::{find_bounding_faces, outer_face_records_to_list, Face},
     connectivity::{FaceMatch, FaceRecord},
+    utils::gcd_three,
 };
 
 /// Detect translational periodicity along an axis.
@@ -385,17 +386,4 @@ fn face_key(face: &Face) -> FaceKey {
         face.jmax(),
         face.kmax(),
     )
-}
-
-fn gcd_two(mut a: usize, mut b: usize) -> usize {
-    while b != 0 {
-        let r = a % b;
-        a = b;
-        b = r;
-    }
-    a
-}
-
-fn gcd_three(a: usize, b: usize, c: usize) -> usize {
-    gcd_two(gcd_two(a, b), c)
 }

@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::{
     block::Block,
     connectivity::{FaceMatch, FaceRecord},
+    utils::gcd_three,
 };
 
 const DEFAULT_TOL: f64 = 1e-8;
@@ -341,6 +342,212 @@ impl Face {
             idx[2] *= factor;
         }
     }
+
+    /// True when the face collapses to a single point (all three indices constant).
+    pub fn is_point(&self) -> bool {
+        self.imin() == self.imax() && self.jmin() == self.jmax() && self.kmin() == self.kmax()
+    }
+
+    /// Return parametric face size in index-space cells.
+    ///
+    /// For a face with one constant axis this returns the product of the two
+    /// varying dimension ranges. For a degenerate or 3D region, returns the
+    /// product of all three ranges.
+    pub fn face_size(&self) -> usize {
+        let di = self.imax().saturating_sub(self.imin()).max(1);
+        let dj = self.jmax().saturating_sub(self.jmin()).max(1);
+        let dk = self.kmax().saturating_sub(self.kmin()).max(1);
+        if self.imin() == self.imax() {
+            dj * dk
+        } else if self.jmin() == self.jmax() {
+            di * dk
+        } else if self.kmin() == self.kmax() {
+            di * dj
+        } else {
+            di * dj * dk
+        }
+    }
+
+    /// Compute the (unnormalized) geometric normal using three corner points
+    /// from the parent block, based on which axis is constant.
+    pub fn normal(&self, block: &Block) -> [f64; 3] {
+        let axis = match self.const_axis() {
+            Some(a) => a,
+            None => return [0.0, 0.0, 0.0],
+        };
+
+        let (p1, p2, p3) = match axis {
+            FaceAxis::I => {
+                let ic = self.imin();
+                (
+                    to_array(block.xyz(ic, self.jmin(), self.kmin())),
+                    to_array(block.xyz(ic, self.jmax(), self.kmin())),
+                    to_array(block.xyz(ic, self.jmin(), self.kmax())),
+                )
+            }
+            FaceAxis::J => {
+                let jc = self.jmin();
+                (
+                    to_array(block.xyz(self.imin(), jc, self.kmin())),
+                    to_array(block.xyz(self.imax(), jc, self.kmin())),
+                    to_array(block.xyz(self.imin(), jc, self.kmax())),
+                )
+            }
+            FaceAxis::K => {
+                let kc = self.kmin();
+                (
+                    to_array(block.xyz(self.imin(), self.jmin(), kc)),
+                    to_array(block.xyz(self.imax(), self.jmin(), kc)),
+                    to_array(block.xyz(self.imin(), self.jmax(), kc)),
+                )
+            }
+        };
+
+        cross(sub(p2, p1), sub(p3, p1))
+    }
+
+    /// Shift all stored vertices by `(dx, dy, dz)` in place.
+    pub fn shift(&mut self, dx: f64, dy: f64, dz: f64) {
+        for v in &mut self.vertices {
+            v[0] += dx;
+            v[1] += dy;
+            v[2] += dz;
+        }
+        self.centroid[0] += dx;
+        self.centroid[1] += dy;
+        self.centroid[2] += dz;
+    }
+
+    /// Find vertex-index correspondences between `self` and `other`.
+    ///
+    /// Returns pairs `[i_self, j_other]` where vertex `i_self` of this face
+    /// matches vertex `j_other` of `other` within tolerance 1e-6.
+    pub fn match_indices(&self, other: &Face) -> Vec<[usize; 2]> {
+        let tol = 1e-6;
+        let mut matched_other = vec![false; other.vertices.len()];
+        let mut result = Vec::new();
+        for (i, v_self) in self.vertices.iter().enumerate() {
+            for (j, v_other) in other.vertices.iter().enumerate() {
+                if matched_other[j] {
+                    continue;
+                }
+                if (v_self[0] - v_other[0]).abs() < tol
+                    && (v_self[1] - v_other[1]).abs() < tol
+                    && (v_self[2] - v_other[2]).abs() < tol
+                {
+                    result.push([i, j]);
+                    matched_other[j] = true;
+                    break;
+                }
+            }
+        }
+        result
+    }
+
+    /// Compute the overlap area fraction between this face and `other` using
+    /// Sutherland-Hodgman polygon clipping.
+    ///
+    /// Returns `intersection_area / min(area_self, area_other)`.
+    /// Returns 0.0 if normals are not (anti-)parallel within `tol_angle_deg`
+    /// or if the faces are not coplanar within `tol_plane_dist`.
+    pub fn overlap_fraction(&self, other: &Face, tol_angle_deg: f64, tol_plane_dist: f64) -> f64 {
+        if self.vertices.len() < 3 || other.vertices.len() < 3 {
+            return 0.0;
+        }
+
+        let n1 = quad_normal_from_verts(&self.vertices);
+        let n2 = quad_normal_from_verts(&other.vertices);
+        let len1 = vec_norm(n1);
+        let len2 = vec_norm(n2);
+        if len1 < 1e-15 || len2 < 1e-15 {
+            return 0.0;
+        }
+
+        // Check normal parallelism (allow anti-parallel)
+        let cos_angle = dot3(n1, n2) / (len1 * len2);
+        let angle_deg = cos_angle.abs().min(1.0).acos().to_degrees();
+        if angle_deg > tol_angle_deg {
+            return 0.0;
+        }
+
+        // Check coplanarity: all vertices of other within tol of self's plane
+        let p0 = self.vertices[0];
+        let n_hat = [n1[0] / len1, n1[1] / len1, n1[2] / len1];
+        // Adaptive tolerance: scale by face diagonal if needed
+        let diag = self.diagonal_length().max(other.diagonal_length()).max(1e-12);
+        let plane_tol = tol_plane_dist * diag;
+        for v in &other.vertices {
+            let d = dot3(sub(*v, p0), n_hat).abs();
+            if d > plane_tol {
+                return 0.0;
+            }
+        }
+
+        // Project to 2D
+        let drop = dominant_projection_axis(n_hat);
+        let poly_self = project_drop_axis(&self.vertices, drop);
+        let poly_other = project_drop_axis(&other.vertices, drop);
+
+        let area_self = poly_area_2d(&poly_self).abs();
+        let area_other = poly_area_2d(&poly_other).abs();
+        if area_self < 1e-30 || area_other < 1e-30 {
+            return 0.0;
+        }
+
+        let clipped = clip_sutherland_hodgman(&poly_other, &poly_self);
+        if clipped.len() < 3 {
+            return 0.0;
+        }
+
+        let area_inter = poly_area_2d(&clipped).abs();
+        area_inter / area_self.min(area_other)
+    }
+
+    /// Returns `true` if `overlap_fraction >= min_overlap_frac`.
+    pub fn touches(
+        &self,
+        other: &Face,
+        tol_angle_deg: f64,
+        tol_plane_dist: f64,
+        min_overlap_frac: f64,
+    ) -> bool {
+        self.overlap_fraction(other, tol_angle_deg, tol_plane_dist) >= min_overlap_frac
+    }
+
+    /// Fraction of shared grid nodes between this face and `other`.
+    ///
+    /// Uses quantized point comparison for robustness.
+    pub fn shared_point_fraction(
+        &self,
+        other: &Face,
+        block_self: &Block,
+        block_other: &Block,
+        tol_xyz: f64,
+        stride_u: usize,
+        stride_v: usize,
+    ) -> f64 {
+        let pts_self = self.grid_points(block_self, stride_u, stride_v);
+        let pts_other = other.grid_points(block_other, stride_u, stride_v);
+        if pts_self.is_empty() || pts_other.is_empty() {
+            return 0.0;
+        }
+
+        let q_self: HashSet<_> = pts_self
+            .iter()
+            .map(|p| quantize_point(*p, tol_xyz))
+            .collect();
+        let q_other: HashSet<_> = pts_other
+            .iter()
+            .map(|p| quantize_point(*p, tol_xyz))
+            .collect();
+
+        let shared = q_self.intersection(&q_other).count();
+        let denom = pts_self.len().min(pts_other.len()) as f64;
+        if denom == 0.0 {
+            return 0.0;
+        }
+        (shared as f64) / denom
+    }
 }
 
 /// Helper structure representing a structured face grid.
@@ -443,6 +650,134 @@ fn quantize_point(p: [f64; 3], tol: f64) -> (i64, i64, i64) {
 /// Convert a tuple `(x, y, z)` into an array `[f64; 3]`.
 fn to_array(p: (f64, f64, f64)) -> [f64; 3] {
     [p.0, p.1, p.2]
+}
+
+/// Dot product of two 3-vectors.
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// Euclidean norm of a 3-vector.
+fn vec_norm(a: [f64; 3]) -> f64 {
+    dot3(a, a).sqrt()
+}
+
+/// Average unit normal of a quad given as vertex positions.
+/// Splits into two triangles and averages.
+fn quad_normal_from_verts(verts: &[[f64; 3]]) -> [f64; 3] {
+    if verts.len() < 3 {
+        return [0.0, 0.0, 1.0];
+    }
+    let n1 = cross(sub(verts[1], verts[0]), sub(verts[2], verts[0]));
+    if verts.len() < 4 {
+        return n1;
+    }
+    let n2 = cross(sub(verts[2], verts[0]), sub(verts[3], verts[0]));
+    let avg = [
+        (n1[0] + n2[0]) * 0.5,
+        (n1[1] + n2[1]) * 0.5,
+        (n1[2] + n2[2]) * 0.5,
+    ];
+    let len = vec_norm(avg);
+    if len < 1e-30 {
+        return [0.0, 0.0, 1.0];
+    }
+    [avg[0] / len, avg[1] / len, avg[2] / len]
+}
+
+/// Return the axis index (0, 1, or 2) with the largest absolute normal component.
+fn dominant_projection_axis(n: [f64; 3]) -> usize {
+    let ax = n[0].abs();
+    let ay = n[1].abs();
+    let az = n[2].abs();
+    if ax >= ay && ax >= az {
+        0
+    } else if ay >= az {
+        1
+    } else {
+        2
+    }
+}
+
+/// Project 3D points to 2D by dropping one axis.
+fn project_drop_axis(pts: &[[f64; 3]], drop: usize) -> Vec<[f64; 2]> {
+    let (a, b) = match drop {
+        0 => (1, 2),
+        1 => (0, 2),
+        _ => (0, 1),
+    };
+    pts.iter().map(|p| [p[a], p[b]]).collect()
+}
+
+/// Signed area of a 2D polygon via the shoelace formula.
+fn poly_area_2d(poly: &[[f64; 2]]) -> f64 {
+    let n = poly.len();
+    if n < 3 {
+        return 0.0;
+    }
+    let mut area = 0.0;
+    for i in 0..n {
+        let j = (i + 1) % n;
+        area += poly[i][0] * poly[j][1] - poly[j][0] * poly[i][1];
+    }
+    area * 0.5
+}
+
+/// Sutherland-Hodgman convex polygon clipping.
+///
+/// Clips `subject` against each edge of `clipper`. Both are 2D polygons.
+fn clip_sutherland_hodgman(subject: &[[f64; 2]], clipper: &[[f64; 2]]) -> Vec<[f64; 2]> {
+    if subject.is_empty() || clipper.is_empty() {
+        return Vec::new();
+    }
+
+    let mut output = subject.to_vec();
+
+    let cn = clipper.len();
+    for i in 0..cn {
+        if output.is_empty() {
+            return output;
+        }
+        let edge_start = clipper[i];
+        let edge_end = clipper[(i + 1) % cn];
+        let input = output;
+        output = Vec::new();
+
+        let inside = |p: [f64; 2]| -> bool {
+            // Cross product of edge direction with vector to point
+            (edge_end[0] - edge_start[0]) * (p[1] - edge_start[1])
+                - (edge_end[1] - edge_start[1]) * (p[0] - edge_start[0])
+                >= 0.0
+        };
+
+        let intersect = |p1: [f64; 2], p2: [f64; 2]| -> [f64; 2] {
+            let d1x = p2[0] - p1[0];
+            let d1y = p2[1] - p1[1];
+            let d2x = edge_end[0] - edge_start[0];
+            let d2y = edge_end[1] - edge_start[1];
+            let denom = d1x * d2y - d1y * d2x;
+            if denom.abs() < 1e-30 {
+                return p1;
+            }
+            let t = ((edge_start[0] - p1[0]) * d2y - (edge_start[1] - p1[1]) * d2x) / denom;
+            [p1[0] + t * d1x, p1[1] + t * d1y]
+        };
+
+        let n_in = input.len();
+        for j in 0..n_in {
+            let current = input[j];
+            let prev = input[(j + n_in - 1) % n_in];
+            if inside(current) {
+                if !inside(prev) {
+                    output.push(intersect(prev, current));
+                }
+                output.push(current);
+            } else if inside(prev) {
+                output.push(intersect(prev, current));
+            }
+        }
+    }
+    output
 }
 
 /// Deduplicate index pairs (order-agnostic).
@@ -1169,19 +1504,6 @@ pub fn block_connection_matrix(
     }
 
     (connectivity, conn_i, conn_j, conn_k)
-}
-
-fn gcd_two(mut a: usize, mut b: usize) -> usize {
-    while b != 0 {
-        let r = a % b;
-        a = b;
-        b = r;
-    }
-    a
-}
-
-fn gcd_three(a: usize, b: usize, c: usize) -> usize {
-    gcd_two(gcd_two(a, b), c)
 }
 
 /// Standardise block orientation so that indices increase with coordinate values.

@@ -5,6 +5,7 @@ use serde::Serialize;
 use crate::{
     block::Block,
     block_face_functions::{create_face_from_diagonals, get_outer_faces, split_face, Face},
+    utils::gcd_three,
 };
 
 const DEFAULT_TOL: f64 = 1e-6;
@@ -814,19 +815,4 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
     }
 
     (matches, formatted)
-}
-
-/// Greatest common divisor of two integers.
-fn gcd_two(mut a: usize, mut b: usize) -> usize {
-    while b != 0 {
-        let r = a % b;
-        a = b;
-        b = r;
-    }
-    a
-}
-
-/// Greatest common divisor of three integers.
-fn gcd_three(a: usize, b: usize, c: usize) -> usize {
-    gcd_two(gcd_two(a, b), c)
 }

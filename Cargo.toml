@@ -1,6 +1,6 @@
 [package]
 name = "plot3d"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 license = "MIT"
 description = "Utilities for reading, writing, and manipulating NASA PLOT3D structured grids."
@@ -12,19 +12,15 @@ path = "src/lib.rs"
 [dependencies]
 byteorder = "1.5"
 thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+metis = { version = "0.2", optional = true }
 
 # for tests (download)
 reqwest = { version = "0.12", features = ["blocking"] }
-ndarray = { version = "0.15", features = ["rayon"] }
-ndarray-stats = "0.6"
-petgraph = "0.6"
-itertools = "0.12"
-num-traits = "0.2"
-ordered-float = "4.2"
-metis = "0.2"
-polars = { version = "0.51", features = ["lazy", "parquet", "csv"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+
+[features]
+default = []
+metis-partition = ["metis"]
 
 [dev-dependencies]
 tempfile = "3.10"

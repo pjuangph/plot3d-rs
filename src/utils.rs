@@ -1,5 +1,20 @@
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use std::io::{self, Read, Write};
+
+/// Greatest common divisor of two integers.
+pub(crate) fn gcd_two(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    a
+}
+
+/// Greatest common divisor of three integers.
+pub(crate) fn gcd_three(a: usize, b: usize, c: usize) -> usize {
+    gcd_two(gcd_two(a, b), c)
+}
 #[derive(Copy, Clone, Debug)]
 pub enum Endian {
     Little,
