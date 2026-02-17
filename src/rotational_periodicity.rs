@@ -10,7 +10,8 @@ use std::f64::consts::PI;
 use crate::{
     block::Block,
     block_face_functions::{
-        create_face_from_diagonals, match_faces_to_list, outer_face_records_to_list, Face,
+        create_face_from_diagonals, match_faces_to_list, outer_face_records_to_list, reduce_blocks,
+        rotate_block, Face,
     },
     connectivity::{get_face_intersection, FaceMatch, FaceRecord},
     utils::gcd_three,
@@ -666,4 +667,281 @@ fn permutations_indices(len: usize) -> Vec<(usize, usize)> {
         }
     }
     out
+}
+
+/// Compute the rotation angle and matrix from `face1` to `face2`.
+///
+/// This assumes the rotation axis is the x-direction, which is suitable
+/// for faces within the same turbomachinery passage.
+///
+/// Reference: Linear Real Transforms from GlennHT (`M_ccMBMesh.F`, `computeLRT`).
+///
+/// # Arguments
+/// * `face1` - Source face.
+/// * `face2` - Target face.
+///
+/// # Returns
+/// `(angle_radians, rotation_matrix_3x3)`. Returns `(0.0, zeros)` when the
+/// faces are already aligned.
+pub fn linear_real_transform(face1: &Face, face2: &Face) -> (f64, [[f64; 3]; 3]) {
+    let zero_matrix = [[0.0; 3]; 3];
+
+    let (lower1, upper1) = match face1.get_corners() {
+        Some(c) => c,
+        None => return (0.0, zero_matrix),
+    };
+    let (lower2, upper2) = match face2.get_corners() {
+        Some(c) => c,
+        None => return (0.0, zero_matrix),
+    };
+
+    // Diagonal vectors
+    let d_to = [
+        upper1[0] - lower1[0],
+        upper1[1] - lower1[1],
+        upper1[2] - lower1[2],
+    ];
+    let d_from = [
+        upper2[0] - lower2[0],
+        upper2[1] - lower2[1],
+        upper2[2] - lower2[2],
+    ];
+
+    let ld_to = (d_to[0] * d_to[0] + d_to[1] * d_to[1] + d_to[2] * d_to[2]).sqrt();
+    let ld_from = (d_from[0] * d_from[0] + d_from[1] * d_from[1] + d_from[2] * d_from[2]).sqrt();
+
+    if ld_to < 1e-15 || ld_from < 1e-15 {
+        return (0.0, zero_matrix);
+    }
+
+    let n_to = [d_to[0] / ld_to, d_to[1] / ld_to, d_to[2] / ld_to];
+    let n_from = [
+        d_from[0] / ld_from,
+        d_from[1] / ld_from,
+        d_from[2] / ld_from,
+    ];
+
+    let dot = n_to[0] * n_from[0] + n_to[1] * n_from[1] + n_to[2] * n_from[2];
+
+    if (dot - 1.0).abs() < 1e-10 {
+        // No rotation needed
+        return (0.0, zero_matrix);
+    }
+
+    // Compute angle from y,z components (rotation about x-axis)
+    let denom_to = (n_to[1] * n_to[1] + n_to[2] * n_to[2]).sqrt();
+    let denom_from = (n_from[1] * n_from[1] + n_from[2] * n_from[2]).sqrt();
+
+    if denom_to < 1e-15 || denom_from < 1e-15 {
+        return (0.0, zero_matrix);
+    }
+
+    let cos_ang =
+        (n_to[1] * n_from[1] + n_to[2] * n_from[2]) / (denom_to * denom_from);
+    let sin_ang =
+        (n_to[2] * n_from[1] - n_to[1] * n_from[2]) / (denom_to * denom_from);
+    let mut ang = cos_ang.clamp(-1.0, 1.0).acos();
+    if sin_ang < 0.0 {
+        ang = -ang;
+    }
+
+    let rotation_matrix = [
+        [1.0, 0.0, 0.0],
+        [0.0, cos_ang, -sin_ang],
+        [0.0, sin_ang, cos_ang],
+    ];
+
+    (ang, rotation_matrix)
+}
+
+/// Verify periodic face matches by checking diagonal corners after rotation.
+///
+/// Same algorithm as [`crate::connectivity::verify_connectivity`] but rotates
+/// block1 by `±theta` before checking spatial consistency.
+///
+/// # Arguments
+/// * `blocks` - Full-resolution blocks.
+/// * `face_matches` - Periodic face matches to verify.
+/// * `theta` - Rotation angle in radians.
+/// * `rotation_axis` - Axis of rotation (`'x'`, `'y'`, or `'z'`).
+/// * `tol` - Euclidean distance tolerance for corner matching.
+///
+/// # Returns
+/// `(verified, mismatched)` vectors of face matches.
+pub fn verify_periodicity(
+    blocks: &[Block],
+    face_matches: &[FaceMatch],
+    theta: f64,
+    rotation_axis: char,
+    tol: f64,
+) -> (Vec<FaceMatch>, Vec<FaceMatch>) {
+    // Compute GCD and reduce blocks
+    let gcd_to_use = blocks
+        .iter()
+        .map(|b| {
+            gcd_three(
+                b.imax.saturating_sub(1),
+                b.jmax.saturating_sub(1),
+                b.kmax.saturating_sub(1),
+            )
+        })
+        .filter(|&g| g > 0)
+        .min()
+        .unwrap_or(1)
+        .max(1);
+
+    let reduced = reduce_blocks(blocks, gcd_to_use);
+
+    // Build rotation matrices for +theta and -theta
+    let rot_pos = create_rotation_matrix(theta, rotation_axis);
+    let rot_neg = create_rotation_matrix(-theta, rotation_axis);
+
+    // Pre-rotate all reduced blocks in both directions
+    let rotated_pos: Vec<Block> = reduced.iter().map(|b| rotate_block(b, rot_pos)).collect();
+    let rotated_neg: Vec<Block> = reduced.iter().map(|b| rotate_block(b, rot_neg)).collect();
+
+    // Scale down face_match indices by GCD
+    let mut scaled_matches: Vec<FaceMatch> = face_matches.to_vec();
+    for fm in &mut scaled_matches {
+        fm.divide_indices(gcd_to_use);
+    }
+
+    let mut verified = Vec::new();
+    let mut mismatched = Vec::new();
+
+    for (idx, fm) in scaled_matches.iter().enumerate() {
+        let b1 = &fm.block1;
+        let b2 = &fm.block2;
+
+        if b1.block_index >= reduced.len() || b2.block_index >= reduced.len() {
+            mismatched.push(face_matches[idx].clone());
+            continue;
+        }
+
+        let block2 = &reduced[b2.block_index];
+
+        // Enumerate unique corners of block2's face
+        let i_vals = [b2.imin, b2.imax];
+        let j_vals = [b2.jmin, b2.jmax];
+        let k_vals = [b2.kmin, b2.kmax];
+
+        let mut unique_corners: Vec<(usize, usize, usize)> = Vec::new();
+        {
+            let mut seen = HashSet::new();
+            for &i in &i_vals {
+                for &j in &j_vals {
+                    for &k in &k_vals {
+                        if seen.insert((i, j, k)) {
+                            unique_corners.push((i, j, k));
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut found = false;
+        let mut best_d_lower = f64::INFINITY;
+        let mut best_d_upper = f64::INFINITY;
+
+        // Try +theta rotation first, then -theta
+        for rotated_blocks in [&rotated_pos, &rotated_neg] {
+            if found {
+                break;
+            }
+
+            let block1_rotated = &rotated_blocks[b1.block_index];
+
+            // Block1 rotated diagonal coordinates
+            let (x1_l, y1_l, z1_l) = block1_rotated.xyz(b1.imin, b1.jmin, b1.kmin);
+            let (x1_u, y1_u, z1_u) = block1_rotated.xyz(b1.imax, b1.jmax, b1.kmax);
+
+            // Check stored diagonal first
+            let (x2_l, y2_l, z2_l) = block2.xyz(b2.imin, b2.jmin, b2.kmin);
+            let (x2_u, y2_u, z2_u) = block2.xyz(b2.imax, b2.jmax, b2.kmax);
+
+            let d_lower = ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
+            let d_upper = ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
+
+            if d_lower < best_d_lower {
+                best_d_lower = d_lower;
+            }
+            if d_upper < best_d_upper {
+                best_d_upper = d_upper;
+            }
+
+            if d_lower < tol && d_upper < tol {
+                verified.push(face_matches[idx].clone());
+                found = true;
+                break;
+            }
+
+            // Try all permutations of block2's corners
+            for &(il, jl, kl) in &unique_corners {
+                for &(iu, ju, ku) in &unique_corners {
+                    if (il, jl, kl) == (iu, ju, ku) {
+                        continue;
+                    }
+
+                    let (x2_l, y2_l, z2_l) = block2.xyz(il, jl, kl);
+                    let (x2_u, y2_u, z2_u) = block2.xyz(iu, ju, ku);
+
+                    let dl = ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
+                    let du = ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
+
+                    if dl < best_d_lower {
+                        best_d_lower = dl;
+                    }
+                    if du < best_d_upper {
+                        best_d_upper = du;
+                    }
+
+                    if dl < tol && du < tol {
+                        let mut corrected = face_matches[idx].clone();
+                        corrected.block2.imin = il * gcd_to_use;
+                        corrected.block2.jmin = jl * gcd_to_use;
+                        corrected.block2.kmin = kl * gcd_to_use;
+                        corrected.block2.imax = iu * gcd_to_use;
+                        corrected.block2.jmax = ju * gcd_to_use;
+                        corrected.block2.kmax = ku * gcd_to_use;
+                        verified.push(corrected);
+                        found = true;
+                        break;
+                    }
+                }
+                if found {
+                    break;
+                }
+            }
+        }
+
+        if !found {
+            eprintln!(
+                "verify_periodicity: MISMATCH at face_match index {}",
+                idx
+            );
+            eprintln!(
+                "  block1 (block_index={}): lower=({},{},{}) upper=({},{},{})",
+                face_matches[idx].block1.block_index,
+                face_matches[idx].block1.imin, face_matches[idx].block1.jmin, face_matches[idx].block1.kmin,
+                face_matches[idx].block1.imax, face_matches[idx].block1.jmax, face_matches[idx].block1.kmax,
+            );
+            eprintln!(
+                "  block2 (block_index={}): lower=({},{},{}) upper=({},{},{})",
+                face_matches[idx].block2.block_index,
+                face_matches[idx].block2.imin, face_matches[idx].block2.jmin, face_matches[idx].block2.kmin,
+                face_matches[idx].block2.imax, face_matches[idx].block2.jmax, face_matches[idx].block2.kmax,
+            );
+            eprintln!(
+                "  Closest rotated block1 corner dist to block2 lower: {:.6e}",
+                best_d_lower
+            );
+            eprintln!(
+                "  Closest rotated block1 corner dist to block2 upper: {:.6e}",
+                best_d_upper
+            );
+            mismatched.push(face_matches[idx].clone());
+        }
+    }
+
+    (verified, mismatched)
 }

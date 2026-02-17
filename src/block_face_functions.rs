@@ -29,6 +29,21 @@ pub struct Face {
     id: Option<usize>,
 }
 
+/// Find the linear index of the vertex whose structured indices match `(i, j, k)`.
+fn corner_index(face: &Face, i: usize, j: usize, k: usize) -> usize {
+    face.indices
+        .iter()
+        .enumerate()
+        .find_map(|(idx, ijk)| {
+            if ijk[0] == i && ijk[1] == j && ijk[2] == k {
+                Some(idx)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0)
+}
+
 impl Face {
     /// Create an empty face.
     pub fn new() -> Self {
@@ -173,22 +188,28 @@ impl Face {
             && self.kmax() == other.kmax()
     }
 
+    /// Read-only access to the stored vertex coordinates.
+    pub fn vertices(&self) -> &[[f64; 3]] {
+        &self.vertices
+    }
+
+    /// Return the spatial coordinates of the two diagonal corners.
+    ///
+    /// The "lower" corner is the vertex at `(IMIN, JMIN, KMIN)` and the
+    /// "upper" corner is at `(IMAX, JMAX, KMAX)`.
+    ///
+    /// Returns `None` when the face has no vertices.
+    pub fn get_corners(&self) -> Option<([f64; 3], [f64; 3])> {
+        if self.vertices.is_empty() {
+            return None;
+        }
+        let min_idx = corner_index(self, self.imin(), self.jmin(), self.kmin());
+        let max_idx = corner_index(self, self.imax(), self.jmax(), self.kmax());
+        Some((self.vertices[min_idx], self.vertices[max_idx]))
+    }
+
     /// Length of the face diagonal between the extreme corner nodes.
     pub fn diagonal_length(&self) -> f64 {
-        fn corner_index(face: &Face, imin: usize, jmin: usize, kmin: usize) -> usize {
-            face.indices
-                .iter()
-                .enumerate()
-                .find_map(|(idx, ijk)| {
-                    if ijk[0] == imin && ijk[1] == jmin && ijk[2] == kmin {
-                        Some(idx)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0)
-        }
-
         let min_idx = corner_index(self, self.imin(), self.jmin(), self.kmin());
         let max_idx = corner_index(self, self.imax(), self.jmax(), self.kmax());
         let p0 = self.vertices[min_idx];
@@ -1379,7 +1400,7 @@ impl Default for BlockConnectionOptions {
             min_shared_abs: 4,
             stride_u: 1,
             stride_v: 1,
-            use_area_fallback: false,
+            use_area_fallback: true,
             area_min_overlap_frac: 0.01,
         }
     }
@@ -1454,7 +1475,7 @@ pub fn block_connection_matrix(
             let mut connected = false;
             for face_i in &faces_by_block[i] {
                 for face_j in &faces_by_block[j] {
-                    if face_i.touches_by_nodes(
+                    let node_match = face_i.touches_by_nodes(
                         face_j,
                         &reduced[i],
                         &reduced[j],
@@ -1463,7 +1484,16 @@ pub fn block_connection_matrix(
                         options.min_shared_abs,
                         options.stride_u,
                         options.stride_v,
-                    ) {
+                    );
+
+                    // Fallback to polygon overlap for non-conforming interfaces
+                    let area_match = if !node_match && options.use_area_fallback {
+                        face_i.touches(face_j, 10.0, 1e-6, options.area_min_overlap_frac)
+                    } else {
+                        false
+                    };
+
+                    if node_match || area_match {
                         connectivity[i][j] = 1;
                         connectivity[j][i] = 1;
                         if face_i.const_axis() == Some(FaceAxis::I)

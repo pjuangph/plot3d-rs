@@ -4,7 +4,9 @@ use serde::Serialize;
 
 use crate::{
     block::Block,
-    block_face_functions::{create_face_from_diagonals, get_outer_faces, split_face, Face},
+    block_face_functions::{
+        create_face_from_diagonals, get_outer_faces, reduce_blocks, split_face, Face,
+    },
     utils::gcd_three,
 };
 
@@ -815,4 +817,230 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
     }
 
     (matches, formatted)
+}
+
+/// Verify that face-match diagonal corners are spatially consistent.
+///
+/// For each match, checks that block1's lower/upper corner coordinates align
+/// with block2's lower/upper corners (within tolerance). When the stored
+/// diagonal does not match, all permutations of block2's face corners are
+/// tried. If a valid permutation is found the match is corrected; otherwise
+/// it is classified as mismatched.
+///
+/// Uses GCD reduction (same as [`connectivity_fast`]) for efficient lookups.
+///
+/// # Arguments
+/// * `blocks` - Full-resolution blocks.
+/// * `face_matches` - Face matches to verify (typically from [`connectivity_fast`]).
+/// * `tol` - Euclidean distance tolerance for corner matching.
+///
+/// # Returns
+/// `(verified, mismatched)` where `verified` contains corrected matches and
+/// `mismatched` contains matches that could not be verified.
+pub fn verify_connectivity(
+    blocks: &[Block],
+    face_matches: &[FaceMatch],
+    tol: f64,
+) -> (Vec<FaceMatch>, Vec<FaceMatch>) {
+    // Compute GCD and reduce blocks
+    let gcd_to_use = blocks
+        .iter()
+        .map(|b| gcd_three(b.imax.saturating_sub(1), b.jmax.saturating_sub(1), b.kmax.saturating_sub(1)))
+        .filter(|&g| g > 0)
+        .min()
+        .unwrap_or(1)
+        .max(1);
+
+    let reduced = reduce_blocks(blocks, gcd_to_use);
+
+    // Scale down face_match indices by GCD
+    let mut scaled_matches: Vec<FaceMatch> = face_matches.to_vec();
+    for fm in &mut scaled_matches {
+        fm.divide_indices(gcd_to_use);
+    }
+
+    let mut verified = Vec::new();
+    let mut mismatched = Vec::new();
+
+    for (idx, fm) in scaled_matches.iter().enumerate() {
+        let b1 = &fm.block1;
+        let b2 = &fm.block2;
+
+        if b1.block_index >= reduced.len() || b2.block_index >= reduced.len() {
+            mismatched.push(face_matches[idx].clone());
+            continue;
+        }
+
+        let block1 = &reduced[b1.block_index];
+        let block2 = &reduced[b2.block_index];
+
+        // Block1 diagonal coordinates
+        let (x1_l, y1_l, z1_l) = block1.xyz(b1.imin, b1.jmin, b1.kmin);
+        let (x1_u, y1_u, z1_u) = block1.xyz(b1.imax, b1.jmax, b1.kmax);
+
+        // Check stored diagonal first
+        let (x2_l, y2_l, z2_l) = block2.xyz(b2.imin, b2.jmin, b2.kmin);
+        let (x2_u, y2_u, z2_u) = block2.xyz(b2.imax, b2.jmax, b2.kmax);
+
+        let d_lower = ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
+        let d_upper = ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
+
+        if d_lower < tol && d_upper < tol {
+            verified.push(face_matches[idx].clone());
+            continue;
+        }
+
+        // Enumerate unique corners of block2's face
+        let i_vals = [b2.imin, b2.imax];
+        let j_vals = [b2.jmin, b2.jmax];
+        let k_vals = [b2.kmin, b2.kmax];
+
+        let mut unique_corners: Vec<(usize, usize, usize)> = Vec::new();
+        let mut seen = HashSet::new();
+        for &i in &i_vals {
+            for &j in &j_vals {
+                for &k in &k_vals {
+                    if seen.insert((i, j, k)) {
+                        unique_corners.push((i, j, k));
+                    }
+                }
+            }
+        }
+
+        // Try all permutations of block2's corners
+        let mut found = false;
+        for &(il, jl, kl) in &unique_corners {
+            for &(iu, ju, ku) in &unique_corners {
+                if (il, jl, kl) == (iu, ju, ku) {
+                    continue;
+                }
+
+                let (x2_l, y2_l, z2_l) = block2.xyz(il, jl, kl);
+                let (x2_u, y2_u, z2_u) = block2.xyz(iu, ju, ku);
+
+                let dl = ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
+                let du = ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
+
+                if dl < tol && du < tol {
+                    let mut corrected = face_matches[idx].clone();
+                    corrected.block2.imin = il * gcd_to_use;
+                    corrected.block2.jmin = jl * gcd_to_use;
+                    corrected.block2.kmin = kl * gcd_to_use;
+                    corrected.block2.imax = iu * gcd_to_use;
+                    corrected.block2.jmax = ju * gcd_to_use;
+                    corrected.block2.kmax = ku * gcd_to_use;
+                    verified.push(corrected);
+                    found = true;
+                    break;
+                }
+            }
+            if found {
+                break;
+            }
+        }
+
+        if !found {
+            eprintln!(
+                "verify_connectivity: MISMATCH at face_match index {}",
+                idx
+            );
+            eprintln!(
+                "  block1 (block_index={}): lower=({},{},{}) upper=({},{},{})",
+                face_matches[idx].block1.block_index,
+                face_matches[idx].block1.imin, face_matches[idx].block1.jmin, face_matches[idx].block1.kmin,
+                face_matches[idx].block1.imax, face_matches[idx].block1.jmax, face_matches[idx].block1.kmax,
+            );
+            eprintln!(
+                "  block2 (block_index={}): lower=({},{},{}) upper=({},{},{})",
+                face_matches[idx].block2.block_index,
+                face_matches[idx].block2.imin, face_matches[idx].block2.jmin, face_matches[idx].block2.kmin,
+                face_matches[idx].block2.imax, face_matches[idx].block2.jmax, face_matches[idx].block2.kmax,
+            );
+            mismatched.push(face_matches[idx].clone());
+        }
+    }
+
+    (verified, mismatched)
+}
+
+/// Validate and standardize face-match records by ensuring block2's diagonal
+/// corners are ordered to match the closest spatial correspondence with block1.
+///
+/// This is the Rust equivalent of Python's `face_matches_to_dict`.
+///
+/// # Arguments
+/// * `blocks` - Block array providing geometry.
+/// * `face_matches` - Matches to validate.
+///
+/// # Returns
+/// Validated face matches with corrected block2 diagonal indices.
+pub fn face_matches_to_dict(
+    blocks: &[Block],
+    face_matches: &[FaceMatch],
+) -> Vec<FaceMatch> {
+    face_matches
+        .iter()
+        .filter_map(|fm| {
+            let b1 = &fm.block1;
+            let b2 = &fm.block2;
+
+            let block1 = blocks.get(b1.block_index)?;
+            let block2 = blocks.get(b2.block_index)?;
+
+            let mut result = fm.clone();
+
+            // Block1 lower corner
+            let (x1_l, y1_l, z1_l) = block1.xyz(b1.imin, b1.jmin, b1.kmin);
+
+            // Search for closest block2 corner to block1's lower corner
+            let i_vals = [b2.imin, b2.imax];
+            let j_vals = [b2.jmin, b2.jmax];
+            let k_vals = [b2.kmin, b2.kmax];
+
+            let mut best_lower = (f64::MAX, b2.imin, b2.jmin, b2.kmin);
+            for &i in &i_vals {
+                for &j in &j_vals {
+                    for &k in &k_vals {
+                        let (x2, y2, z2) = block2.xyz(i, j, k);
+                        let d = ((x2 - x1_l).powi(2) + (y2 - y1_l).powi(2) + (z2 - z1_l).powi(2)).sqrt();
+                        if d < best_lower.0 {
+                            best_lower = (d, i, j, k);
+                        }
+                    }
+                }
+            }
+            result.block2.imin = best_lower.1;
+            result.block2.jmin = best_lower.2;
+            result.block2.kmin = best_lower.3;
+
+            // Block1 upper corner
+            let (x1_u, y1_u, z1_u) = block1.xyz(b1.imax, b1.jmax, b1.kmax);
+
+            let mut best_upper = (f64::MAX, b2.imax, b2.jmax, b2.kmax);
+            for &i in &i_vals {
+                for &j in &j_vals {
+                    for &k in &k_vals {
+                        let (x2, y2, z2) = block2.xyz(i, j, k);
+                        let d = ((x2 - x1_u).powi(2) + (y2 - y1_u).powi(2) + (z2 - z1_u).powi(2)).sqrt();
+                        if d < best_upper.0 {
+                            best_upper = (d, i, j, k);
+                        }
+                    }
+                }
+            }
+            result.block2.imax = best_upper.1;
+            result.block2.jmax = best_upper.2;
+            result.block2.kmax = best_upper.3;
+
+            // Preserve block1 indices as-is
+            result.block1.imin = b1.imin;
+            result.block1.jmin = b1.jmin;
+            result.block1.kmin = b1.kmin;
+            result.block1.imax = b1.imax;
+            result.block1.jmax = b1.jmax;
+            result.block1.kmax = b1.kmax;
+
+            Some(result)
+        })
+        .collect()
 }

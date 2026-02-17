@@ -31,28 +31,31 @@ pub fn write_plot3d(
             BinaryFormat::Fortran => write_fortran(&mut w, blocks, precision, endian),
         }
     } else {
-        write_ascii(path, blocks)
+        write_ascii(path, blocks, precision)
     }
 }
 
-fn write_ascii(path: &str, blocks: &[Block]) -> std::io::Result<()> {
+fn write_ascii(path: &str, blocks: &[Block], precision: FloatPrecision) -> std::io::Result<()> {
     let mut w = BufWriter::new(File::create(path)?);
     writeln!(w, "{}", blocks.len())?;
     for b in blocks {
         writeln!(w, "{} {} {}", b.imax, b.jmax, b.kmax)?;
     }
     for b in blocks {
-        write_var_ascii(&mut w, &b.x)?;
-        write_var_ascii(&mut w, &b.y)?;
-        write_var_ascii(&mut w, &b.z)?;
+        write_var_ascii(&mut w, &b.x, precision)?;
+        write_var_ascii(&mut w, &b.y, precision)?;
+        write_var_ascii(&mut w, &b.z, precision)?;
     }
     Ok(())
 }
 
-fn write_var_ascii(w: &mut impl Write, v: &[f64]) -> std::io::Result<()> {
+fn write_var_ascii(w: &mut impl Write, v: &[f64], precision: FloatPrecision) -> std::io::Result<()> {
     let mut col = 0usize;
     for val in v {
-        write!(w, "{:.8} ", val)?;
+        match precision {
+            FloatPrecision::F64 => write!(w, "{:23.15} ", val)?,
+            FloatPrecision::F32 => write!(w, "{:15.8} ", val)?,
+        }
         col += 1;
         if col % 6 == 0 {
             writeln!(w)?;

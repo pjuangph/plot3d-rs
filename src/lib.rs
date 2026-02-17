@@ -21,8 +21,8 @@ pub mod write;
 
 pub use block::{Block, FaceData};
 pub use connectivity::{
-    connectivity, connectivity_fast, FaceMatch, FaceMatchPrinter, FaceRecord, FaceRecordTraits,
-    MatchPoint,
+    connectivity, connectivity_fast, face_matches_to_dict, verify_connectivity, FaceMatch,
+    FaceMatchPrinter, FaceRecord, FaceRecordTraits, MatchPoint,
 };
 pub use differencing::{find_edges, find_face_edges, BlockDiff, FaceDiff};
 pub use graph::{build_weighted_graph_from_face_matches, write_ddcmp, BlockGraph, WeightAggregate};
@@ -32,8 +32,8 @@ pub use merge_blocks::{
 pub use point_match::point_match;
 pub use read::{read_ap_nasa, read_plot3d_ascii, read_plot3d_binary, BinaryFormat, FloatPrecision};
 pub use rotational_periodicity::{
-    create_rotation_matrix, rotate_block_with_matrix, rotated_periodicity, rotational_periodicity,
-    rotational_periodicity_fast, PeriodicPair,
+    create_rotation_matrix, linear_real_transform, rotate_block_with_matrix, rotated_periodicity,
+    rotational_periodicity, rotational_periodicity_fast, verify_periodicity, PeriodicPair,
 };
 pub use split_block::{split_blocks, SplitDirection};
 pub use translational_periodicity::translational_periodicity;
