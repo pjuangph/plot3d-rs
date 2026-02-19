@@ -16,7 +16,7 @@ use crate::{
         create_face_from_diagonals, find_angular_bounding_faces, match_faces_to_list,
         outer_face_records_to_list, reduce_blocks, rotate_block, to_radius, Face,
     },
-    connectivity::{get_face_intersection, FaceMatch, FaceRecord},
+    connectivity::{get_face_intersection, FaceMatch, FaceRecord, Orientation},
     utils::{apply_rotation, compute_min_gcd, distance3, FaceKey},
 };
 
@@ -313,6 +313,20 @@ pub fn rotational_periodicity(
 
             let block_b = &blocks[block_idx_b];
             let block_a_rot_fwd = rotate_block_with_matrix(&blocks[block_idx_a], rot_forward);
+
+            // Guard: ensure face indices fit within their block dimensions
+            let valid_face = |face: &Face, block: &Block| -> bool {
+                face.imin() < block.imax
+                    && face.imax() < block.imax
+                    && face.jmin() < block.jmax
+                    && face.jmax() < block.jmax
+                    && face.kmin() < block.kmax
+                    && face.kmax() < block.kmax
+            };
+            if !valid_face(&face_a, &block_a_rot_fwd) || !valid_face(&face_b, block_b) {
+                continue;
+            }
+
             if let Some((pair_faces, splits)) =
                 periodicity_check(&face_a, &face_b, &block_a_rot_fwd, block_b)
             {
@@ -334,6 +348,9 @@ pub fn rotational_periodicity(
                 break 'outer_loop;
             }
             let block_a_rot_rev = rotate_block_with_matrix(&blocks[block_idx_a], rot_backward);
+            if !valid_face(&face_a, &block_a_rot_rev) {
+                continue;
+            }
             if let Some((pair_faces, splits)) =
                 periodicity_check(&face_a, &face_b, &block_a_rot_rev, block_b)
             {
@@ -430,7 +447,7 @@ pub fn rotated_periodicity(
     let lower_keys: HashSet<FaceKey> = lower_angular.iter().map(face_key).collect();
     let upper_keys: HashSet<FaceKey> = upper_angular.iter().map(face_key).collect();
 
-    let mut periodic_pairs: Vec<(Face, Face)> = Vec::new();
+    let mut periodic_pairs: Vec<(Face, Face, Option<Orientation>)> = Vec::new();
     let mut non_matching: HashSet<(usize, usize)> = HashSet::new();
 
     // ===== PHASE 1: Full face matching with rotation (fast, corner-based) =====
@@ -476,20 +493,20 @@ pub fn rotated_periodicity(
                 }
 
                 let tol = 1e-6;
-                if let Some(_orientation) =
+                if let Some(orientation) =
                     full_face_match_transformed(face_a, face_b, &transform_fwd, tol)
                 {
                     consumed_keys.insert(face_key(face_a));
                     consumed_keys.insert(face_key(face_b));
-                    periodic_pairs.push((face_a.clone(), face_b.clone()));
+                    periodic_pairs.push((face_a.clone(), face_b.clone(), Some(orientation)));
                     break;
                 }
-                if let Some(_orientation) =
+                if let Some(orientation) =
                     full_face_match_transformed(face_a, face_b, &transform_rev, tol)
                 {
                     consumed_keys.insert(face_key(face_a));
                     consumed_keys.insert(face_key(face_b));
-                    periodic_pairs.push((face_a.clone(), face_b.clone()));
+                    periodic_pairs.push((face_a.clone(), face_b.clone(), Some(orientation)));
                     break;
                 }
             }
@@ -619,7 +636,7 @@ pub fn rotated_periodicity(
                 .or_else(|| periodicity_check(&face_a, &face_b, rotated_rev, base));
 
             if let Some((pair_faces, splits)) = matched {
-                periodic_pairs.push((pair_faces[0].clone(), pair_faces[1].clone()));
+                periodic_pairs.push((pair_faces[0].clone(), pair_faces[1].clone(), None));
                 outer_faces_to_remove.push(face_a);
                 outer_faces_to_remove.push(face_b);
                 outer_faces_to_remove.extend(pair_faces.into_iter());
@@ -647,7 +664,7 @@ pub fn rotated_periodicity(
 
     let mut removal_keys: HashSet<FaceKey> = matched_faces_all.iter().map(face_key).collect();
 
-    for (face_a, face_b) in &periodic_pairs {
+    for (face_a, face_b, _) in &periodic_pairs {
         removal_keys.insert(face_key(face_a));
         removal_keys.insert(face_key(face_b));
     }
@@ -655,18 +672,18 @@ pub fn rotated_periodicity(
 
     // Remove duplicate periodic pairs (order-insensitive)
     let mut dedup: HashSet<(FaceKey, FaceKey)> = HashSet::new();
-    periodic_pairs.retain(|(a, b)| {
+    periodic_pairs.retain(|(a, b, _)| {
         let key = ordered_pair(face_key(a), face_key(b));
         dedup.insert(key)
     });
 
     let mut periodic_exports: Vec<FaceMatch> = periodic_pairs
         .into_iter()
-        .map(|(a, b)| FaceMatch {
+        .map(|(a, b, orient)| FaceMatch {
             block1: FaceRecord::from_face(&a),
             block2: FaceRecord::from_face(&b),
             points: Vec::new(),
-            orientation: None,
+            orientation: orient,
         })
         .collect();
 
@@ -869,13 +886,17 @@ fn periodicity_check(
     let mut face_a = face1.clone();
     let mut face_b = face2.clone();
     let mut swapped = false;
-    if face_b.diagonal_length() < face_a.diagonal_length() {
+    // Swap both faces AND blocks so face_a always corresponds to block_a
+    let (block_a, block_b) = if face_b.diagonal_length() < face_a.diagonal_length() {
         std::mem::swap(&mut face_a, &mut face_b);
         swapped = true;
-    }
+        (block2, block1)
+    } else {
+        (block1, block2)
+    };
 
     let (matches, mut split1, split2) =
-        get_face_intersection(&face_a, &face_b, block1, block2, MATCH_TOL);
+        get_face_intersection(&face_a, &face_b, block_a, block_b, MATCH_TOL);
     if matches.len() < 4 {
         return None;
     }
@@ -884,7 +905,7 @@ fn periodicity_check(
     let bounds_b = match_bounds(&matches, false);
 
     let mut out1 = create_face_from_diagonals(
-        block1, bounds_a.0, bounds_a.2, bounds_a.4, bounds_a.1, bounds_a.3, bounds_a.5,
+        block_a, bounds_a.0, bounds_a.2, bounds_a.4, bounds_a.1, bounds_a.3, bounds_a.5,
     );
     out1.set_block_index(face_a.block_index().unwrap_or(usize::MAX));
     if let Some(id) = face_a.id() {
@@ -892,7 +913,7 @@ fn periodicity_check(
     }
 
     let mut out2 = create_face_from_diagonals(
-        block2, bounds_b.0, bounds_b.2, bounds_b.4, bounds_b.1, bounds_b.3, bounds_b.5,
+        block_b, bounds_b.0, bounds_b.2, bounds_b.4, bounds_b.1, bounds_b.3, bounds_b.5,
     );
     out2.set_block_index(face_b.block_index().unwrap_or(usize::MAX));
     if let Some(id) = face_b.id() {
