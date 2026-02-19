@@ -3,6 +3,7 @@ use std::io::{self, BufRead, BufReader, Read};
 
 use crate::block::Block;
 use crate::utils::{self, read_fortran_record, Endian};
+use crate::Float;
 
 #[derive(Copy, Clone, Debug)]
 pub enum BinaryFormat {
@@ -73,7 +74,7 @@ pub fn read_plot3d_ascii(path: &str) -> io::Result<Vec<Block>> {
     }
 
     // read N floats from ASCII
-    fn read_n(rdr: &mut BufReader<File>, n: usize) -> io::Result<Vec<f64>> {
+    fn read_n(rdr: &mut BufReader<File>, n: usize) -> io::Result<Vec<Float>> {
         let mut out = Vec::with_capacity(n);
         while out.len() < n {
             let mut line = String::new();
@@ -85,7 +86,7 @@ pub fn read_plot3d_ascii(path: &str) -> io::Result<Vec<Block>> {
                 if out.len() == n {
                     break;
                 }
-                out.push(t.parse::<f64>().map_err(|_| ioerr("bad float"))?);
+                out.push(t.parse::<Float>().map_err(|_| ioerr("bad float"))?);
             }
         }
         if out.len() != n {
@@ -192,36 +193,45 @@ fn read_binary_fortran(
         let n = imax * jmax * kmax;
 
         let xr = read_fortran_record(r, endian)?;
-        let x = match precision {
+        let x: Vec<Float> = match precision {
             FloatPrecision::F32 => utils::Endian::read_f32_slice(&xr, endian)
                 .into_iter()
-                .map(|v| v as f64)
+                .map(|v| v as Float)
                 .collect(),
-            FloatPrecision::F64 => utils::Endian::read_f64_slice(&xr, endian),
+            FloatPrecision::F64 => utils::Endian::read_f64_slice(&xr, endian)
+                .into_iter()
+                .map(|v| v as Float)
+                .collect(),
         };
         if x.len() != n {
             return Err(ioerr("X size mismatch"));
         }
 
-        let yr = read_fortran_record(r, endian)?;
-        let y = match precision {
-            FloatPrecision::F32 => utils::Endian::read_f32_slice(&yr, endian)
+        let yr_rec = read_fortran_record(r, endian)?;
+        let y: Vec<Float> = match precision {
+            FloatPrecision::F32 => utils::Endian::read_f32_slice(&yr_rec, endian)
                 .into_iter()
-                .map(|v| v as f64)
+                .map(|v| v as Float)
                 .collect(),
-            FloatPrecision::F64 => utils::Endian::read_f64_slice(&yr, endian),
+            FloatPrecision::F64 => utils::Endian::read_f64_slice(&yr_rec, endian)
+                .into_iter()
+                .map(|v| v as Float)
+                .collect(),
         };
         if y.len() != n {
             return Err(ioerr("Y size mismatch"));
         }
 
         let zr = read_fortran_record(r, endian)?;
-        let z = match precision {
+        let z: Vec<Float> = match precision {
             FloatPrecision::F32 => utils::Endian::read_f32_slice(&zr, endian)
                 .into_iter()
-                .map(|v| v as f64)
+                .map(|v| v as Float)
                 .collect(),
-            FloatPrecision::F64 => utils::Endian::read_f64_slice(&zr, endian),
+            FloatPrecision::F64 => utils::Endian::read_f64_slice(&zr, endian)
+                .into_iter()
+                .map(|v| v as Float)
+                .collect(),
         };
         if z.len() != n {
             return Err(ioerr("Z size mismatch"));
@@ -238,29 +248,29 @@ fn read_vec_num(
     n: usize,
     precision: FloatPrecision,
     endian: Endian,
-) -> io::Result<Vec<f64>> {
+) -> io::Result<Vec<Float>> {
     use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 
     let mut out = Vec::with_capacity(n);
     match (precision, endian) {
         (FloatPrecision::F32, Endian::Little) => {
             for _ in 0..n {
-                out.push(r.read_f32::<LittleEndian>()? as f64);
+                out.push(r.read_f32::<LittleEndian>()? as Float);
             }
         }
         (FloatPrecision::F32, Endian::Big) => {
             for _ in 0..n {
-                out.push(r.read_f32::<BigEndian>()? as f64);
+                out.push(r.read_f32::<BigEndian>()? as Float);
             }
         }
         (FloatPrecision::F64, Endian::Little) => {
             for _ in 0..n {
-                out.push(r.read_f64::<LittleEndian>()?);
+                out.push(r.read_f64::<LittleEndian>()? as Float);
             }
         }
         (FloatPrecision::F64, Endian::Big) => {
             for _ in 0..n {
-                out.push(r.read_f64::<BigEndian>()?);
+                out.push(r.read_f64::<BigEndian>()? as Float);
             }
         }
     }
@@ -309,9 +319,9 @@ pub fn read_ap_nasa(path: &str, endian: Endian) -> io::Result<(Block, i32)> {
         }
         // Layout per record: [x(il*kl), r(il*kl), theta(il*kl)]
         for idx in 0..stride {
-            meshx.push(floats[idx] as f64);
-            meshr.push(floats[stride + idx] as f64);
-            mesht.push(floats[2 * stride + idx] as f64);
+            meshx.push(floats[idx] as Float);
+            meshr.push(floats[stride + idx] as Float);
+            mesht.push(floats[2 * stride + idx] as Float);
         }
     }
 

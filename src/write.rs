@@ -1,19 +1,9 @@
 use crate::block::Block;
+pub use crate::read::{BinaryFormat, FloatPrecision};
 use crate::utils::{self, write_fortran_record, Endian};
+use crate::Float;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-
-#[derive(Copy, Clone, Debug)]
-pub enum BinaryFormat {
-    Fortran,
-    Raw,
-}
-
-#[derive(Copy, Clone, Debug)]
-pub enum FloatPrecision {
-    F32,
-    F64,
-}
 
 pub fn write_plot3d(
     path: &str,
@@ -49,7 +39,7 @@ fn write_ascii(path: &str, blocks: &[Block], precision: FloatPrecision) -> std::
     Ok(())
 }
 
-fn write_var_ascii(w: &mut impl Write, v: &[f64], precision: FloatPrecision) -> std::io::Result<()> {
+fn write_var_ascii(w: &mut impl Write, v: &[Float], precision: FloatPrecision) -> std::io::Result<()> {
     let mut col = 0usize;
     for val in v {
         match precision {
@@ -145,11 +135,20 @@ fn write_fortran(
                 write_fortran_record(&mut w, &zb, endian)?;
             }
             FloatPrecision::F64 => {
-                let xb = utils::Endian::write_f64_slice(&b.x, endian);
+                let xb = utils::Endian::write_f64_slice(
+                    &b.x.iter().map(|v| *v as f64).collect::<Vec<f64>>(),
+                    endian,
+                );
                 write_fortran_record(&mut w, &xb, endian)?;
-                let yb = utils::Endian::write_f64_slice(&b.y, endian);
+                let yb = utils::Endian::write_f64_slice(
+                    &b.y.iter().map(|v| *v as f64).collect::<Vec<f64>>(),
+                    endian,
+                );
                 write_fortran_record(&mut w, &yb, endian)?;
-                let zb = utils::Endian::write_f64_slice(&b.z, endian);
+                let zb = utils::Endian::write_f64_slice(
+                    &b.z.iter().map(|v| *v as f64).collect::<Vec<f64>>(),
+                    endian,
+                );
                 write_fortran_record(&mut w, &zb, endian)?;
             }
         }
@@ -160,7 +159,7 @@ fn write_fortran(
 
 fn write_vec_num(
     w: &mut impl Write,
-    v: &[f64],
+    v: &[Float],
     precision: FloatPrecision,
     endian: Endian,
 ) -> std::io::Result<()> {
@@ -178,12 +177,12 @@ fn write_vec_num(
         }
         (FloatPrecision::F64, Endian::Little) => {
             for &f in v {
-                w.write_f64::<LittleEndian>(f)?;
+                w.write_f64::<LittleEndian>(f as f64)?;
             }
         }
         (FloatPrecision::F64, Endian::Big) => {
             for &f in v {
-                w.write_f64::<BigEndian>(f)?;
+                w.write_f64::<BigEndian>(f as f64)?;
             }
         }
     }

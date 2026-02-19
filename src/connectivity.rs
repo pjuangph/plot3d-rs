@@ -8,9 +8,10 @@ use crate::{
     block_face_functions::{
         create_face_from_diagonals, get_outer_faces, reduce_blocks, split_face, Face,
     },
+    Float,
 };
 
-const DEFAULT_TOL: f64 = 1e-6;
+const DEFAULT_TOL: Float = 1e-6;
 
 /// Describe a single coincident node between two faces.
 ///
@@ -284,7 +285,7 @@ struct FaceNode {
     i: usize,
     j: usize,
     k: usize,
-    coord: [f64; 3],
+    coord: [Float; 3],
 }
 
 /// Enumerate all nodes that belong to `face` on `block`.
@@ -338,10 +339,10 @@ fn face_nodes(face: &Face, block: &Block) -> Vec<FaceNode> {
 /// distance. When no node matches, `None` is returned.
 fn find_closest_node<'a>(
     nodes: &'a [FaceNode],
-    target: [f64; 3],
-    tol: f64,
+    target: [Float; 3],
+    tol: Float,
 ) -> Option<&'a FaceNode> {
-    let mut best: Option<(&FaceNode, f64)> = None;
+    let mut best: Option<(&FaceNode, Float)> = None;
     for node in nodes {
         let dx = node.coord[0] - target[0];
         let dy = node.coord[1] - target[1];
@@ -517,7 +518,7 @@ pub fn get_face_intersection(
     face2: &Face,
     block1: &Block,
     block2: &Block,
-    tol: f64,
+    tol: Float,
 ) -> (Vec<MatchPoint>, Vec<Face>, Vec<Face>) {
     let nodes1 = face_nodes(face1, block1);
     let nodes2 = face_nodes(face2, block2);
@@ -654,7 +655,7 @@ fn build_match_points_from_orientation(
 fn find_full_face_matches(
     block_outer_faces: &[Vec<Face>],
     candidate_pairs: &[(usize, usize)],
-    tol: f64,
+    tol: Float,
 ) -> (Vec<FaceMatch>, HashSet<crate::utils::FaceKey>) {
     use crate::block_face_functions::full_face_match;
 
@@ -712,7 +713,7 @@ pub fn find_matching_blocks(
     block2: &Block,
     block1_outer: &mut Vec<Face>,
     block2_outer: &mut Vec<Face>,
-    tol: f64,
+    tol: Float,
 ) -> Vec<Vec<MatchPoint>> {
     let mut matches = Vec::new();
     let mut i = 0;
@@ -755,20 +756,20 @@ pub fn find_matching_blocks(
 ///
 /// # Returns
 /// Vector of `(i, j)` pairs with `i < j`.
-fn candidate_neighbor_pairs(blocks: &[Block], tol: f64) -> Vec<(usize, usize)> {
+fn candidate_neighbor_pairs(blocks: &[Block], tol: Float) -> Vec<(usize, usize)> {
     use rayon::prelude::*;
 
     let n = blocks.len();
     // Precompute AABBs: [xmin, xmax, ymin, ymax, zmin, zmax]
-    let aabbs: Vec<[f64; 6]> = blocks
+    let aabbs: Vec<[Float; 6]> = blocks
         .par_iter()
         .map(|b| {
-            let mut xmin = f64::INFINITY;
-            let mut xmax = f64::NEG_INFINITY;
-            let mut ymin = f64::INFINITY;
-            let mut ymax = f64::NEG_INFINITY;
-            let mut zmin = f64::INFINITY;
-            let mut zmax = f64::NEG_INFINITY;
+            let mut xmin = Float::INFINITY;
+            let mut xmax = Float::NEG_INFINITY;
+            let mut ymin = Float::INFINITY;
+            let mut ymax = Float::NEG_INFINITY;
+            let mut zmin = Float::INFINITY;
+            let mut zmax = Float::NEG_INFINITY;
             for &x in &b.x {
                 xmin = xmin.min(x);
                 xmax = xmax.max(x);
@@ -1072,7 +1073,7 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
 pub fn verify_connectivity(
     blocks: &[Block],
     face_matches: &[FaceMatch],
-    tol: f64,
+    tol: Float,
 ) -> (Vec<FaceMatch>, Vec<FaceMatch>) {
     // Compute GCD and reduce blocks
     let gcd_to_use = crate::utils::compute_min_gcd(blocks);
@@ -1088,7 +1089,18 @@ pub fn verify_connectivity(
     let mut verified = Vec::new();
     let mut mismatched = Vec::new();
 
+    let pb = ProgressBar::new(scaled_matches.len() as u64);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{msg} [{bar:40.cyan/blue}] {pos}/{len} matches ({eta} remaining)",
+        )
+        .unwrap()
+        .progress_chars("=>-"),
+    );
+    pb.set_message("Verify connectivity");
+
     for (idx, fm) in scaled_matches.iter().enumerate() {
+        pb.inc(1);
         let b1 = &fm.block1;
         let b2 = &fm.block2;
 
@@ -1204,6 +1216,7 @@ pub fn verify_connectivity(
             mismatched.push(face_matches[idx].clone());
         }
     }
+    pb.finish_and_clear();
 
     (verified, mismatched)
 }
@@ -1242,7 +1255,7 @@ pub fn face_matches_to_dict(
             let j_vals = [b2.jmin, b2.jmax];
             let k_vals = [b2.kmin, b2.kmax];
 
-            let mut best_lower = (f64::MAX, b2.imin, b2.jmin, b2.kmin);
+            let mut best_lower = (Float::MAX, b2.imin, b2.jmin, b2.kmin);
             for &i in &i_vals {
                 for &j in &j_vals {
                     for &k in &k_vals {
@@ -1261,7 +1274,7 @@ pub fn face_matches_to_dict(
             // Block1 upper corner
             let (x1_u, y1_u, z1_u) = block1.xyz(b1.imax, b1.jmax, b1.kmax);
 
-            let mut best_upper = (f64::MAX, b2.imax, b2.jmax, b2.kmax);
+            let mut best_upper = (Float::MAX, b2.imax, b2.jmax, b2.kmax);
             for &i in &i_vals {
                 for &j in &j_vals {
                     for &k in &k_vals {

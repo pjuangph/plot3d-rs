@@ -5,6 +5,19 @@
 //! `tests/test_rotational_periodicity.rs::rotational_periodicity_test`, which doubles as a usage
 //! example in the generated documentation (`cargo doc --open`).
 
+/// Floating-point precision type used throughout the crate.
+/// Defaults to `f64`; enable the `f32` Cargo feature for single precision.
+#[cfg(not(feature = "f32"))]
+pub type Float = f64;
+#[cfg(feature = "f32")]
+pub type Float = f32;
+
+/// Pi constant matching the active [`Float`] precision.
+#[cfg(not(feature = "f32"))]
+pub use std::f64::consts::PI;
+#[cfg(feature = "f32")]
+pub use std::f32::consts::PI;
+
 pub mod block;
 pub mod block_face_functions;
 pub mod connectivity;

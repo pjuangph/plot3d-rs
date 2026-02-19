@@ -1,21 +1,23 @@
 use std::collections::HashMap;
 
+use crate::Float;
+
 #[derive(Clone, Debug)]
 pub struct Block {
     pub imax: usize,
     pub jmax: usize,
     pub kmax: usize, // 2D supported via kmax == 1
-    pub x: Vec<f64>, // length = imax*jmax*kmax
-    pub y: Vec<f64>,
-    pub z: Vec<f64>,
+    pub x: Vec<Float>, // length = imax*jmax*kmax
+    pub y: Vec<Float>,
+    pub z: Vec<Float>,
 }
 
 /// Data for a single block boundary face (a 2D grid of coordinates).
 #[derive(Clone, Debug)]
 pub struct FaceData {
-    pub x: Vec<f64>,
-    pub y: Vec<f64>,
-    pub z: Vec<f64>,
+    pub x: Vec<Float>,
+    pub y: Vec<Float>,
+    pub z: Vec<Float>,
     /// Dimensions of the face grid `(nu, nv)`.
     pub dims: (usize, usize),
 }
@@ -25,9 +27,9 @@ impl Block {
         imax: usize,
         jmax: usize,
         kmax: usize,
-        x: Vec<f64>,
-        y: Vec<f64>,
-        z: Vec<f64>,
+        x: Vec<Float>,
+        y: Vec<Float>,
+        z: Vec<Float>,
     ) -> Self {
         let n = imax * jmax * kmax;
         assert_eq!(x.len(), n);
@@ -56,47 +58,47 @@ impl Block {
     }
 
     #[inline]
-    pub fn xyz(&self, i: usize, j: usize, k: usize) -> (f64, f64, f64) {
+    pub fn xyz(&self, i: usize, j: usize, k: usize) -> (Float, Float, Float) {
         let idx = self.idx(i, j, k);
         (self.x[idx], self.y[idx], self.z[idx])
     }
 
     #[inline]
-    pub fn x_at(&self, i: usize, j: usize, k: usize) -> f64 {
+    pub fn x_at(&self, i: usize, j: usize, k: usize) -> Float {
         self.x[self.idx(i, j, k)]
     }
 
     #[inline]
-    pub fn y_at(&self, i: usize, j: usize, k: usize) -> f64 {
+    pub fn y_at(&self, i: usize, j: usize, k: usize) -> Float {
         self.y[self.idx(i, j, k)]
     }
 
     #[inline]
-    pub fn z_at(&self, i: usize, j: usize, k: usize) -> f64 {
+    pub fn z_at(&self, i: usize, j: usize, k: usize) -> Float {
         self.z[self.idx(i, j, k)]
     }
 
     #[inline]
-    pub fn x_slice(&self) -> &[f64] {
+    pub fn x_slice(&self) -> &[Float] {
         &self.x
     }
 
     #[inline]
-    pub fn y_slice(&self) -> &[f64] {
+    pub fn y_slice(&self) -> &[Float] {
         &self.y
     }
 
     #[inline]
-    pub fn z_slice(&self) -> &[f64] {
+    pub fn z_slice(&self) -> &[Float] {
         &self.z
     }
 
     #[inline]
-    pub fn centroid(&self) -> (f64, f64, f64) {
-        let n = self.npoints() as f64;
-        let sum_x: f64 = self.x.iter().sum();
-        let sum_y: f64 = self.y.iter().sum();
-        let sum_z: f64 = self.z.iter().sum();
+    pub fn centroid(&self) -> (Float, Float, Float) {
+        let n = self.npoints() as Float;
+        let sum_x: Float = self.x.iter().sum();
+        let sum_y: Float = self.y.iter().sum();
+        let sum_z: Float = self.z.iter().sum();
         (sum_x / n, sum_y / n, sum_z / n)
     }
 
@@ -106,13 +108,13 @@ impl Block {
         println!("XYZ at (i={i}, j={j}, k={k}) is ({x:.6}, {y:.6}, {z:.6})");
     }
 
-    pub fn shifted(&self, amount: f64, axis: char) -> Block {
+    pub fn shifted(&self, amount: Float, axis: char) -> Block {
         let mut new = self.clone();
         new.shift_in_place(amount, axis);
         new
     }
 
-    pub fn shift_in_place(&mut self, amount: f64, axis: char) {
+    pub fn shift_in_place(&mut self, amount: Float, axis: char) {
         if amount == 0.0 {
             return;
         }
@@ -143,7 +145,7 @@ impl Block {
     }
 
     /// Multiply all coordinates by `factor` in place.
-    pub fn scale(&mut self, factor: f64) {
+    pub fn scale(&mut self, factor: Float) {
         for v in &mut self.x {
             *v *= factor;
         }
@@ -156,7 +158,7 @@ impl Block {
     }
 
     /// Return a new block with coordinates scaled by `factor`.
-    pub fn scaled(&self, factor: f64) -> Block {
+    pub fn scaled(&self, factor: Float) -> Block {
         let mut new = self.clone();
         new.scale(factor);
         new
@@ -166,7 +168,7 @@ impl Block {
     ///
     /// Returns `(r, theta)` where `r = sqrt(z^2 + y^2)` and `theta = atan2(y, z)`.
     /// Each vector has `npoints()` elements in the same index order as `x/y/z`.
-    pub fn cylindrical(&self) -> (Vec<f64>, Vec<f64>) {
+    pub fn cylindrical(&self) -> (Vec<Float>, Vec<Float>) {
         let n = self.npoints();
         let mut r = Vec::with_capacity(n);
         let mut theta = Vec::with_capacity(n);
@@ -186,13 +188,13 @@ impl Block {
     /// index `(k * jmax + j) * imax + i`. Boundary entries (where any index is 0) are zero.
     ///
     /// Reference: Davies & Salmond, AIAA Journal, vol 23, No 6, pp 954-956, 1985.
-    pub fn cell_volumes(&self) -> Vec<f64> {
+    pub fn cell_volumes(&self) -> Vec<Float> {
         let (ni, nj, nk) = (self.imax, self.jmax, self.kmax);
         let n = ni * nj * nk;
         let idx = |i: usize, j: usize, k: usize| -> usize { (k * nj + j) * ni + i };
 
         // 9 auxiliary face-area component arrays
-        let mut a = vec![vec![0.0f64; n]; 9];
+        let mut a = vec![vec![0.0; n]; 9];
 
         // Face csi=const (i varies freely, j and k >= 1)
         for k in 1..nk {
@@ -255,12 +257,12 @@ impl Block {
         }
 
         // Compute cell volumes from the 6 face centroids and face-area vectors
-        let mut v = vec![0.0f64; n];
+        let mut v = vec![0.0; n];
         for k in 1..nk {
             for j in 1..nj {
                 for i in 1..ni {
                     // 6 face centroids (cf[face][component])
-                    let mut cf = [[0.0f64; 3]; 6];
+                    let mut cf = [[0.0; 3]; 6];
                     // Face 0: i-1 face (csi=const, low side)
                     cf[0][0] = self.x[idx(i - 1, j - 1, k - 1)] + self.x[idx(i - 1, j - 1, k)]
                         + self.x[idx(i - 1, j, k - 1)]
@@ -322,7 +324,7 @@ impl Block {
                         + self.z[idx(i, j - 1, k)]
                         + self.z[idx(i, j, k)];
 
-                    let mut vol12 = 0.0f64;
+                    let mut vol12 = 0.0;
                     for nn in 0..2usize {
                         let sign = if nn == 0 { -1.0 } else { 1.0 };
                         for l in 0..3usize {

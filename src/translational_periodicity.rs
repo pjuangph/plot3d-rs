@@ -14,6 +14,7 @@ use crate::{
     block_face_functions::{find_bounding_faces, full_face_match_transformed, outer_face_records_to_list, Face},
     connectivity::{FaceMatch, FaceRecord},
     utils::{compute_min_gcd, FaceKey},
+    Float,
 };
 
 /// Detect translational periodicity along an axis.
@@ -26,10 +27,10 @@ use crate::{
 pub fn translational_periodicity(
     blocks: &[Block],
     outer_faces: &[FaceRecord],
-    delta: Option<f64>,
+    delta: Option<Float>,
     translational_direction: &str,
-    node_tol_xyz: Option<f64>,
-    min_shared_frac: f64,
+    node_tol_xyz: Option<Float>,
+    min_shared_frac: Float,
     min_shared_abs: usize,
     stride_u: usize,
     stride_v: usize,
@@ -54,49 +55,49 @@ pub fn translational_periodicity(
         "x" => {
             let min_x = blocks_reduced
                 .iter()
-                .map(|b| b.x_slice().iter().cloned().fold(f64::INFINITY, f64::min))
-                .fold(f64::INFINITY, f64::min);
+                .map(|b| b.x_slice().iter().cloned().fold(Float::INFINITY, Float::min))
+                .fold(Float::INFINITY, Float::min);
             let max_x = blocks_reduced
                 .iter()
                 .map(|b| {
                     b.x_slice()
                         .iter()
                         .cloned()
-                        .fold(f64::NEG_INFINITY, f64::max)
+                        .fold(Float::NEG_INFINITY, Float::max)
                 })
-                .fold(f64::NEG_INFINITY, f64::max);
+                .fold(Float::NEG_INFINITY, Float::max);
             delta.unwrap_or(max_x - min_x)
         }
         "y" => {
             let min_y = blocks_reduced
                 .iter()
-                .map(|b| b.y_slice().iter().cloned().fold(f64::INFINITY, f64::min))
-                .fold(f64::INFINITY, f64::min);
+                .map(|b| b.y_slice().iter().cloned().fold(Float::INFINITY, Float::min))
+                .fold(Float::INFINITY, Float::min);
             let max_y = blocks_reduced
                 .iter()
                 .map(|b| {
                     b.y_slice()
                         .iter()
                         .cloned()
-                        .fold(f64::NEG_INFINITY, f64::max)
+                        .fold(Float::NEG_INFINITY, Float::max)
                 })
-                .fold(f64::NEG_INFINITY, f64::max);
+                .fold(Float::NEG_INFINITY, Float::max);
             delta.unwrap_or(max_y - min_y)
         }
         _ => {
             let min_z = blocks_reduced
                 .iter()
-                .map(|b| b.z_slice().iter().cloned().fold(f64::INFINITY, f64::min))
-                .fold(f64::INFINITY, f64::min);
+                .map(|b| b.z_slice().iter().cloned().fold(Float::INFINITY, Float::min))
+                .fold(Float::INFINITY, Float::min);
             let max_z = blocks_reduced
                 .iter()
                 .map(|b| {
                     b.z_slice()
                         .iter()
                         .cloned()
-                        .fold(f64::NEG_INFINITY, f64::max)
+                        .fold(Float::NEG_INFINITY, Float::max)
                 })
-                .fold(f64::NEG_INFINITY, f64::max);
+                .fold(Float::NEG_INFINITY, Float::max);
             delta.unwrap_or(max_z - min_z)
         }
     };
@@ -282,9 +283,9 @@ fn faces_translational_match(
     blocks_up: &[Block],
     blocks_dn: &[Block],
     axis: &str,
-    delta_axis: f64,
-    node_tol_xyz: Option<f64>,
-    min_shared_frac: f64,
+    delta_axis: Float,
+    node_tol_xyz: Option<Float>,
+    min_shared_frac: Float,
     min_shared_abs: usize,
     stride_u: usize,
     stride_v: usize,
@@ -372,9 +373,9 @@ fn pair_tolerance(
     face_a: &Face,
     face_b: &Face,
     blocks: &[Block],
-    override_tol: Option<f64>,
+    override_tol: Option<Float>,
     axis: &str,
-) -> f64 {
+) -> Float {
     if let Some(tol) = override_tol {
         return tol;
     }
@@ -384,7 +385,7 @@ fn pair_tolerance(
 }
 
 /// Compute a median edge length for the face in the non-periodic directions.
-fn median_inplane_spacing(face: &Face, block: &Block, axis: &str) -> f64 {
+fn median_inplane_spacing(face: &Face, block: &Block, axis: &str) -> Float {
     let points = face.grid_points(block, 1, 1);
     if points.len() <= 1 {
         return 1.0;
@@ -410,10 +411,10 @@ fn orthogonal_precheck(
     face_b: &Face,
     block_a: &Block,
     block_b: &Block,
-    delta: f64,
-    tol: f64,
+    delta: Float,
+    tol: Float,
     axis: &str,
-    min_shared_frac: f64,
+    min_shared_frac: Float,
     min_shared_abs: usize,
 ) -> bool {
     let mut pts_a = face_a.grid_points(block_a, 1, 1);
@@ -441,11 +442,11 @@ fn orthogonal_precheck(
 
     let shared = key_a.intersection(&key_b).count();
     shared >= min_shared_abs
-        && (shared as f64) >= min_shared_frac * (key_a.len().min(key_b.len()) as f64)
+        && (shared as Float) >= min_shared_frac * (key_a.len().min(key_b.len()) as Float)
 }
 
 /// Project 3D points onto the plane orthogonal to `axis`.
-fn project_plane(points: &[[f64; 3]], axis: &str) -> Vec<[f64; 2]> {
+fn project_plane(points: &[[Float; 3]], axis: &str) -> Vec<[Float; 2]> {
     points
         .iter()
         .map(|p| match axis {

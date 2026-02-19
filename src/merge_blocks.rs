@@ -6,6 +6,7 @@ use crate::{
         build_connectivity_graph, find_matching_faces, standardize_block_orientation,
     },
     connectivity::FaceMatch,
+    Float,
 };
 
 /// Result type for `combine_blocks_mixed_pairs`.
@@ -21,7 +22,7 @@ pub type CombinedBlocks = (Vec<Block>, Vec<usize>);
 ///
 /// Returns a merged block, or `block1` unchanged when no compatible merge can
 /// be produced (mirroring the Python helper's behaviour).
-pub fn combine_2_blocks_mixed_pairing(block1: &Block, block2: &Block, tol: f64) -> Block {
+pub fn combine_2_blocks_mixed_pairing(block1: &Block, block2: &Block, tol: Float) -> Block {
     let Some((face1, face2, (flip_ud, flip_lr))) = find_matching_faces(block1, block2, tol) else {
         return block1.clone();
     };
@@ -90,7 +91,7 @@ pub fn combine_2_blocks_mixed_pairing(block1: &Block, block2: &Block, tol: f64) 
 /// greedy, mirroring the original Python helper: once a pair is merged it is
 /// replaced by the new block and the pass restarts until no further reductions
 /// occur or `max_tries` is hit.
-pub fn combine_blocks_mixed_pairs(blocks: &[Block], tol: f64, max_tries: usize) -> CombinedBlocks {
+pub fn combine_blocks_mixed_pairs(blocks: &[Block], tol: Float, max_tries: usize) -> CombinedBlocks {
     let mut merged_blocks: Vec<Block> = blocks.to_vec();
     let mut tries = 0usize;
 
@@ -168,7 +169,7 @@ pub fn combine_nxnxn_cubes_mixed_pairs(
     blocks: &[Block],
     connectivities: &[FaceMatch],
     cube_size: usize,
-    tol: Option<f64>,
+    tol: Option<Float>,
 ) -> Vec<(Block, HashSet<usize>)> {
     let tol = tol.unwrap_or(1e-8);
     if cube_size == 0 {
@@ -373,7 +374,7 @@ fn apply_face_flips(
 }
 
 /// Compute step magnitudes for X, Y, Z along `axis`.
-fn component_steps(block: &Block, axis: usize) -> [f64; 3] {
+fn component_steps(block: &Block, axis: usize) -> [Float; 3] {
     [
         coordinate_step(block, axis, 0),
         coordinate_step(block, axis, 1),
@@ -381,7 +382,7 @@ fn component_steps(block: &Block, axis: usize) -> [f64; 3] {
     ]
 }
 
-fn argmax_abs(vals: &[f64; 3]) -> usize {
+fn argmax_abs(vals: &[Float; 3]) -> usize {
     let mut best = 0usize;
     let mut best_abs = vals[0].abs();
     for (i, v) in vals.iter().enumerate().skip(1) {
@@ -396,7 +397,7 @@ fn argmax_abs(vals: &[f64; 3]) -> usize {
 
 /// Compute the signed step between the first and last plane along `axis`
 /// for the requested coordinate component (0 → X, 1 → Y, 2 → Z).
-fn coordinate_step(block: &Block, axis: usize, component: usize) -> f64 {
+fn coordinate_step(block: &Block, axis: usize, component: usize) -> Float {
     let dims = [block.imax, block.jmax, block.kmax];
     if dims[axis] <= 1 {
         return 0.0;
@@ -410,7 +411,7 @@ fn coordinate_step(block: &Block, axis: usize, component: usize) -> f64 {
     end_val - start_val
 }
 
-fn component_value(block: &Block, idx: [usize; 3], component: usize) -> f64 {
+fn component_value(block: &Block, idx: [usize; 3], component: usize) -> Float {
     match component {
         0 => block.x[linear_index([block.imax, block.jmax, block.kmax], idx)],
         1 => block.y[linear_index([block.imax, block.jmax, block.kmax], idx)],
