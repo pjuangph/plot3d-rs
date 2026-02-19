@@ -1,9 +1,14 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use indicatif::{ProgressBar, ProgressStyle};
+
 use crate::{
     block::Block,
     connectivity::{FaceMatch, FaceRecord},
-    utils::gcd_three,
+    utils::{
+        compute_min_gcd, cross3, distance3, dot3, sub3, vec_norm3,
+        FaceKey,
+    },
 };
 
 const DEFAULT_TOL: f64 = 1e-8;
@@ -168,6 +173,17 @@ impl Face {
         }
     }
 
+    /// Integer constant-type matching the Python convention:
+    /// `0` = I-constant, `1` = J-constant, `2` = K-constant, `-1` = none.
+    pub fn const_type(&self) -> i8 {
+        match self.const_axis() {
+            Some(FaceAxis::I) => 0,
+            Some(FaceAxis::J) => 1,
+            Some(FaceAxis::K) => 2,
+            None => -1,
+        }
+    }
+
     /// True when the face collapses to an edge.
     pub fn is_edge(&self) -> bool {
         let eq = [
@@ -206,6 +222,64 @@ impl Face {
         let min_idx = corner_index(self, self.imin(), self.jmin(), self.kmin());
         let max_idx = corner_index(self, self.imax(), self.jmax(), self.kmax());
         Some((self.vertices[min_idx], self.vertices[max_idx]))
+    }
+
+    /// Return all four corner vertices in canonical parametric order.
+    ///
+    /// The ordering matches `create_face_from_diagonals()`:
+    ///   - I-constant: `[(i, jmin, kmin), (i, jmin, kmax), (i, jmax, kmin), (i, jmax, kmax)]`
+    ///   - J-constant: `[(imin, j, kmin), (imin, j, kmax), (imax, j, kmin), (imax, j, kmax)]`
+    ///   - K-constant: `[(imin, jmin, k), (imin, jmax, k), (imax, jmin, k), (imax, jmax, k)]`
+    ///
+    /// Returns `None` if the face has fewer than 4 vertices or no constant axis.
+    pub fn get_all_corners(&self) -> Option<[[f64; 3]; 4]> {
+        if self.vertices.len() < 4 {
+            return None;
+        }
+        let axis = self.const_axis()?;
+        let (imin, imax) = (self.imin(), self.imax());
+        let (jmin, jmax) = (self.jmin(), self.jmax());
+        let (kmin, kmax) = (self.kmin(), self.kmax());
+
+        let find = |ti: usize, tj: usize, tk: usize| -> Option<[f64; 3]> {
+            self.indices.iter().enumerate().find_map(|(idx, ijk)| {
+                if ijk[0] == ti && ijk[1] == tj && ijk[2] == tk {
+                    Some(self.vertices[idx])
+                } else {
+                    None
+                }
+            })
+        };
+
+        match axis {
+            FaceAxis::I => {
+                let ic = imin; // I is constant
+                Some([
+                    find(ic, jmin, kmin)?,
+                    find(ic, jmin, kmax)?,
+                    find(ic, jmax, kmin)?,
+                    find(ic, jmax, kmax)?,
+                ])
+            }
+            FaceAxis::J => {
+                let jc = jmin; // J is constant
+                Some([
+                    find(imin, jc, kmin)?,
+                    find(imin, jc, kmax)?,
+                    find(imax, jc, kmin)?,
+                    find(imax, jc, kmax)?,
+                ])
+            }
+            FaceAxis::K => {
+                let kc = kmin; // K is constant
+                Some([
+                    find(imin, jmin, kc)?,
+                    find(imin, jmax, kc)?,
+                    find(imax, jmin, kc)?,
+                    find(imax, jmax, kc)?,
+                ])
+            }
+        }
     }
 
     /// Length of the face diagonal between the extreme corner nodes.
@@ -340,7 +414,7 @@ impl Face {
         }
     }
 
-    pub fn index_key(&self) -> (usize, usize, usize, usize, usize, usize, usize) {
+    pub fn index_key(&self) -> FaceKey {
         (
             self.block_index.unwrap_or(usize::MAX),
             self.imin(),
@@ -424,7 +498,7 @@ impl Face {
             }
         };
 
-        cross(sub(p2, p1), sub(p3, p1))
+        cross3(sub3(p2, p1), sub3(p3, p1))
     }
 
     /// Shift all stored vertices by `(dx, dy, dz)` in place.
@@ -476,10 +550,25 @@ impl Face {
             return 0.0;
         }
 
+        // AABB prefilter: quick rejection if bounding boxes don't overlap
+        let (s_min, s_max) = vertex_aabb(&self.vertices);
+        let (o_min, o_max) = vertex_aabb(&other.vertices);
+        let diag = self.diagonal_length().max(other.diagonal_length()).max(1e-12);
+        let aabb_tol = tol_plane_dist * diag;
+        if s_max[0] + aabb_tol < o_min[0]
+            || o_max[0] + aabb_tol < s_min[0]
+            || s_max[1] + aabb_tol < o_min[1]
+            || o_max[1] + aabb_tol < s_min[1]
+            || s_max[2] + aabb_tol < o_min[2]
+            || o_max[2] + aabb_tol < s_min[2]
+        {
+            return 0.0;
+        }
+
         let n1 = quad_normal_from_verts(&self.vertices);
         let n2 = quad_normal_from_verts(&other.vertices);
-        let len1 = vec_norm(n1);
-        let len2 = vec_norm(n2);
+        let len1 = vec_norm3(n1);
+        let len2 = vec_norm3(n2);
         if len1 < 1e-15 || len2 < 1e-15 {
             return 0.0;
         }
@@ -498,7 +587,7 @@ impl Face {
         let diag = self.diagonal_length().max(other.diagonal_length()).max(1e-12);
         let plane_tol = tol_plane_dist * diag;
         for v in &other.vertices {
-            let d = dot3(sub(*v, p0), n_hat).abs();
+            let d = dot3(sub3(*v, p0), n_hat).abs();
             if d > plane_tol {
                 return 0.0;
             }
@@ -652,11 +741,9 @@ impl BlockFaceKind {
 }
 
 /// Compute the Euclidean distance between two points.
+#[inline]
 fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
-    let dx = a[0] - b[0];
-    let dy = a[1] - b[1];
-    let dz = a[2] - b[2];
-    (dx * dx + dy * dy + dz * dz).sqrt()
+    distance3(a, b)
 }
 
 fn quantize_point(p: [f64; 3], tol: f64) -> (i64, i64, i64) {
@@ -673,37 +760,54 @@ fn to_array(p: (f64, f64, f64)) -> [f64; 3] {
     [p.0, p.1, p.2]
 }
 
-/// Dot product of two 3-vectors.
-fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-/// Euclidean norm of a 3-vector.
-fn vec_norm(a: [f64; 3]) -> f64 {
-    dot3(a, a).sqrt()
-}
 
 /// Average unit normal of a quad given as vertex positions.
-/// Splits into two triangles and averages.
+/// Splits into two triangles, normalises each to unit length, then averages.
+/// This matches the Python `_quad_normal()` and correctly handles skew quads.
 fn quad_normal_from_verts(verts: &[[f64; 3]]) -> [f64; 3] {
     if verts.len() < 3 {
         return [0.0, 0.0, 1.0];
     }
-    let n1 = cross(sub(verts[1], verts[0]), sub(verts[2], verts[0]));
+    let c1 = cross3(sub3(verts[1], verts[0]), sub3(verts[2], verts[0]));
+    let len1 = vec_norm3(c1);
+    let n1 = if len1 > 1e-30 {
+        [c1[0] / len1, c1[1] / len1, c1[2] / len1]
+    } else {
+        [0.0, 0.0, 1.0]
+    };
     if verts.len() < 4 {
         return n1;
     }
-    let n2 = cross(sub(verts[2], verts[0]), sub(verts[3], verts[0]));
+    let c2 = cross3(sub3(verts[2], verts[0]), sub3(verts[3], verts[0]));
+    let len2 = vec_norm3(c2);
+    let n2 = if len2 > 1e-30 {
+        [c2[0] / len2, c2[1] / len2, c2[2] / len2]
+    } else {
+        n1
+    };
     let avg = [
         (n1[0] + n2[0]) * 0.5,
         (n1[1] + n2[1]) * 0.5,
         (n1[2] + n2[2]) * 0.5,
     ];
-    let len = vec_norm(avg);
+    let len = vec_norm3(avg);
     if len < 1e-30 {
         return [0.0, 0.0, 1.0];
     }
     [avg[0] / len, avg[1] / len, avg[2] / len]
+}
+
+/// Compute the axis-aligned bounding box of a set of 3D vertices.
+fn vertex_aabb(verts: &[[f64; 3]]) -> ([f64; 3], [f64; 3]) {
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    for v in verts {
+        for d in 0..3 {
+            min[d] = min[d].min(v[d]);
+            max[d] = max[d].max(v[d]);
+        }
+    }
+    (min, max)
 }
 
 /// Return the axis index (0, 1, or 2) with the largest absolute normal component.
@@ -866,6 +970,92 @@ pub fn faces_match(
         }
     }
     (false, None)
+}
+
+/// Attempt a full (1:1) face match by comparing the 4 corner vertices.
+///
+/// Tries all 8 valid orientations (4 flip combinations + swap) of face_b's
+/// corners against face_a's canonical corner ordering.  A match means all 4
+/// corners are within `tol` of each other.
+///
+/// # Returns
+/// `Some(Orientation)` describing how face_b's indices map to face_a's,
+/// or `None` if no valid corner mapping exists within tolerance.
+pub fn full_face_match(
+    face_a: &Face,
+    face_b: &Face,
+    tol: f64,
+) -> Option<crate::connectivity::Orientation> {
+    let corners_a = face_a.get_all_corners()?;
+    let corners_b = face_b.get_all_corners()?;
+    try_corner_permutations(&corners_a, &corners_b, tol)
+}
+
+/// Like [`full_face_match`] but applies a coordinate transformation to
+/// face_a's corners before comparing.
+///
+/// `transform` maps `[f64; 3] -> [f64; 3]`, typically a rotation or
+/// translation.
+pub fn full_face_match_transformed<F>(
+    face_a: &Face,
+    face_b: &Face,
+    transform: F,
+    tol: f64,
+) -> Option<crate::connectivity::Orientation>
+where
+    F: Fn([f64; 3]) -> [f64; 3],
+{
+    let raw = face_a.get_all_corners()?;
+    let corners_a = [
+        transform(raw[0]),
+        transform(raw[1]),
+        transform(raw[2]),
+        transform(raw[3]),
+    ];
+    let corners_b = face_b.get_all_corners()?;
+    try_corner_permutations(&corners_a, &corners_b, tol)
+}
+
+/// Core logic: try all 8 orientation permutations of `cb` against `ca`.
+///
+/// The canonical corner ordering is:
+///   `[0] = (u_min, v_min)`
+///   `[1] = (u_min, v_max)`
+///   `[2] = (u_max, v_min)`
+///   `[3] = (u_max, v_max)`
+fn try_corner_permutations(
+    ca: &[[f64; 3]; 4],
+    cb: &[[f64; 3]; 4],
+    tol: f64,
+) -> Option<crate::connectivity::Orientation> {
+    use crate::connectivity::Orientation;
+
+    // Each entry: (index permutation of cb, u_reversed, v_reversed, swapped)
+    const PERMS: [([usize; 4], bool, bool, bool); 8] = [
+        ([0, 1, 2, 3], false, false, false), // identity
+        ([2, 3, 0, 1], true,  false, false), // u_reversed
+        ([1, 0, 3, 2], false, true,  false), // v_reversed
+        ([3, 2, 1, 0], true,  true,  false), // both reversed
+        ([0, 2, 1, 3], false, false, true),  // swapped
+        ([2, 0, 3, 1], true,  false, true),  // swapped + u_reversed
+        ([1, 3, 0, 2], false, true,  true),  // swapped + v_reversed
+        ([3, 1, 2, 0], true,  true,  true),  // swapped + both
+    ];
+
+    for &(ref perm, u_rev, v_rev, swapped) in &PERMS {
+        let all_match = perm.iter().enumerate().all(|(i, &j)| {
+            distance(ca[i], cb[j]) <= tol
+        });
+        if all_match {
+            return Some(Orientation {
+                u_reversed: u_rev,
+                v_reversed: v_rev,
+                swapped,
+            });
+        }
+    }
+
+    None
 }
 
 /// Determine whether any faces on two blocks match.
@@ -1045,15 +1235,13 @@ pub fn outer_face_records_to_list(
         }
         let block = &blocks[block_idx];
         let scale = gcd.max(1);
-        let mut face = create_face_from_diagonals(
-            block,
-            record.imin / scale,
-            record.jmin / scale,
-            record.kmin / scale,
-            record.imax / scale,
-            record.jmax / scale,
-            record.kmax / scale,
-        );
+        let (si, sj, sk) = (record.imin / scale, record.jmin / scale, record.kmin / scale);
+        let (ei, ej, ek) = (record.imax / scale, record.jmax / scale, record.kmax / scale);
+        // Skip records whose scaled indices exceed the reduced block dimensions
+        if ei >= block.imax || ej >= block.jmax || ek >= block.kmax {
+            continue;
+        }
+        let mut face = create_face_from_diagonals(block, si, sj, sk, ei, ej, ek);
         face.set_block_index(block_idx);
         if let Some(id) = record.id {
             face.set_id(id);
@@ -1422,18 +1610,7 @@ pub fn block_connection_matrix(
     tol: f64,
     options: BlockConnectionOptions,
 ) -> (Vec<Vec<i8>>, Vec<Vec<i8>>, Vec<Vec<i8>>, Vec<Vec<i8>>) {
-    let gcd = blocks
-        .iter()
-        .map(|b| {
-            gcd_three(
-                b.imax.saturating_sub(1),
-                b.jmax.saturating_sub(1),
-                b.kmax.saturating_sub(1),
-            )
-        })
-        .filter(|&g| g > 0)
-        .min()
-        .unwrap_or(1);
+    let gcd = compute_min_gcd(blocks);
     let reduced = reduce_blocks(blocks, gcd);
 
     let mut faces_by_block: Vec<Vec<Face>> = vec![Vec::new(); blocks.len()];
@@ -1470,8 +1647,28 @@ pub fn block_connection_matrix(
         conn_k[i][i] = 1;
     }
 
-    for i in 0..n {
-        for j in (i + 1)..n {
+    use rayon::prelude::*;
+
+    let all_pairs: Vec<(usize, usize)> = (0..n)
+        .flat_map(|i| ((i + 1)..n).map(move |j| (i, j)))
+        .collect();
+
+    let pb = ProgressBar::new(all_pairs.len() as u64);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{msg} [{bar:40.cyan/blue}] {pos}/{len} pairs ({eta} remaining)",
+        )
+        .unwrap()
+        .progress_chars("=>-"),
+    );
+    pb.set_message("Connection matrix");
+
+    // Each pair is independent: test face connectivity in parallel
+    let results: Vec<(usize, usize, bool, Option<FaceAxis>)> = all_pairs
+        .par_iter()
+        .map(|&(i, j)| {
+            pb.inc(1);
+            let mut matched_axis: Option<FaceAxis> = None;
             let mut connected = false;
             for face_i in &faces_by_block[i] {
                 for face_j in &faces_by_block[j] {
@@ -1486,7 +1683,6 @@ pub fn block_connection_matrix(
                         options.stride_v,
                     );
 
-                    // Fallback to polygon overlap for non-conforming interfaces
                     let area_match = if !node_match && options.use_area_fallback {
                         face_i.touches(face_j, 10.0, 1e-6, options.area_min_overlap_frac)
                     } else {
@@ -1494,25 +1690,8 @@ pub fn block_connection_matrix(
                     };
 
                     if node_match || area_match {
-                        connectivity[i][j] = 1;
-                        connectivity[j][i] = 1;
-                        if face_i.const_axis() == Some(FaceAxis::I)
-                            && face_j.const_axis() == Some(FaceAxis::I)
-                        {
-                            conn_i[i][j] = 1;
-                            conn_i[j][i] = 1;
-                        }
-                        if face_i.const_axis() == Some(FaceAxis::J)
-                            && face_j.const_axis() == Some(FaceAxis::J)
-                        {
-                            conn_j[i][j] = 1;
-                            conn_j[j][i] = 1;
-                        }
-                        if face_i.const_axis() == Some(FaceAxis::K)
-                            && face_j.const_axis() == Some(FaceAxis::K)
-                        {
-                            conn_k[i][j] = 1;
-                            conn_k[j][i] = 1;
+                        if face_i.const_axis() == face_j.const_axis() {
+                            matched_axis = face_i.const_axis();
                         }
                         connected = true;
                         break;
@@ -1522,12 +1701,36 @@ pub fn block_connection_matrix(
                     break;
                 }
             }
-            if !connected {
-                connectivity[i][j] = -1;
-                connectivity[j][i] = -1;
+            (i, j, connected, matched_axis)
+        })
+        .collect();
+
+    // Write results back to matrices (sequential)
+    for (i, j, connected, axis) in results {
+        if connected {
+            connectivity[i][j] = 1;
+            connectivity[j][i] = 1;
+            match axis {
+                Some(FaceAxis::I) => {
+                    conn_i[i][j] = 1;
+                    conn_i[j][i] = 1;
+                }
+                Some(FaceAxis::J) => {
+                    conn_j[i][j] = 1;
+                    conn_j[j][i] = 1;
+                }
+                Some(FaceAxis::K) => {
+                    conn_k[i][j] = 1;
+                    conn_k[j][i] = 1;
+                }
+                None => {}
             }
+        } else {
+            connectivity[i][j] = -1;
+            connectivity[j][i] = -1;
         }
     }
+    pb.finish_with_message("Connection matrix done");
 
     if tol.is_finite() {
         let _ = tol; // placeholder for parity with Python signature
@@ -1660,47 +1863,36 @@ pub fn calculate_outward_normals(
     let i0 = to_array(block.xyz(0, 0, 0));
     let ij = to_array(block.xyz(0, block.jmax - 1, 0));
     let ik = to_array(block.xyz(0, 0, block.kmax - 1));
-    let ni_min = cross(sub(ij, i0), sub(ik, i0));
+    let ni_min = cross3(sub3(ij, i0), sub3(ik, i0));
 
     let i1 = to_array(block.xyz(block.imax - 1, 0, 0));
     let i1j = to_array(block.xyz(block.imax - 1, block.jmax - 1, 0));
     let i1k = to_array(block.xyz(block.imax - 1, 0, block.kmax - 1));
-    let ni_max = cross(sub(i1j, i1), sub(i1k, i1));
+    let ni_max = cross3(sub3(i1j, i1), sub3(i1k, i1));
 
     let j0 = to_array(block.xyz(0, 0, 0));
     let ji = to_array(block.xyz(block.imax - 1, 0, 0));
     let jk = to_array(block.xyz(0, 0, block.kmax - 1));
-    let nj_min = cross(sub(ji, j0), sub(jk, j0));
+    let nj_min = cross3(sub3(ji, j0), sub3(jk, j0));
 
     let j1 = to_array(block.xyz(0, block.jmax - 1, 0));
     let j1i = to_array(block.xyz(block.imax - 1, block.jmax - 1, 0));
     let j1k = to_array(block.xyz(0, block.jmax - 1, block.kmax - 1));
-    let nj_max = cross(sub(j1i, j1), sub(j1k, j1));
+    let nj_max = cross3(sub3(j1i, j1), sub3(j1k, j1));
 
     let k0 = to_array(block.xyz(0, 0, 0));
     let ki = to_array(block.xyz(block.imax - 1, 0, 0));
     let kj = to_array(block.xyz(0, block.jmax - 1, 0));
-    let nk_min = cross(sub(ki, k0), sub(kj, k0));
+    let nk_min = cross3(sub3(ki, k0), sub3(kj, k0));
 
     let k1 = to_array(block.xyz(0, 0, block.kmax - 1));
     let k1i = to_array(block.xyz(block.imax - 1, 0, block.kmax - 1));
     let k1j = to_array(block.xyz(0, block.jmax - 1, block.kmax - 1));
-    let nk_max = cross(sub(k1i, k1), sub(k1j, k1));
+    let nk_max = cross3(sub3(k1i, k1), sub3(k1j, k1));
 
     (ni_min, nj_min, nk_min, ni_max, nj_max, nk_max)
 }
 
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
 
 /// Identify outer faces on the extreme of the requested axis using BFS.
 ///
@@ -1733,12 +1925,7 @@ pub fn find_bounding_faces(
     let want_min = side == "min" || side == "both";
     let want_max = side == "max" || side == "both";
 
-    let gcd = blocks
-        .iter()
-        .map(|b| gcd_three(b.imax - 1, b.jmax - 1, b.kmax - 1))
-        .filter(|&g| g > 0)
-        .min()
-        .unwrap_or(1);
+    let gcd = compute_min_gcd(blocks);
     let reduced = reduce_blocks(blocks, gcd);
 
     let outer_faces = if outer_faces_records.is_empty() {
@@ -2020,4 +2207,103 @@ pub fn build_connectivity_graph(connectivities: &[FaceMatch]) -> HashMap<usize, 
         graph.entry(block2).or_default().insert(block1);
     }
     graph
+}
+
+// ---------------------------------------------------------------------------
+// Cylindrical coordinate helpers
+// ---------------------------------------------------------------------------
+
+/// Compute angular position (theta) about the given rotation axis.
+///
+/// Conventions match the Python `_to_theta()`:
+/// - `'x'` → `atan2(y, z)`
+/// - `'y'` → `atan2(z, x)`
+/// - `'z'` → `atan2(y, x)`
+pub fn to_theta(x: f64, y: f64, z: f64, rotation_axis: char) -> f64 {
+    match rotation_axis.to_ascii_lowercase() {
+        'x' => y.atan2(z),
+        'y' => z.atan2(x),
+        _ => y.atan2(x),
+    }
+}
+
+/// Compute radial distance from the given rotation axis.
+pub fn to_radius(x: f64, y: f64, z: f64, rotation_axis: char) -> f64 {
+    match rotation_axis.to_ascii_lowercase() {
+        'x' => (y * y + z * z).sqrt(),
+        'y' => (z * z + x * x).sqrt(),
+        _ => (y * y + x * x).sqrt(),
+    }
+}
+
+/// Compute the global theta (angular) extent across all blocks.
+fn global_theta_extreme(blocks: &[Block], axis: char) -> (f64, f64) {
+    let mut min_theta = f64::INFINITY;
+    let mut max_theta = f64::NEG_INFINITY;
+    for block in blocks {
+        for idx in 0..block.npoints() {
+            let theta = to_theta(block.x[idx], block.y[idx], block.z[idx], axis);
+            min_theta = min_theta.min(theta);
+            max_theta = max_theta.max(theta);
+        }
+    }
+    (min_theta, max_theta)
+}
+
+/// Compute the theta extent of a face from its corner vertices.
+fn face_theta_extreme(face: &Face, axis: char) -> (f64, f64) {
+    let mut min_theta = f64::INFINITY;
+    let mut max_theta = f64::NEG_INFINITY;
+    for v in face.vertices() {
+        let theta = to_theta(v[0], v[1], v[2], axis);
+        min_theta = min_theta.min(theta);
+        max_theta = max_theta.max(theta);
+    }
+    (min_theta, max_theta)
+}
+
+/// Find outer faces on the angular (theta) min/max boundaries of an annular
+/// domain.
+///
+/// Returns `(lower_records, upper_records, lower_faces, upper_faces)`.
+/// Returns all-empty vectors if the domain is non-annular (theta range > PI
+/// or negligibly small).
+///
+/// # Arguments
+/// * `blocks` - All blocks in the assembly.
+/// * `outer_faces` - Candidate outer faces.
+/// * `rotation_axis` - Physical rotation axis (`'x'`, `'y'`, or `'z'`).
+/// * `tol_rel` - Relative tolerance for angular boundary classification.
+pub fn find_angular_bounding_faces(
+    blocks: &[Block],
+    outer_faces: &[Face],
+    rotation_axis: char,
+    tol_rel: f64,
+) -> (Vec<FaceRecord>, Vec<FaceRecord>, Vec<Face>, Vec<Face>) {
+    let (theta_min, theta_max) = global_theta_extreme(blocks, rotation_axis);
+    let theta_range = theta_max - theta_min;
+
+    if theta_range > std::f64::consts::PI || theta_range < 1e-10 {
+        return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    }
+
+    let tol_abs = (1e-8f64).max(tol_rel * theta_range);
+    let mut lower = Vec::new();
+    let mut upper = Vec::new();
+
+    for f in outer_faces {
+        let (f_theta_min, f_theta_max) = face_theta_extreme(f, rotation_axis);
+        // All vertices at theta_min
+        if (f_theta_max - theta_min).abs() <= tol_abs {
+            lower.push(f.clone());
+        }
+        // All vertices at theta_max
+        else if (theta_max - f_theta_min).abs() <= tol_abs {
+            upper.push(f.clone());
+        }
+    }
+
+    let lower_records = lower.iter().map(Face::to_record).collect();
+    let upper_records = upper.iter().map(Face::to_record).collect();
+    (lower_records, upper_records, lower, upper)
 }

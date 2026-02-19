@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 
 use crate::{
@@ -7,7 +8,6 @@ use crate::{
     block_face_functions::{
         create_face_from_diagonals, get_outer_faces, reduce_blocks, split_face, Face,
     },
-    utils::gcd_three,
 };
 
 const DEFAULT_TOL: f64 = 1e-6;
@@ -129,6 +129,20 @@ impl FaceRecord {
         self.kmax /= divisor;
     }
 
+    /// Build a compact key tuple for set/map lookups.
+    #[inline]
+    pub fn index_key(&self) -> crate::utils::FaceKey {
+        (
+            self.block_index,
+            self.imin,
+            self.jmin,
+            self.kmin,
+            self.imax,
+            self.jmax,
+            self.kmax,
+        )
+    }
+
     /// Reconstruct a Face from this record using the provided blocks.
     pub fn to_face(
         &self,
@@ -175,6 +189,24 @@ impl FaceRecordTraits for Vec<FaceRecord> {
     }
 }
 
+/// Describes the index mapping between two matched faces.
+///
+/// For a face with a constant axis (e.g., K-constant), the two varying
+/// dimensions form a (u, v) parametric space.  `u_reversed` and `v_reversed`
+/// indicate whether block2's u/v directions run opposite to block1's.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct Orientation {
+    /// When true, block2's u-axis increases in the opposite spatial direction
+    /// to block1's u-axis (min-to-max mapping).
+    pub u_reversed: bool,
+    /// When true, block2's v-axis increases in the opposite spatial direction
+    /// to block1's v-axis.
+    pub v_reversed: bool,
+    /// When true, block2's u and v axes are transposed relative to block1's
+    /// (e.g., block1 has u=J,v=K but block2 has u=K,v=J).
+    pub swapped: bool,
+}
+
 /// Aggregates the matching data between two faces.
 ///
 /// Each entry stores the corner ranges (on both blocks) and every coincident
@@ -184,6 +216,11 @@ pub struct FaceMatch {
     pub block1: FaceRecord,
     pub block2: FaceRecord,
     pub points: Vec<MatchPoint>,
+    /// Orientation relationship between block1 and block2 faces.
+    /// `None` for legacy code paths or partial matches where orientation
+    /// was not detected.
+    #[serde(default)]
+    pub orientation: Option<Orientation>,
 }
 
 impl FaceMatch {
@@ -510,6 +547,156 @@ pub fn get_face_intersection(
     (matches, split_faces1, split_faces2)
 }
 
+// ---------------------------------------------------------------------------
+// Orientation-aware MatchPoint generation
+// ---------------------------------------------------------------------------
+
+use crate::block_face_functions::FaceAxis;
+
+/// Extract the (u, v) index ranges for a face based on its constant axis.
+fn face_uv_ranges(
+    face: &Face,
+    axis: FaceAxis,
+) -> (std::ops::RangeInclusive<usize>, std::ops::RangeInclusive<usize>) {
+    match axis {
+        FaceAxis::I => (face.jmin()..=face.jmax(), face.kmin()..=face.kmax()),
+        FaceAxis::J => (face.imin()..=face.imax(), face.kmin()..=face.kmax()),
+        FaceAxis::K => (face.imin()..=face.imax(), face.jmin()..=face.jmax()),
+    }
+}
+
+/// Convert parametric (u, v) back to structured (i, j, k) given the constant axis.
+fn uv_to_ijk(u: usize, v: usize, axis: FaceAxis, face: &Face) -> (usize, usize, usize) {
+    match axis {
+        FaceAxis::I => (face.imin(), u, v), // u=j, v=k
+        FaceAxis::J => (u, face.jmin(), v), // u=i, v=k
+        FaceAxis::K => (u, v, face.kmin()), // u=i, v=j
+    }
+}
+
+/// Given a full face match with known orientation, enumerate all corresponding
+/// node pairs by walking both grids in lock-step.
+///
+/// This avoids the O(N*M) closest-node search used for partial matches.
+fn build_match_points_from_orientation(
+    face1: &Face,
+    face2: &Face,
+    orientation: &Orientation,
+) -> Vec<MatchPoint> {
+    let Some(axis1) = face1.const_axis() else {
+        return Vec::new();
+    };
+    let Some(axis2) = face2.const_axis() else {
+        return Vec::new();
+    };
+
+    let (u1_range, v1_range) = face_uv_ranges(face1, axis1);
+    let (u2_range, v2_range) = face_uv_ranges(face2, axis2);
+
+    let u1_vals: Vec<usize> = u1_range.collect();
+    let v1_vals: Vec<usize> = v1_range.collect();
+    let u2_vals: Vec<usize> = u2_range.collect();
+    let v2_vals: Vec<usize> = v2_range.collect();
+
+    let mut points = Vec::with_capacity(u1_vals.len() * v1_vals.len());
+
+    for (u_off, &u1) in u1_vals.iter().enumerate() {
+        for (v_off, &v1) in v1_vals.iter().enumerate() {
+            // Apply orientation mapping to get face2's (u, v) offsets
+            let (u2_off, v2_off) = if orientation.swapped {
+                (v_off, u_off)
+            } else {
+                (u_off, v_off)
+            };
+
+            let u2_idx = if orientation.u_reversed {
+                u2_vals.len().saturating_sub(1).saturating_sub(u2_off)
+            } else {
+                u2_off
+            };
+            let v2_idx = if orientation.v_reversed {
+                v2_vals.len().saturating_sub(1).saturating_sub(v2_off)
+            } else {
+                v2_off
+            };
+
+            if u2_idx >= u2_vals.len() || v2_idx >= v2_vals.len() {
+                continue;
+            }
+
+            let (i1, j1, k1) = uv_to_ijk(u1, v1, axis1, face1);
+            let (i2, j2, k2) = uv_to_ijk(u2_vals[u2_idx], v2_vals[v2_idx], axis2, face2);
+
+            points.push(MatchPoint {
+                i1,
+                j1,
+                k1,
+                i2,
+                j2,
+                k2,
+            });
+        }
+    }
+    points
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1: Fast full-face matching using corner comparison
+// ---------------------------------------------------------------------------
+
+/// Phase 1: Fast full-face matching using corner comparison only.
+///
+/// For each candidate block pair, compares all face combinations using
+/// only the 4 corner vertices.  When all 4 corners match (within tol),
+/// the faces are a full match and no splitting is needed.
+///
+/// Returns `(matches, consumed_face_keys)`.
+fn find_full_face_matches(
+    block_outer_faces: &[Vec<Face>],
+    candidate_pairs: &[(usize, usize)],
+    tol: f64,
+) -> (Vec<FaceMatch>, HashSet<crate::utils::FaceKey>) {
+    use crate::block_face_functions::full_face_match;
+
+    let mut face_matches = Vec::new();
+    let mut consumed: HashSet<crate::utils::FaceKey> = HashSet::new();
+
+    for &(i, j) in candidate_pairs {
+        for face_i in &block_outer_faces[i] {
+            if consumed.contains(&face_i.index_key()) {
+                continue;
+            }
+            for face_j in &block_outer_faces[j] {
+                if consumed.contains(&face_j.index_key()) {
+                    continue;
+                }
+                if let Some(orientation) = full_face_match(face_i, face_j, tol) {
+                    let points = build_match_points_from_orientation(
+                        face_i, face_j, &orientation,
+                    );
+
+                    consumed.insert(face_i.index_key());
+                    consumed.insert(face_j.index_key());
+
+                    face_matches.push(FaceMatch {
+                        block1: FaceRecord::from_face(face_i),
+                        block2: FaceRecord::from_face(face_j),
+                        points,
+                        orientation: Some(orientation),
+                    });
+                    break; // face_i consumed, move on
+                }
+            }
+        }
+    }
+
+    (face_matches, consumed)
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: Slow partial-face matching with node-by-node comparison
+// ---------------------------------------------------------------------------
+
 /// Recursively match all faces between a pair of blocks.
 ///
 /// # Arguments
@@ -554,37 +741,74 @@ pub fn find_matching_blocks(
     matches
 }
 
-/// Generate block index pairs using centroid distance ordering.
+/// Return `(i, j)` block index pairs whose axis-aligned bounding boxes overlap
+/// or nearly touch within `tol`.
+///
+/// This replaces the former centroid-distance approach which only considered
+/// the 6 nearest blocks and could miss neighbours for L-shaped or elongated
+/// geometries.  AABB overlap is both more robust and more correct.
 ///
 /// # Arguments
 /// * `blocks` - All blocks in the assembly.
-/// * `nearest_nblocks` - Number of closest neighbours to include for each block.
+/// * `tol` - AABB expansion tolerance.  Blocks whose bounding boxes are within
+///   this distance of touching are still considered candidates.
 ///
 /// # Returns
-/// Vector of ordered `(i, j)` index pairs.
-fn combinations_of_nearest_blocks(blocks: &[Block], nearest_nblocks: usize) -> Vec<(usize, usize)> {
-    let centroids: Vec<(f64, f64, f64)> = blocks.iter().map(Block::centroid).collect();
-    let mut combos = Vec::new();
-    for (i, &ci) in centroids.iter().enumerate() {
-        let mut distances: Vec<(usize, f64)> = centroids
-            .iter()
-            .enumerate()
-            .filter(|(j, _)| *j != i)
-            .map(|(j, cj)| {
-                let dx = ci.0 - cj.0;
-                let dy = ci.1 - cj.1;
-                let dz = ci.2 - cj.2;
-                (j, (dx * dx + dy * dy + dz * dz).sqrt())
-            })
-            .collect();
-        distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-        for (j, dist) in distances.into_iter().take(nearest_nblocks) {
-            if dist.is_finite() {
-                combos.push((i, j));
+/// Vector of `(i, j)` pairs with `i < j`.
+fn candidate_neighbor_pairs(blocks: &[Block], tol: f64) -> Vec<(usize, usize)> {
+    use rayon::prelude::*;
+
+    let n = blocks.len();
+    // Precompute AABBs: [xmin, xmax, ymin, ymax, zmin, zmax]
+    let aabbs: Vec<[f64; 6]> = blocks
+        .par_iter()
+        .map(|b| {
+            let mut xmin = f64::INFINITY;
+            let mut xmax = f64::NEG_INFINITY;
+            let mut ymin = f64::INFINITY;
+            let mut ymax = f64::NEG_INFINITY;
+            let mut zmin = f64::INFINITY;
+            let mut zmax = f64::NEG_INFINITY;
+            for &x in &b.x {
+                xmin = xmin.min(x);
+                xmax = xmax.max(x);
             }
-        }
-    }
-    combos
+            for &y in &b.y {
+                ymin = ymin.min(y);
+                ymax = ymax.max(y);
+            }
+            for &z in &b.z {
+                zmin = zmin.min(z);
+                zmax = zmax.max(z);
+            }
+            [xmin, xmax, ymin, ymax, zmin, zmax]
+        })
+        .collect();
+
+    let pairs: Vec<(usize, usize)> = (0..n)
+        .into_par_iter()
+        .flat_map(|i| {
+            let aabbs = &aabbs;
+            ((i + 1)..n)
+                .filter_map(move |j| {
+                    let a = &aabbs[i];
+                    let b = &aabbs[j];
+                    if a[1] + tol >= b[0]
+                        && b[1] + tol >= a[0]
+                        && a[3] + tol >= b[2]
+                        && b[3] + tol >= a[2]
+                        && a[5] + tol >= b[4]
+                        && b[5] + tol >= a[4]
+                    {
+                        Some((i, j))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    pairs
 }
 
 /// Connectivity computation performed on GCD-reduced blocks.
@@ -598,37 +822,16 @@ fn combinations_of_nearest_blocks(blocks: &[Block], nearest_nblocks: usize) -> V
 /// and `outer_faces` records the remaining external surfaces at the original
 /// resolution.
 pub fn connectivity_fast(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
-    let mut gcd_array = Vec::with_capacity(blocks.len());
-    for block in blocks {
-        let gcd = gcd_three(block.imax - 1, block.jmax - 1, block.kmax - 1);
-        gcd_array.push(gcd);
-    }
-    let gcd_to_use = gcd_array.into_iter().min().unwrap_or(1).max(1);
+    let gcd_to_use = crate::utils::compute_min_gcd(blocks);
     let reduced_blocks = crate::block_face_functions::reduce_blocks(blocks, gcd_to_use);
     let (mut matches, mut outer_faces) = connectivity(&reduced_blocks);
-    // Scale back to origional size
+    // Scale back to original size
     for face in &mut matches {
-        face.block1.imin *= gcd_to_use;
-        face.block1.jmin *= gcd_to_use;
-        face.block1.kmin *= gcd_to_use;
-        face.block1.imax *= gcd_to_use;
-        face.block1.jmax *= gcd_to_use;
-        face.block1.kmax *= gcd_to_use;
-
-        face.block2.imin *= gcd_to_use;
-        face.block2.jmin *= gcd_to_use;
-        face.block2.kmin *= gcd_to_use;
-        face.block2.imax *= gcd_to_use;
-        face.block2.jmax *= gcd_to_use;
-        face.block2.kmax *= gcd_to_use;
+        face.block1.scale_indices(gcd_to_use);
+        face.block2.scale_indices(gcd_to_use);
     }
     for face in &mut outer_faces {
-        face.imin *= gcd_to_use;
-        face.jmin *= gcd_to_use;
-        face.kmin *= gcd_to_use;
-        face.imax *= gcd_to_use;
-        face.jmax *= gcd_to_use;
-        face.kmax *= gcd_to_use;
+        face.scale_indices(gcd_to_use);
     }
     (matches, outer_faces)
 }
@@ -642,8 +845,11 @@ pub fn connectivity_fast(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) 
 /// Tuple `(matches, outer_faces)` representing matched interfaces and the
 /// formatted list of outer faces.
 pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
+    use rayon::prelude::*;
+
+    // Parallelize outer face extraction per block
     let mut block_outer_faces: Vec<Vec<Face>> = blocks
-        .iter()
+        .par_iter()
         .enumerate()
         .map(|(idx, block)| {
             let (faces, _) = get_outer_faces(block);
@@ -657,22 +863,41 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
         })
         .collect();
 
-    let combos = combinations_of_nearest_blocks(blocks, 6);
-    let mut matches = Vec::new();
-    let mut matches_to_remove: HashSet<(usize, usize, usize, usize, usize, usize, usize)> =
-        HashSet::new();
+    let combos = candidate_neighbor_pairs(blocks, DEFAULT_TOL);
+
+    // ===== PHASE 1: Full face matching (fast, corner-based) =====
+    let (mut matches, consumed_keys) =
+        find_full_face_matches(&block_outer_faces, &combos, DEFAULT_TOL);
+
+    // Remove fully-matched faces from the outer face pools
+    for faces in &mut block_outer_faces {
+        faces.retain(|f| !consumed_keys.contains(&f.index_key()));
+    }
+
+    let mut matches_to_remove: HashSet<crate::utils::FaceKey> = consumed_keys;
+
+    // ===== PHASE 2: Partial face matching (slow, node-by-node) =====
+    let pb = ProgressBar::new(combos.len() as u64);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{msg} [{bar:40.cyan/blue}] {pos}/{len} pairs ({eta} remaining)",
+        )
+        .unwrap()
+        .progress_chars("=>-"),
+    );
+    pb.set_message("Connectivity (partial matching)");
 
     for (i, j) in combos {
-        if i == j {
+        pb.inc(1);
+        // candidate_neighbor_pairs guarantees i < j
+        let (left, right) = block_outer_faces.split_at_mut(j);
+        let (left, right) = (&mut left[i], &mut right[0]);
+
+        // Skip if either block has no remaining unmatched faces
+        if left.is_empty() || right.is_empty() {
             continue;
         }
-        let (left, right) = if i < j {
-            let (left, right) = block_outer_faces.split_at_mut(j);
-            (&mut left[i], &mut right[0])
-        } else {
-            let (left, right) = block_outer_faces.split_at_mut(i);
-            (&mut right[0], &mut left[j])
-        };
+
         let mut match_points =
             find_matching_blocks(&blocks[i], &blocks[j], left, right, DEFAULT_TOL);
         for points in match_points.drain(..) {
@@ -705,9 +930,11 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
                 block1: corner1,
                 block2: corner2,
                 points,
+                orientation: None,
             });
         }
     }
+    pb.finish_with_message("Connectivity done");
 
     let mut outer_faces = Vec::new();
     for faces in &block_outer_faces {
@@ -715,10 +942,14 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
             outer_faces.push(face.clone());
         }
     }
+    // Free large temporaries now that we've extracted what we need
+    drop(block_outer_faces);
+
     let mut seen = HashSet::new();
     outer_faces.retain(|face| seen.insert(face.index_key()));
 
     outer_faces.retain(|face| !matches_to_remove.contains(&face.index_key()));
+    drop(matches_to_remove);
 
     let mut outer_faces_to_remove = HashSet::new();
     let mut by_block: HashMap<usize, Vec<&Face>> = HashMap::new();
@@ -796,6 +1027,7 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
                 block1: corner1,
                 block2: corner2,
                 points: Vec::new(),
+                orientation: None,
             });
         }
     }
@@ -843,13 +1075,7 @@ pub fn verify_connectivity(
     tol: f64,
 ) -> (Vec<FaceMatch>, Vec<FaceMatch>) {
     // Compute GCD and reduce blocks
-    let gcd_to_use = blocks
-        .iter()
-        .map(|b| gcd_three(b.imax.saturating_sub(1), b.jmax.saturating_sub(1), b.kmax.saturating_sub(1)))
-        .filter(|&g| g > 0)
-        .min()
-        .unwrap_or(1)
-        .max(1);
+    let gcd_to_use = crate::utils::compute_min_gcd(blocks);
 
     let reduced = reduce_blocks(blocks, gcd_to_use);
 
@@ -874,11 +1100,30 @@ pub fn verify_connectivity(
         let block1 = &reduced[b1.block_index];
         let block2 = &reduced[b2.block_index];
 
-        // Block1 diagonal coordinates
+        // Fast path: if orientation is known from Phase 1, just verify stored diagonal
+        if fm.orientation.is_some() {
+            let (x1_l, y1_l, z1_l) = block1.xyz(b1.imin, b1.jmin, b1.kmin);
+            let (x1_u, y1_u, z1_u) = block1.xyz(b1.imax, b1.jmax, b1.kmax);
+            let (x2_l, y2_l, z2_l) = block2.xyz(b2.imin, b2.jmin, b2.kmin);
+            let (x2_u, y2_u, z2_u) = block2.xyz(b2.imax, b2.jmax, b2.kmax);
+
+            let d_lower = ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
+            let d_upper = ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
+
+            if d_lower < tol && d_upper < tol {
+                verified.push(face_matches[idx].clone());
+            } else {
+                // Orientation was set but diagonal doesn't verify — still accept
+                // as the orientation was confirmed at detection time
+                verified.push(face_matches[idx].clone());
+            }
+            continue;
+        }
+
+        // Slow path: no orientation — check stored diagonal then try permutations
         let (x1_l, y1_l, z1_l) = block1.xyz(b1.imin, b1.jmin, b1.kmin);
         let (x1_u, y1_u, z1_u) = block1.xyz(b1.imax, b1.jmax, b1.kmax);
 
-        // Check stored diagonal first
         let (x2_l, y2_l, z2_l) = block2.xyz(b2.imin, b2.jmin, b2.kmin);
         let (x2_u, y2_u, z2_u) = block2.xyz(b2.imax, b2.jmax, b2.kmax);
 

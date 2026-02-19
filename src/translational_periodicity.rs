@@ -7,11 +7,13 @@
 
 use std::collections::HashSet;
 
+use indicatif::{ProgressBar, ProgressStyle};
+
 use crate::{
     block::Block,
-    block_face_functions::{find_bounding_faces, outer_face_records_to_list, Face},
+    block_face_functions::{find_bounding_faces, full_face_match_transformed, outer_face_records_to_list, Face},
     connectivity::{FaceMatch, FaceRecord},
-    utils::gcd_three,
+    utils::{compute_min_gcd, FaceKey},
 };
 
 /// Detect translational periodicity along an axis.
@@ -42,15 +44,11 @@ pub fn translational_periodicity(
     let (lower_faces_records, upper_faces_records, _, _) =
         find_bounding_faces(blocks, outer_faces, &axis, "both", 1e-6, 1e-6);
 
-    let mut gcd_array = Vec::new();
-    for block in blocks {
-        gcd_array.push(gcd_three(block.imax - 1, block.jmax - 1, block.kmax - 1));
-    }
-    let gcd_to_use = gcd_array.into_iter().min().unwrap_or(1).max(1);
+    let gcd_to_use = compute_min_gcd(blocks);
 
     let blocks_reduced = crate::block_face_functions::reduce_blocks(blocks, gcd_to_use);
-    let lower_faces = outer_face_records_to_list(&blocks_reduced, &lower_faces_records, 1);
-    let upper_faces = outer_face_records_to_list(&blocks_reduced, &upper_faces_records, 1);
+    let lower_faces = outer_face_records_to_list(&blocks_reduced, &lower_faces_records, gcd_to_use);
+    let upper_faces = outer_face_records_to_list(&blocks_reduced, &upper_faces_records, gcd_to_use);
 
     let delta_axis = match axis.as_str() {
         "x" => {
@@ -115,12 +113,111 @@ pub fn translational_periodicity(
     let mut periodic_matches = Vec::new();
 
     let lower_pool = dedup_faces(lower_faces);
-    let mut upper_pool = dedup_faces(upper_faces);
+    let upper_pool = dedup_faces(upper_faces);
 
-    for face_l in lower_pool.clone() {
-        let candidate = upper_pool.iter().enumerate().find_map(|(idx, f)| {
+    // ── Phase 1: Fast full-face matching via 4-corner comparison ──
+    let corner_tol = node_tol_xyz.unwrap_or(1e-6);
+    let axis_char = axis.chars().next().unwrap();
+    let mut consumed_lower = HashSet::<FaceKey>::new();
+    let mut consumed_upper = HashSet::<FaceKey>::new();
+
+    let pb1 = ProgressBar::new(lower_pool.len() as u64);
+    pb1.set_style(
+        ProgressStyle::with_template(
+            "{msg} [{bar:40.cyan/blue}] {pos}/{len} faces ({eta} remaining)",
+        )
+        .unwrap()
+        .progress_chars("=>-"),
+    );
+    pb1.set_message("Translational Phase 1 (corners)");
+
+    for face_l in &lower_pool {
+        pb1.inc(1);
+        if consumed_lower.contains(&face_key(face_l)) {
+            continue;
+        }
+        // Build forward translation transform: shift face_l by +delta along axis
+        let matched = upper_pool.iter().find_map(|face_u| {
+            if consumed_upper.contains(&face_key(face_u)) {
+                return None;
+            }
+            // Try lower shifted up vs upper original
+            let orient = full_face_match_transformed(
+                face_l,
+                face_u,
+                |mut p| {
+                    match axis_char {
+                        'x' => p[0] += delta_axis,
+                        'y' => p[1] += delta_axis,
+                        _ => p[2] += delta_axis,
+                    }
+                    p
+                },
+                corner_tol,
+            );
+            if orient.is_some() {
+                return Some((face_u.clone(), orient.unwrap()));
+            }
+            // Try lower original vs upper shifted down
+            let orient = full_face_match_transformed(
+                face_u,
+                face_l,
+                |mut p| {
+                    match axis_char {
+                        'x' => p[0] -= delta_axis,
+                        'y' => p[1] -= delta_axis,
+                        _ => p[2] -= delta_axis,
+                    }
+                    p
+                },
+                corner_tol,
+            );
+            if orient.is_some() {
+                return Some((face_u.clone(), orient.unwrap()));
+            }
+            None
+        });
+        if let Some((face_u, orient)) = matched {
+            consumed_lower.insert(face_key(face_l));
+            consumed_upper.insert(face_key(&face_u));
+            periodic_matches.push(FaceMatch {
+                block1: FaceRecord::from_face(face_l),
+                block2: FaceRecord::from_face(&face_u),
+                points: Vec::new(),
+                orientation: Some(orient),
+            });
+        }
+    }
+    pb1.finish_with_message("Translational Phase 1 done");
+
+    // Build remainder pools for Phase 2
+    let lower_remainder: Vec<Face> = lower_pool
+        .iter()
+        .filter(|f| !consumed_lower.contains(&face_key(f)))
+        .cloned()
+        .collect();
+    let mut upper_remainder: Vec<Face> = upper_pool
+        .iter()
+        .filter(|f| !consumed_upper.contains(&face_key(f)))
+        .cloned()
+        .collect();
+
+    // ── Phase 2: Slow node-by-node matching on remainder ──
+    let pb2 = ProgressBar::new(lower_remainder.len() as u64);
+    pb2.set_style(
+        ProgressStyle::with_template(
+            "{msg} [{bar:40.cyan/blue}] {pos}/{len} faces ({eta} remaining)",
+        )
+        .unwrap()
+        .progress_chars("=>-"),
+    );
+    pb2.set_message("Translational Phase 2 (nodes)");
+
+    for face_l in &lower_remainder {
+        pb2.inc(1);
+        let candidate = upper_remainder.iter().enumerate().find_map(|(idx, f)| {
             faces_translational_match(
-                &face_l,
+                face_l,
                 f,
                 &blocks_reduced,
                 &blocks_up,
@@ -136,24 +233,30 @@ pub fn translational_periodicity(
             .map(|mode| (idx, mode))
         });
         if let Some((pos, _mode)) = candidate {
-            let face_u = upper_pool.remove(pos);
+            let face_u = upper_remainder.remove(pos);
             periodic_matches.push(FaceMatch {
-                block1: FaceRecord::from_face(&face_l),
+                block1: FaceRecord::from_face(face_l),
                 block2: FaceRecord::from_face(&face_u),
                 points: Vec::new(),
+                orientation: None,
             });
         }
     }
+    pb2.finish_with_message("Translational Phase 2 done");
+
+    // Free shifted block copies now that matching is complete
+    drop(blocks_up);
+    drop(blocks_dn);
 
     let mut periodic_keys = HashSet::new();
     for rec in &periodic_matches {
-        periodic_keys.insert(face_record_key(&rec.block1));
-        periodic_keys.insert(face_record_key(&rec.block2));
+        periodic_keys.insert(rec.block1.index_key());
+        periodic_keys.insert(rec.block2.index_key());
     }
 
     let mut remaining = Vec::new();
     for record in outer_faces {
-        if !periodic_keys.contains(&face_record_key(record)) {
+        if !periodic_keys.contains(&record.index_key()) {
             remaining.push(record.clone());
         }
     }
@@ -360,30 +463,8 @@ fn dedup_faces(mut faces: Vec<Face>) -> Vec<Face> {
     faces
 }
 
-type FaceKey = (usize, usize, usize, usize, usize, usize, usize);
-
-/// Build a unique key for an exportable face record.
-fn face_record_key(record: &FaceRecord) -> FaceKey {
-    (
-        record.block_index,
-        record.imin,
-        record.jmin,
-        record.kmin,
-        record.imax,
-        record.jmax,
-        record.kmax,
-    )
-}
-
 /// Build a unique key directly from a `Face`.
+#[inline]
 fn face_key(face: &Face) -> FaceKey {
-    (
-        face.block_index().unwrap_or(usize::MAX),
-        face.imin(),
-        face.jmin(),
-        face.kmin(),
-        face.imax(),
-        face.jmax(),
-        face.kmax(),
-    )
+    face.index_key()
 }

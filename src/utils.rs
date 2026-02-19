@@ -1,6 +1,12 @@
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use std::io::{self, Read, Write};
 
+use crate::block::Block;
+
+// ---------------------------------------------------------------------------
+// GCD helpers
+// ---------------------------------------------------------------------------
+
 /// Greatest common divisor of two integers.
 pub(crate) fn gcd_two(mut a: usize, mut b: usize) -> usize {
     while b != 0 {
@@ -15,6 +21,80 @@ pub(crate) fn gcd_two(mut a: usize, mut b: usize) -> usize {
 pub(crate) fn gcd_three(a: usize, b: usize, c: usize) -> usize {
     gcd_two(gcd_two(a, b), c)
 }
+
+/// Compute the minimum GCD of `(imax-1, jmax-1, kmax-1)` across all blocks.
+///
+/// Returns at least 1.
+pub fn compute_min_gcd(blocks: &[Block]) -> usize {
+    blocks
+        .iter()
+        .map(|b| {
+            gcd_three(
+                b.imax.saturating_sub(1),
+                b.jmax.saturating_sub(1),
+                b.kmax.saturating_sub(1),
+            )
+        })
+        .filter(|&g| g > 0)
+        .min()
+        .unwrap_or(1)
+        .max(1)
+}
+
+// ---------------------------------------------------------------------------
+// 3-D vector helpers (used across multiple modules)
+// ---------------------------------------------------------------------------
+
+/// Component-wise subtraction.
+#[inline]
+pub(crate) fn sub3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+/// Cross product.
+#[inline]
+pub(crate) fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// Dot product.
+#[inline]
+pub(crate) fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// Euclidean norm.
+#[inline]
+pub(crate) fn vec_norm3(a: [f64; 3]) -> f64 {
+    dot3(a, a).sqrt()
+}
+
+/// Euclidean distance between two 3-D points.
+#[inline]
+pub(crate) fn distance3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    vec_norm3(sub3(a, b))
+}
+
+/// Apply a 3×3 rotation matrix to a point.
+#[inline]
+pub(crate) fn apply_rotation(p: [f64; 3], rot: [[f64; 3]; 3]) -> [f64; 3] {
+    [
+        rot[0][0] * p[0] + rot[0][1] * p[1] + rot[0][2] * p[2],
+        rot[1][0] * p[0] + rot[1][1] * p[1] + rot[1][2] * p[2],
+        rot[2][0] * p[0] + rot[2][1] * p[1] + rot[2][2] * p[2],
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// FaceKey – shared identifier type for faces
+// ---------------------------------------------------------------------------
+
+/// Compact identifier for a face: `(block_index, imin, jmin, kmin, imax, jmax, kmax)`.
+pub type FaceKey = (usize, usize, usize, usize, usize, usize, usize);
 #[derive(Copy, Clone, Debug)]
 pub enum Endian {
     Little,

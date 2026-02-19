@@ -20,9 +20,10 @@ pub mod utils;
 pub mod write;
 
 pub use block::{Block, FaceData};
+pub use block_face_functions::{find_angular_bounding_faces, to_radius, to_theta};
 pub use connectivity::{
     connectivity, connectivity_fast, face_matches_to_dict, verify_connectivity, FaceMatch,
-    FaceMatchPrinter, FaceRecord, FaceRecordTraits, MatchPoint,
+    FaceMatchPrinter, FaceRecord, FaceRecordTraits, MatchPoint, Orientation,
 };
 pub use differencing::{find_edges, find_face_edges, BlockDiff, FaceDiff};
 pub use graph::{build_weighted_graph_from_face_matches, write_ddcmp, BlockGraph, WeightAggregate};

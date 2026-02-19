@@ -17,6 +17,8 @@ metis = { version = "0.2", optional = true }
 
 # for tests (download)
 reqwest = { version = "0.12", features = ["blocking"] }
+indicatif = "0.18.4"
+rayon = "1.11.0"
 
 [features]
 default = []
