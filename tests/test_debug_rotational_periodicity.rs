@@ -101,13 +101,6 @@ fn remap_spec(spec: &FaceSpec, map: &std::collections::HashMap<usize, usize>) ->
 }
 
 // ===========================================================================
-// Helper: distance between two 3D points
-// ===========================================================================
-fn dist3(a: [Float; 3], b: [Float; 3]) -> Float {
-    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
-}
-
-// ===========================================================================
 // Diagnose a single (face_a, face_b) sub-pair
 // ===========================================================================
 fn diagnose_sub_pair(
@@ -478,6 +471,74 @@ fn debug_pipeline() {
             println!(
                 "    {} orig[{}]<=>orig[{}]: {}",
                 case.name, orig_a, orig_b,
+                if found { "FOUND" } else { "NOT FOUND" },
+            );
+        }
+    }
+
+    println!("\nDone.");
+}
+
+// ===========================================================================
+// TEST 3: Full mesh with GCD reduction
+// ===========================================================================
+#[test]
+fn debug_full_mesh_gcd() {
+    let rotation_angle_deg: Float = 360.0 / NBLADES as Float;
+
+    println!("\n{}", "=".repeat(70));
+    println!("FULL MESH WITH GCD REDUCTION");
+    println!("{}", "=".repeat(70));
+
+    println!("Loading full mesh (this takes a while)...");
+    let blocks = read_plot3d_binary(
+        FULL_MESH_FILE,
+        BinaryFormat::Raw,
+        FloatPrecision::F64,
+        Endian::Little,
+    )
+    .expect("Failed to read full mesh");
+    println!("Loaded {} blocks", blocks.len());
+
+    println!("Running connectivity_fast...");
+    let (face_matches, outer_faces) = connectivity_fast(&blocks);
+    println!(
+        "  {} face matches, {} non-connected faces",
+        face_matches.len(),
+        outer_faces.len()
+    );
+
+    println!("Running rotated_periodicity (reduce_mesh=true, GCD)...");
+    let (periodic_faces, remaining_outer) = rotated_periodicity(
+        &blocks,
+        &face_matches,
+        &outer_faces,
+        rotation_angle_deg,
+        ROTATION_AXIS,
+        true,
+    );
+    println!(
+        "  {} periodic face pairs, {} remaining outer faces",
+        periodic_faces.len(),
+        remaining_outer.len()
+    );
+
+    // Check test cases
+    let cases = test_cases();
+    println!("\n  Test case results:");
+    for case in &cases {
+        for spec_b in &case.faces_b {
+            let found = periodic_faces.iter().any(|pp| {
+                let b1 = pp.block1.block_index;
+                let b2 = pp.block2.block_index;
+                (b1 == case.face_a.0 && b2 == spec_b.0)
+                    || (b1 == spec_b.0 && b2 == case.face_a.0)
+            });
+            println!(
+                "    {} orig[{}]<=>orig[{}]: {}",
+                case.name,
+                case.face_a.0,
+                spec_b.0,
                 if found { "FOUND" } else { "NOT FOUND" },
             );
         }

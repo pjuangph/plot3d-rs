@@ -783,6 +783,7 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
 
     outer_faces.retain(|face| !outer_faces_to_remove.contains(&face.index_key()));
 
+    let mut self_match_keys: HashSet<FaceKey> = HashSet::new();
     for (idx, block) in blocks.iter().enumerate() {
         let (_, self_matches) = get_outer_faces(block);
         for (face_a, face_b) in self_matches {
@@ -810,6 +811,14 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
                 u_physical: None,
                 v_physical: None,
             };
+            // Track self-matched face keys so they can be removed from outer faces
+            let mut fa = face_a.clone();
+            fa.set_block_index(idx);
+            let mut fb = face_b.clone();
+            fb.set_block_index(idx);
+            self_match_keys.insert(fa.index_key());
+            self_match_keys.insert(fb.index_key());
+
             corner1.id = face_a.id();
             matches.push(FaceMatch {
                 block1: corner1,
@@ -819,6 +828,9 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
             });
         }
     }
+
+    // Remove self-matched faces from outer faces
+    outer_faces.retain(|face| !self_match_keys.contains(&face.index_key()));
 
     let mut formatted = Vec::new();
     let mut id_counter = 1;
