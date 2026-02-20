@@ -82,7 +82,7 @@ pub(crate) fn distance3(a: [Float; 3], b: [Float; 3]) -> Float {
 
 /// Apply a 3×3 rotation matrix to a point.
 #[inline]
-pub(crate) fn apply_rotation(p: [Float; 3], rot: [[Float; 3]; 3]) -> [Float; 3] {
+pub fn apply_rotation(p: [Float; 3], rot: [[Float; 3]; 3]) -> [Float; 3] {
     [
         rot[0][0] * p[0] + rot[0][1] * p[1] + rot[0][2] * p[2],
         rot[1][0] * p[0] + rot[1][1] * p[1] + rot[1][2] * p[2],

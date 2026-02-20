@@ -33,7 +33,10 @@ pub mod utils;
 pub mod write;
 
 pub use block::{Block, FaceData};
-pub use block_face_functions::{find_angular_bounding_faces, to_radius, to_theta};
+pub use block_face_functions::{
+    create_face_from_diagonals, find_angular_bounding_faces, full_face_match_transformed,
+    rotate_block, to_radius, to_theta, Face,
+};
 pub use connectivity::{
     connectivity, connectivity_fast, face_matches_to_dict, verify_connectivity, FaceMatch,
     FaceMatchPrinter, FaceRecord, FaceRecordTraits, MatchPoint, Orientation,
@@ -46,10 +49,12 @@ pub use merge_blocks::{
 pub use point_match::point_match;
 pub use read::{read_ap_nasa, read_plot3d_ascii, read_plot3d_binary, BinaryFormat, FloatPrecision};
 pub use rotational_periodicity::{
-    create_rotation_matrix, linear_real_transform, rotate_block_with_matrix, rotated_periodicity,
-    rotational_periodicity, rotational_periodicity_fast, verify_periodicity, PeriodicPair,
+    count_rotated_corners_on_face, create_rotation_matrix, faces_support_any,
+    faces_support_direction, linear_real_transform, periodicity_check_with_points,
+    rotate_block_with_matrix, rotated_periodicity, rotational_periodicity, verify_periodicity,
+    PeriodicPair,
 };
 pub use split_block::{split_blocks, SplitDirection};
 pub use translational_periodicity::translational_periodicity;
-pub use utils::Endian;
+pub use utils::{apply_rotation, Endian};
 pub use write::write_plot3d;

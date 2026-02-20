@@ -40,6 +40,14 @@ pub struct FaceRecord {
     pub jmax: usize,
     pub kmax: usize,
     pub id: Option<usize>,
+    /// Which physical axis ('x','y','z') the u-parameter primarily aligns with,
+    /// and whether the physical coordinate increases as the u-index increases.
+    /// `None` when not yet computed.
+    #[serde(default)]
+    pub u_physical: Option<(char, bool)>,
+    /// Same for the v-parameter (second varying index of the face).
+    #[serde(default)]
+    pub v_physical: Option<(char, bool)>,
 }
 
 impl FaceRecord {
@@ -87,6 +95,8 @@ impl FaceRecord {
             jmax,
             kmax,
             id: None,
+            u_physical: None,
+            v_physical: None,
         })
     }
 
@@ -101,7 +111,84 @@ impl FaceRecord {
             jmax: face.jmax(),
             kmax: face.kmax(),
             id: face.id(),
+            u_physical: None,
+            v_physical: None,
         }
+    }
+
+    /// Compute and fill in the physical direction metadata by sampling the block.
+    ///
+    /// For a face with one constant axis (e.g. K-constant), the two varying axes
+    /// form u and v.  We sample the block at the min and max corners of each
+    /// varying axis to determine which physical axis (x, y, z) it primarily
+    /// aligns with and whether it is increasing.
+    pub fn compute_direction(&mut self, block: &crate::block::Block) {
+        // Determine which axis is constant
+        let i_const = self.imin == self.imax;
+        let j_const = self.jmin == self.jmax;
+        let k_const = self.kmin == self.kmax;
+
+        // Identify u and v varying axes
+        // Convention: for K-const → u=I, v=J; for J-const → u=I, v=K; for I-const → u=J, v=K
+        let (u_min_ijk, u_max_ijk, v_min_ijk, v_max_ijk) = if k_const || (!i_const && !j_const && !k_const) {
+            // K-constant (or all varying, default to K-const convention)
+            (
+                (self.imin, self.jmin, self.kmin),
+                (self.imax, self.jmin, self.kmin),
+                (self.imin, self.jmin, self.kmin),
+                (self.imin, self.jmax, self.kmin),
+            )
+        } else if j_const {
+            (
+                (self.imin, self.jmin, self.kmin),
+                (self.imax, self.jmin, self.kmin),
+                (self.imin, self.jmin, self.kmin),
+                (self.imin, self.jmin, self.kmax),
+            )
+        } else {
+            // I-constant
+            (
+                (self.imin, self.jmin, self.kmin),
+                (self.imin, self.jmax, self.kmin),
+                (self.imin, self.jmin, self.kmin),
+                (self.imin, self.jmin, self.kmax),
+            )
+        };
+
+        // Sample block coordinates
+        let (ux0, uy0, uz0) = block.xyz(u_min_ijk.0, u_min_ijk.1, u_min_ijk.2);
+        let (ux1, uy1, uz1) = block.xyz(u_max_ijk.0, u_max_ijk.1, u_max_ijk.2);
+        let (vx0, vy0, vz0) = block.xyz(v_min_ijk.0, v_min_ijk.1, v_min_ijk.2);
+        let (vx1, vy1, vz1) = block.xyz(v_max_ijk.0, v_max_ijk.1, v_max_ijk.2);
+
+        // Determine dominant physical axis for u
+        let du = [(ux1 - ux0), (uy1 - uy0), (uz1 - uz0)];
+        let abs_du = [du[0].abs(), du[1].abs(), du[2].abs()];
+        let u_axis_idx = if abs_du[0] >= abs_du[1] && abs_du[0] >= abs_du[2] {
+            0
+        } else if abs_du[1] >= abs_du[2] {
+            1
+        } else {
+            2
+        };
+        let u_axis = ['x', 'y', 'z'][u_axis_idx];
+        let u_increasing = du[u_axis_idx] >= 0.0;
+
+        // Determine dominant physical axis for v
+        let dv = [(vx1 - vx0), (vy1 - vy0), (vz1 - vz0)];
+        let abs_dv = [dv[0].abs(), dv[1].abs(), dv[2].abs()];
+        let v_axis_idx = if abs_dv[0] >= abs_dv[1] && abs_dv[0] >= abs_dv[2] {
+            0
+        } else if abs_dv[1] >= abs_dv[2] {
+            1
+        } else {
+            2
+        };
+        let v_axis = ['x', 'y', 'z'][v_axis_idx];
+        let v_increasing = dv[v_axis_idx] >= 0.0;
+
+        self.u_physical = Some((u_axis, u_increasing));
+        self.v_physical = Some((v_axis, v_increasing));
     }
 
     /// Scale the index ranges by `factor`.
@@ -1012,6 +1099,8 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
                 jmax: face_a.jmax(),
                 kmax: face_a.kmax(),
                 id: face_a.id(),
+                u_physical: None,
+                v_physical: None,
             };
             let corner2 = FaceRecord {
                 block_index: idx,
@@ -1022,6 +1111,8 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
                 jmax: face_b.jmax(),
                 kmax: face_b.kmax(),
                 id: face_b.id(),
+                u_physical: None,
+                v_physical: None,
             };
             corner1.id = face_a.id();
             matches.push(FaceMatch {
@@ -1045,6 +1136,8 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
             jmax: face.jmax(),
             kmax: face.kmax(),
             id: Some(id_counter),
+            u_physical: None,
+            v_physical: None,
         });
         id_counter += 1;
     }

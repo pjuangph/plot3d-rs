@@ -494,6 +494,8 @@ impl Face {
             jmax: self.jmax(),
             kmax: self.kmax(),
             id: self.id,
+            u_physical: None,
+            v_physical: None,
         }
     }
 

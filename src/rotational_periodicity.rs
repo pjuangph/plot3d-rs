@@ -12,10 +12,10 @@ use rayon::prelude::*;
 use crate::{
     block::Block,
     block_face_functions::{
-        create_face_from_diagonals, find_angular_bounding_faces, match_faces_to_list,
-        outer_face_records_to_list, reduce_blocks, rotate_block, to_radius, Face,
+        create_face_from_diagonals, match_faces_to_list, outer_face_records_to_list,
+        reduce_blocks, rotate_block, to_radius, to_theta, Face, FaceAxis,
     },
-    connectivity::{get_face_intersection, FaceMatch, FaceRecord, Orientation},
+    connectivity::{get_face_intersection, FaceMatch, FaceRecord, MatchPoint, Orientation},
     utils::{apply_rotation, compute_min_gcd, distance3, FaceKey},
     Float, PI,
 };
@@ -64,35 +64,30 @@ pub fn rotate_block_with_matrix(block: &Block, rotation: [[Float; 3]; 3]) -> Blo
 /// Exportable description of a periodic face pairing.
 pub type PeriodicPair = FaceMatch;
 
-/// Detect rotational periodicity after reducing grids by the minimum shared GCD.
-/// A more versatile version is [`rotated_periodicity`].
+/// Detect rotational periodicity by reducing grids by the minimum shared GCD,
+/// running the 3-phase matching algorithm, then scaling results back.
 ///
 /// # Arguments
 /// * `blocks` - Full-resolution blocks that define the geometry.
-/// * `outer_faces` - Faces that remain exposed after connectivity processing.
 /// * `matched_faces` - Interfaces already known to match between blocks.
+/// * `outer_faces` - Faces that remain exposed after connectivity processing.
 /// * `periodic_direction` - Axis (`"i"`, `"j"`, or `"k"`) along which periodicity is expected.
 /// * `rotation_axis` - Axis of rotation (`'x'`, `'y'`, or `'z'`).
-/// * `nblades` - Number of periodic copies; controls the rotation increment.
+/// * `rotation_angle` - Rotation angle in radians.
 ///
 /// # Returns
-/// Tuple of `(periodic_pairs, outer_faces)` where the first element lists periodic matches as
-/// [`PeriodicPair`] records and the second contains the remaining outer faces.
-///
-/// # Testing
-/// The integration test `tests/test_rotational_periodicity.rs::rotational_periodicity_test`
-/// exercises this helper as part of the publicly documented workflow.
-pub fn rotational_periodicity_fast(
+/// `(periodic_pairs, outer_faces)` containing the periodic matches and the filtered outer faces.
+pub fn rotational_periodicity(
     blocks: &[Block],
-    outer_faces: &[FaceRecord],
     matched_faces: &[FaceMatch],
+    outer_faces: &[FaceRecord],
     periodic_direction: &str,
     rotation_axis: char,
-    nblades: usize,
+    rotation_angle: Float,
 ) -> (Vec<PeriodicPair>, Vec<FaceRecord>) {
     let gcd_to_use = compute_min_gcd(blocks);
 
-    let reduced_blocks = crate::block_face_functions::reduce_blocks(blocks, gcd_to_use);
+    let reduced_blocks = reduce_blocks(blocks, gcd_to_use);
 
     let mut matched_scaled = matched_faces.to_vec();
     for entry in &mut matched_scaled {
@@ -104,291 +99,260 @@ pub fn rotational_periodicity_fast(
         dict.divide_indices(gcd_to_use);
     }
 
-    let (mut periodic_export, mut outer_export) = rotational_periodicity(
+    let (mut periodic_export, mut outer_export) = rotational_periodicity_core(
         &reduced_blocks,
         &matched_scaled,
         &outer_scaled,
+        rotation_angle,
         periodic_direction,
         rotation_axis,
-        nblades,
     );
 
-    for rec in &mut periodic_export {
-        rec.block1.scale_indices(gcd_to_use);
-        rec.block2.scale_indices(gcd_to_use);
+    if gcd_to_use > 1 {
+        for rec in &mut periodic_export {
+            rec.block1.scale_indices(gcd_to_use);
+            rec.block2.scale_indices(gcd_to_use);
+        }
+
+        for dict in &mut outer_export {
+            dict.scale_indices(gcd_to_use);
+        }
     }
 
-    for dict in &mut outer_export {
-        dict.scale_indices(gcd_to_use);
-    }
-
-    return (periodic_export, outer_export);
+    (periodic_export, outer_export)
 }
 
-/// Identify rotationally periodic face pairs without pre-scaling the mesh.
+/// Core implementation shared by `rotational_periodicity` and `rotated_periodicity`.
 ///
-/// # Arguments
-/// * `blocks` - Blocks evaluated at their current resolution.
-/// * `matched_faces` - Pre-existing matched face records.
-/// * `outer_faces` - Remaining outer faces for each block.
-/// * `periodic_direction` - Axis (`"i"`, `"j"`, or `"k"`) that should stay constant across matches.
-/// * `rotation_axis` - Physical rotation axis (`'x'`, `'y'`, or `'z'`).
-/// * `nblades` - Number of equally spaced instances expected in the periodic set.
-///
-/// # Returns
-/// `(periodic_pairs, outer_faces)` containing the periodic matches and the filtered outer faces.
-///
-/// # Testing
-/// See `tests/test_rotational_periodicity.rs::rotational_periodicity_test` for an end-to-end
-/// example that builds the mesh, invokes this routine, and inspects the exported matches.
-pub fn rotational_periodicity(
+/// Uses a 3-phase algorithm:
+///   Phase 1 — Full-face matching via cylindrical bucketing (O(N log N))
+///   Phase 2 — Split-face matching with corner pre-checks
+///   Phase 3 — Edge-based matching for remaining faces
+fn rotational_periodicity_core(
     blocks: &[Block],
     matched_faces: &[FaceMatch],
     outer_faces: &[FaceRecord],
+    rotation_angle: Float,
     periodic_direction: &str,
     rotation_axis: char,
-    nblades: usize,
 ) -> (Vec<PeriodicPair>, Vec<FaceRecord>) {
-    let rotation_angle = if nblades == 0 {
-        0.0
-    } else {
-        2.0 * PI / nblades as Float
-    };
+    use crate::block_face_functions::full_face_match_transformed;
+
     let rot_forward = create_rotation_matrix(rotation_angle, rotation_axis);
     let rot_backward = create_rotation_matrix(-rotation_angle, rotation_axis);
 
-    let mut periodic_pairs: Vec<(Face, Face)> = Vec::new();
-    let mut periodic_exports: Vec<FaceMatch> = Vec::new();
+    let transform_fwd = |p: [Float; 3]| apply_rotation(p, rot_forward);
+    let transform_rev = |p: [Float; 3]| apply_rotation(p, rot_backward);
 
-    let mut outer_faces_all = outer_face_records_to_list(blocks, outer_faces, 1);
-    let matched_faces_all = match_faces_to_list(blocks, matched_faces, 1);
+    let mut periodic_exports: Vec<FaceMatch> = Vec::new();
     let mut seen_pair_keys: HashSet<(FaceKey, FaceKey)> = HashSet::new();
 
-    // ===== PHASE 1: Full face matching with rotation (fast, corner-based) =====
+    let outer_faces_all = outer_face_records_to_list(blocks, outer_faces, 1);
+    let matched_faces_all = match_faces_to_list(blocks, matched_faces, 1);
+
+    // Build the face pool with cylindrical metadata
+    let mut pool = FacePool::new(outer_faces_all, rotation_axis);
+
+    // Theta tolerance for candidate search: use the rotation angle plus some margin
+    let theta_tol = rotation_angle.abs() * 0.15 + 0.05;
+
+    // ===== PHASE 1: Full-face matching via cylindrical bucketing =====
     {
-        use crate::block_face_functions::full_face_match_transformed;
+        let active = pool.active_indices();
+        let pb = make_progress_bar(active.len() as u64, "faces", "Rot. periodicity Phase 1 (corners)");
 
-        let transform_fwd = |p: [Float; 3]| apply_rotation(p, rot_forward);
-        let transform_rev = |p: [Float; 3]| apply_rotation(p, rot_backward);
-        let mut consumed_keys: HashSet<FaceKey> = HashSet::new();
-
-        let n = outer_faces_all.len();
-        let pb = make_progress_bar(n as u64, "faces", "Rot. periodicity Phase 1 (corners)");
-
-        for idx_a in 0..n {
-            pb.inc(1);
-            if consumed_keys.contains(&face_key(&outer_faces_all[idx_a])) {
-                continue;
-            }
-            for idx_b in 0..n {
-                if idx_a == idx_b {
-                    continue;
-                }
-                if consumed_keys.contains(&face_key(&outer_faces_all[idx_b])) {
-                    continue;
-                }
-                let face_a = &outer_faces_all[idx_a];
-                let face_b = &outer_faces_all[idx_b];
-
-                if !faces_support_direction(face_a, face_b, periodic_direction) {
-                    continue;
-                }
-                if !faces_could_match_rotationally(face_a, face_b, rot_forward, rotation_axis, 0.1)
-                    && !faces_could_match_rotationally(
-                        face_a,
-                        face_b,
-                        rot_backward,
-                        rotation_axis,
-                        0.1,
-                    )
-                {
-                    continue;
+        // Parallel search: each face_a independently finds its best candidate match.
+        // The pool is read-only during this phase; matches are deduplicated serially afterwards.
+        let phase1_matches: Vec<(FaceKey, FaceKey, FaceMatch)> = active
+            .par_iter()
+            .filter_map(|&idx_a| {
+                pb.inc(1);
+                if pool.is_consumed(idx_a) {
+                    return None;
                 }
 
-                // Adaptive tolerance based on face diagonal (handles wavy surfaces)
-                let tol = adaptive_corner_tol(face_a, face_b);
-                // Try forward rotation
-                if let Some(orientation) =
-                    full_face_match_transformed(face_a, face_b, &transform_fwd, tol)
-                {
-                    let key_a = face_key(face_a);
-                    let key_b = face_key(face_b);
-                    let pair_key = ordered_pair(key_a, key_b);
-                    if !seen_pair_keys.contains(&pair_key) {
-                        seen_pair_keys.insert(pair_key);
-                        consumed_keys.insert(key_a);
-                        consumed_keys.insert(key_b);
-                        periodic_pairs.push((face_a.clone(), face_b.clone()));
-                        periodic_exports.push(FaceMatch {
-                            block1: FaceRecord::from_face(face_a),
-                            block2: FaceRecord::from_face(face_b),
-                            points: Vec::new(),
-                            orientation: Some(orientation),
-                        });
-                        break; // face_a consumed, move to next
+                let face_a = &pool.faces[idx_a];
+                let candidates = pool.find_rotational_candidates(idx_a, rotation_angle, theta_tol);
+
+                for &idx_b in &candidates {
+                    if idx_a == idx_b || pool.is_consumed(idx_b) {
+                        continue;
                     }
-                    continue;
-                }
-                // Try backward rotation
-                if let Some(orientation) =
-                    full_face_match_transformed(face_a, face_b, &transform_rev, tol)
-                {
-                    let key_a = face_key(face_a);
-                    let key_b = face_key(face_b);
-                    let pair_key = ordered_pair(key_a, key_b);
-                    if !seen_pair_keys.contains(&pair_key) {
-                        seen_pair_keys.insert(pair_key);
-                        consumed_keys.insert(key_a);
-                        consumed_keys.insert(key_b);
-                        periodic_pairs.push((face_a.clone(), face_b.clone()));
-                        periodic_exports.push(FaceMatch {
-                            block1: FaceRecord::from_face(face_a),
-                            block2: FaceRecord::from_face(face_b),
-                            points: Vec::new(),
-                            orientation: Some(orientation),
-                        });
-                        break; // face_a consumed, move to next
+                    let face_b = &pool.faces[idx_b];
+
+                    if !faces_support_direction(face_a, face_b, periodic_direction) {
+                        continue;
+                    }
+                    if face_a.const_type() != face_b.const_type() || face_a.const_type() == -1 {
+                        continue;
+                    }
+
+                    // Try both rotation directions for this candidate
+                    for &rot_mat in &[rot_forward, rot_backward] {
+                        let transform = |p: [Float; 3]| apply_rotation(p, rot_mat);
+                        if let Some(orientation) =
+                            full_face_match_transformed(face_a, face_b, &transform, MATCH_TOL)
+                        {
+                            let key_a = face_key(face_a);
+                            let key_b = face_key(face_b);
+                            return Some((
+                                key_a,
+                                key_b,
+                                FaceMatch {
+                                    block1: FaceRecord::from_face(face_a),
+                                    block2: FaceRecord::from_face(face_b),
+                                    points: Vec::new(),
+                                    orientation: Some(orientation),
+                                },
+                            ));
+                        }
                     }
                 }
-            }
-        }
+                None
+            })
+            .collect();
         pb.finish_and_clear();
 
-        // Remove Phase 1 consumed faces
-        outer_faces_all.retain(|f| !consumed_keys.contains(&face_key(f)));
+        // Apply Phase 1 matches serially, deduplicating faces matched by multiple threads
+        let mut consumed_in_phase1: HashSet<FaceKey> = HashSet::new();
+        for (key_a, key_b, fm) in phase1_matches {
+            if consumed_in_phase1.contains(&key_a) || consumed_in_phase1.contains(&key_b) {
+                continue;
+            }
+            let pair_key = ordered_pair(key_a, key_b);
+            if seen_pair_keys.contains(&pair_key) {
+                continue;
+            }
+            seen_pair_keys.insert(pair_key);
+            consumed_in_phase1.insert(key_a);
+            consumed_in_phase1.insert(key_b);
+            pool.consume(key_a);
+            pool.consume(key_b);
+            periodic_exports.push(fm);
+        }
     }
 
-    // ===== PHASE 2: Partial face matching with splitting (slow) =====
-    let mut changed = true;
-    let mut iteration = 0usize;
-    while changed {
-        changed = false;
-        iteration += 1;
-        let combos: Vec<(usize, usize)> = permutations_indices(outer_faces_all.len());
+    // ===== PHASE 2: Split-face matching with corner pre-checks =====
+    {
+        let mut changed = true;
+        let mut iteration = 0usize;
+        let mut non_matching_p2: HashSet<(FaceKey, FaceKey)> = HashSet::new();
 
-        let pb = make_progress_bar(combos.len() as u64, "pairs", format!("Periodicity pass {iteration}"));
-
-        let mut removal_keys: Option<Vec<FaceKey>> = None;
-        let mut new_splits: Vec<Face> = Vec::new();
-        // The ' is the loop label
-        'outer_loop: for (idx_a, idx_b) in combos {
-            pb.inc(1);
-            if idx_a >= outer_faces_all.len() || idx_b >= outer_faces_all.len() {
-                continue;
-            }
-            let face_a = outer_faces_all[idx_a].clone();
-            let face_b = outer_faces_all[idx_b].clone();
-
-            if !faces_support_direction(&face_a, &face_b, periodic_direction) {
-                continue;
+        while changed {
+            changed = false;
+            iteration += 1;
+            if iteration > 50 {
+                break;
             }
 
-            // Cheap geometric pre-check
-            if !faces_could_match_rotationally(&face_a, &face_b, rot_forward, rotation_axis, 0.1)
-                && !faces_could_match_rotationally(
+            let active = pool.active_indices();
+            let pb = make_progress_bar(
+                active.len() as u64,
+                "faces",
+                format!("Rot. periodicity Phase 2 pass {iteration}"),
+            );
+
+            let mut match_found = None; // (idx_a, idx_b, rot_matrix)
+
+            'phase2_search: for &idx_a in &active {
+                pb.inc(1);
+                if pool.is_consumed(idx_a) {
+                    continue;
+                }
+                let face_a = &pool.faces[idx_a];
+                let candidates =
+                    pool.find_rotational_candidates(idx_a, rotation_angle, theta_tol);
+
+                for &idx_b in &candidates {
+                    if idx_a == idx_b || pool.is_consumed(idx_b) {
+                        continue;
+                    }
+                    let face_b = &pool.faces[idx_b];
+
+                    let key_pair = ordered_pair(face_key(face_a), face_key(face_b));
+                    if non_matching_p2.contains(&key_pair) {
+                        continue;
+                    }
+
+                    if !faces_support_direction(face_a, face_b, periodic_direction) {
+                        non_matching_p2.insert(key_pair);
+                        continue;
+                    }
+                    if face_a.const_type() != face_b.const_type() || face_a.const_type() == -1 {
+                        non_matching_p2.insert(key_pair);
+                        continue;
+                    }
+
+                    let block_idx_a = match face_a.block_index() {
+                        Some(idx) => idx,
+                        None => continue,
+                    };
+                    let block_idx_b = match face_b.block_index() {
+                        Some(idx) => idx,
+                        None => continue,
+                    };
+                    if block_idx_a >= blocks.len() || block_idx_b >= blocks.len() {
+                        continue;
+                    }
+
+                    let block_b = &blocks[block_idx_b];
+
+                    // Try both rotation directions for this candidate
+                    let mut found_corners = false;
+                    for &rot_matrix in &[rot_forward, rot_backward] {
+                        let corners_hit = count_rotated_corners_on_face(
+                            face_a, face_b, block_b, rot_matrix, MATCH_TOL,
+                        );
+                        if corners_hit >= 2 {
+                            match_found = Some((idx_a, idx_b, rot_matrix));
+                            found_corners = true;
+                            break;
+                        }
+                    }
+                    if found_corners {
+                        break 'phase2_search;
+                    }
+                    non_matching_p2.insert(key_pair);
+                }
+            }
+            pb.finish_and_clear();
+
+            // Process the found match
+            if let Some((idx_a, idx_b, rot_matrix)) = match_found {
+                let face_a = pool.faces[idx_a].clone();
+                let face_b = pool.faces[idx_b].clone();
+                let block_idx_a = face_a.block_index().unwrap();
+                let block_idx_b = face_b.block_index().unwrap();
+
+                let block_a_rot = rotate_block_with_matrix(&blocks[block_idx_a], rot_matrix);
+                let block_b = &blocks[block_idx_b];
+
+                if try_split_match(
                     &face_a,
                     &face_b,
-                    rot_backward,
-                    rotation_axis,
-                    0.1,
-                )
-            {
-                continue;
-            }
-
-            let block_idx_a = match face_a.block_index() {
-                Some(idx) => idx,
-                None => continue,
-            };
-            let block_idx_b = match face_b.block_index() {
-                Some(idx) => idx,
-                None => continue,
-            };
-            if block_idx_a >= blocks.len() || block_idx_b >= blocks.len() {
-                continue;
-            }
-
-            let block_b = &blocks[block_idx_b];
-            let block_a_rot_fwd = rotate_block_with_matrix(&blocks[block_idx_a], rot_forward);
-
-            // Guard: ensure face indices fit within their block dimensions
-            if !is_valid_face(&face_a, &block_a_rot_fwd) || !is_valid_face(&face_b, block_b) {
-                continue;
-            }
-
-            if let Some((pair_faces, splits)) =
-                periodicity_check(&face_a, &face_b, &block_a_rot_fwd, block_b)
-            {
-                let pair_key = ordered_pair(face_key(&pair_faces[0]), face_key(&pair_faces[1]));
-                if seen_pair_keys.contains(&pair_key) {
-                    continue;
+                    &block_a_rot,
+                    block_b,
+                    &mut seen_pair_keys,
+                    &mut periodic_exports,
+                    &mut pool,
+                ) {
+                    changed = true;
+                } else {
+                    // Candidate had corners but failed intersection — skip it next time
+                    let pair_key = ordered_pair(face_key(&face_a), face_key(&face_b));
+                    non_matching_p2.insert(pair_key);
+                    changed = true; // restart to try next candidate
                 }
-                seen_pair_keys.insert(pair_key);
-                removal_keys = Some(collect_removal_keys(&face_a, &face_b, &pair_faces));
-                periodic_pairs.push((pair_faces[0].clone(), pair_faces[1].clone()));
-                periodic_exports.push(FaceMatch {
-                    block1: FaceRecord::from_face(&pair_faces[0]),
-                    block2: FaceRecord::from_face(&pair_faces[1]),
-                    points: Vec::new(),
-                    orientation: None,
-                });
-                new_splits = splits;
-                changed = true;
-                break 'outer_loop;
             }
-            let block_a_rot_rev = rotate_block_with_matrix(&blocks[block_idx_a], rot_backward);
-            if !is_valid_face(&face_a, &block_a_rot_rev) {
-                continue;
-            }
-            if let Some((pair_faces, splits)) =
-                periodicity_check(&face_a, &face_b, &block_a_rot_rev, block_b)
-            {
-                let pair_key = ordered_pair(face_key(&pair_faces[0]), face_key(&pair_faces[1]));
-                if seen_pair_keys.contains(&pair_key) {
-                    continue;
-                }
-                seen_pair_keys.insert(pair_key);
-                removal_keys = Some(collect_removal_keys(&face_a, &face_b, &pair_faces));
-                periodic_pairs.push((pair_faces[0].clone(), pair_faces[1].clone()));
-                periodic_exports.push(FaceMatch {
-                    block1: FaceRecord::from_face(&pair_faces[0]),
-                    block2: FaceRecord::from_face(&pair_faces[1]),
-                    points: Vec::new(),
-                    orientation: None,
-                });
-                new_splits = splits;
-                changed = true;
-                break 'outer_loop;
-            }
-        }
-        pb.finish_and_clear();
-
-        if changed {
-            if let Some(keys) = removal_keys {
-                outer_faces_all = outer_faces_all
-                    .into_iter()
-                    .filter(|f| !keys.iter().any(|k| face_key(f) == *k))
-                    .collect();
-            }
-            outer_faces_all.extend(new_splits.drain(..));
         }
     }
 
-    // ===== PHASE 3: Relaxed matching for remaining wavy-surface faces =====
-    // After Phase 2, some faces on wavy surfaces remain unmatched because
-    // faces_could_match_rotationally() rejected them (centroid drift on wavy faces).
-    // Phase 3 skips that precheck entirely and brute-forces every remaining pair
-    // with relaxed tolerances.
+    // ===== PHASE 3: Edge-based matching =====
     {
-        use crate::block_face_functions::full_face_match_transformed;
-
-        let transform_fwd = |p: [Float; 3]| apply_rotation(p, rot_forward);
-        let transform_rev = |p: [Float; 3]| apply_rotation(p, rot_backward);
-        let relaxed_tol_frac = MATCH_TOL_FRAC * 5.0;
-
         let mut changed_p3 = true;
         let mut iteration_p3 = 0usize;
         let mut non_matching_p3: HashSet<(FaceKey, FaceKey)> = HashSet::new();
+
         while changed_p3 {
             changed_p3 = false;
             iteration_p3 += 1;
@@ -396,165 +360,154 @@ pub fn rotational_periodicity(
                 break;
             }
 
-            let combos: Vec<(usize, usize)> = permutations_indices(outer_faces_all.len());
+            let active = pool.active_indices();
+            let pb = make_progress_bar(
+                active.len() as u64,
+                "faces",
+                format!("Rot. periodicity Phase 3 pass {iteration_p3}"),
+            );
 
-            let pb = make_progress_bar(combos.len() as u64, "pairs", format!("Rot. periodicity Phase 3 pass {iteration_p3}"));
+            let mut match_found: Option<(usize, usize, bool)> = None;
 
-            let mut removal_keys: Option<Vec<FaceKey>> = None;
-            let mut new_splits: Vec<Face> = Vec::new();
-
-            'phase3_loop: for (idx_a, idx_b) in combos {
+            'phase3_search: for (ai, &idx_a) in active.iter().enumerate() {
                 pb.inc(1);
-                if idx_a >= outer_faces_all.len() || idx_b >= outer_faces_all.len() {
+                if pool.is_consumed(idx_a) {
                     continue;
                 }
-                let face_a = outer_faces_all[idx_a].clone();
-                let face_b = outer_faces_all[idx_b].clone();
-
-                let key_pair = ordered_pair(face_key(&face_a), face_key(&face_b));
-                if non_matching_p3.contains(&key_pair) {
-                    continue;
-                }
-
-                // Lightweight filters only — no centroid precheck
-                if !faces_support_direction(&face_a, &face_b, periodic_direction) {
-                    continue;
-                }
-                if face_a.const_type() != face_b.const_type() || face_a.const_type() == -1 {
-                    continue;
-                }
+                let face_a = &pool.faces[idx_a];
 
                 let block_idx_a = match face_a.block_index() {
                     Some(idx) => idx,
                     None => continue,
                 };
-                let block_idx_b = match face_b.block_index() {
-                    Some(idx) => idx,
-                    None => continue,
-                };
-                if block_idx_a >= blocks.len() || block_idx_b >= blocks.len() {
+                if block_idx_a >= blocks.len() {
                     continue;
                 }
 
-                let block_b = &blocks[block_idx_b];
+                // Pre-compute edges for face_a on both rotated blocks
+                let edges_a_fwd = extract_face_edges(
+                    face_a,
+                    &rotate_block_with_matrix(&blocks[block_idx_a], rot_forward),
+                );
+                let edges_a_rev = extract_face_edges(
+                    face_a,
+                    &rotate_block_with_matrix(&blocks[block_idx_a], rot_backward),
+                );
 
-                // Try forward rotation
-                let block_a_rot_fwd =
-                    rotate_block_with_matrix(&blocks[block_idx_a], rot_forward);
-                if is_valid_face(&face_a, &block_a_rot_fwd) && is_valid_face(&face_b, block_b)
-                {
-                    // First try fast corner-based match with relaxed tolerance
-                    let tol = adaptive_corner_tol(&face_a, &face_b) * 10.0;
-                    if let Some(orientation) =
-                        full_face_match_transformed(&face_a, &face_b, &transform_fwd, tol)
-                    {
-                        let key_a = face_key(&face_a);
-                        let key_b = face_key(&face_b);
-                        removal_keys = Some(vec![key_a, key_b]);
-                        periodic_pairs.push((face_a.clone(), face_b.clone()));
-                        periodic_exports.push(FaceMatch {
-                            block1: FaceRecord::from_face(&face_a),
-                            block2: FaceRecord::from_face(&face_b),
-                            points: Vec::new(),
-                            orientation: Some(orientation),
-                        });
-                        changed_p3 = true;
-                        break 'phase3_loop;
+                for &idx_b in &active[(ai + 1)..] {
+                    if pool.is_consumed(idx_b) {
+                        continue;
                     }
-                    // Fall back to node-based with relaxed tolerance
-                    if let Some((pair_faces, splits)) = periodicity_check_with_tol(
-                        &face_a,
-                        &face_b,
-                        &block_a_rot_fwd,
-                        block_b,
-                        relaxed_tol_frac,
-                    ) {
-                        removal_keys =
-                            Some(collect_removal_keys(&face_a, &face_b, &pair_faces));
-                        periodic_pairs
-                            .push((pair_faces[0].clone(), pair_faces[1].clone()));
-                        periodic_exports.push(FaceMatch {
-                            block1: FaceRecord::from_face(&pair_faces[0]),
-                            block2: FaceRecord::from_face(&pair_faces[1]),
-                            points: Vec::new(),
-                            orientation: None,
-                        });
-                        new_splits = splits;
-                        changed_p3 = true;
-                        break 'phase3_loop;
-                    }
-                }
+                    let face_b = &pool.faces[idx_b];
 
-                // Try backward rotation
-                let block_a_rot_rev =
-                    rotate_block_with_matrix(&blocks[block_idx_a], rot_backward);
-                if is_valid_face(&face_a, &block_a_rot_rev) && is_valid_face(&face_b, block_b)
-                {
-                    let tol = adaptive_corner_tol(&face_a, &face_b) * 10.0;
-                    if let Some(orientation) =
-                        full_face_match_transformed(&face_a, &face_b, &transform_rev, tol)
-                    {
-                        let key_a = face_key(&face_a);
-                        let key_b = face_key(&face_b);
-                        removal_keys = Some(vec![key_a, key_b]);
-                        periodic_pairs.push((face_a.clone(), face_b.clone()));
-                        periodic_exports.push(FaceMatch {
-                            block1: FaceRecord::from_face(&face_a),
-                            block2: FaceRecord::from_face(&face_b),
-                            points: Vec::new(),
-                            orientation: Some(orientation),
-                        });
-                        changed_p3 = true;
-                        break 'phase3_loop;
+                    let key_pair = ordered_pair(face_key(face_a), face_key(face_b));
+                    if non_matching_p3.contains(&key_pair) {
+                        continue;
                     }
-                    // Fall back to node-based with relaxed tolerance
-                    if let Some((pair_faces, splits)) = periodicity_check_with_tol(
-                        &face_a,
-                        &face_b,
-                        &block_a_rot_rev,
-                        block_b,
-                        relaxed_tol_frac,
-                    ) {
-                        removal_keys =
-                            Some(collect_removal_keys(&face_a, &face_b, &pair_faces));
-                        periodic_pairs
-                            .push((pair_faces[0].clone(), pair_faces[1].clone()));
-                        periodic_exports.push(FaceMatch {
-                            block1: FaceRecord::from_face(&pair_faces[0]),
-                            block2: FaceRecord::from_face(&pair_faces[1]),
-                            points: Vec::new(),
-                            orientation: None,
-                        });
-                        new_splits = splits;
-                        changed_p3 = true;
-                        break 'phase3_loop;
+
+                    if !faces_support_direction(face_a, face_b, periodic_direction) {
+                        non_matching_p3.insert(key_pair);
+                        continue;
                     }
+                    if face_a.const_type() != face_b.const_type() || face_a.const_type() == -1 {
+                        non_matching_p3.insert(key_pair);
+                        continue;
+                    }
+
+                    let block_idx_b = match face_b.block_index() {
+                        Some(idx) => idx,
+                        None => continue,
+                    };
+                    if block_idx_b >= blocks.len() {
+                        continue;
+                    }
+
+                    let block_b = &blocks[block_idx_b];
+                    // Extract edges for face_b on its original block
+                    let edges_b = extract_face_edges(face_b, block_b);
+                    if edges_b.is_empty() {
+                        continue;
+                    }
+
+                    // Try forward rotation edges
+                    for (edges_a, is_forward) in [(&edges_a_fwd, true), (&edges_a_rev, false)] {
+                        if edges_a.is_empty() {
+                            continue;
+                        }
+                        // Identity matrix since edges are already extracted from rotated block
+                        let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+                        let match_count = count_edge_matches(edges_a, &edges_b, identity, MATCH_TOL);
+                        if match_count >= 2 {
+                            match_found = Some((idx_a, idx_b, is_forward));
+                            break 'phase3_search;
+                        }
+                    }
+
+                    non_matching_p3.insert(key_pair);
                 }
-                // This pair didn't match — remember it so we don't retry
-                non_matching_p3.insert(key_pair);
             }
             pb.finish_and_clear();
 
-            if changed_p3 {
-                if let Some(keys) = removal_keys {
-                    outer_faces_all = outer_faces_all
-                        .into_iter()
-                        .filter(|f| !keys.iter().any(|k| face_key(f) == *k))
-                        .collect();
+            // Process edge-based match
+            if let Some((idx_a, idx_b, is_forward)) = match_found {
+                let face_a = pool.faces[idx_a].clone();
+                let face_b = pool.faces[idx_b].clone();
+                let block_idx_a = face_a.block_index().unwrap();
+                let block_idx_b = face_b.block_index().unwrap();
+
+                let rot_matrix = if is_forward { rot_forward } else { rot_backward };
+                let block_a_rot = rotate_block_with_matrix(&blocks[block_idx_a], rot_matrix);
+                let block_b = &blocks[block_idx_b];
+
+                if is_valid_face(&face_a, &block_a_rot) && is_valid_face(&face_b, block_b) {
+                    // Try full face match first (edges may indicate perfect alignment)
+                    let transform: &dyn Fn([Float; 3]) -> [Float; 3] = if is_forward {
+                        &transform_fwd
+                    } else {
+                        &transform_rev
+                    };
+                    if let Some(orientation) =
+                        full_face_match_transformed(&face_a, &face_b, transform, MATCH_TOL)
+                    {
+                        let key_a = face_key(&face_a);
+                        let key_b = face_key(&face_b);
+                        let pair_key = ordered_pair(key_a, key_b);
+                        if !seen_pair_keys.contains(&pair_key) {
+                            seen_pair_keys.insert(pair_key);
+                            pool.consume(key_a);
+                            pool.consume(key_b);
+                            periodic_exports.push(FaceMatch {
+                                block1: FaceRecord::from_face(&face_a),
+                                block2: FaceRecord::from_face(&face_b),
+                                points: Vec::new(),
+                                orientation: Some(orientation),
+                            });
+                            changed_p3 = true;
+                            continue;
+                        }
+                    }
+
+                    // Fall back to node-level intersection
+                    if try_split_match(
+                        &face_a,
+                        &face_b,
+                        &block_a_rot,
+                        block_b,
+                        &mut seen_pair_keys,
+                        &mut periodic_exports,
+                        &mut pool,
+                    ) {
+                        changed_p3 = true;
+                    }
                 }
-                outer_faces_all.extend(new_splits.drain(..));
-                non_matching_p3.clear(); // splits create new faces that may match old ones
             }
         }
     }
 
-    let matched_keys: Vec<FaceKey> = matched_faces_all.iter().map(face_key).collect();
-    outer_faces_all.retain(|f| !matched_keys.contains(&face_key(f)));
-
-    let mut outer_exports = Vec::new();
-    for face in &outer_faces_all {
-        outer_exports.push(face.to_record());
-    }
+    // Filter out faces that are in matched_faces
+    let matched_keys: HashSet<FaceKey> = matched_faces_all.iter().map(face_key).collect();
+    let mut outer_exports = pool.drain_as_records();
+    outer_exports.retain(|r| !matched_keys.contains(&r.index_key()));
 
     (periodic_exports, outer_exports)
 }
@@ -584,435 +537,33 @@ pub fn rotated_periodicity(
     let mut working_blocks: Vec<Block> = blocks.to_vec();
     if reduce_mesh && !blocks.is_empty() {
         gcd_to_use = compute_min_gcd(blocks);
-        working_blocks = crate::block_face_functions::reduce_blocks(blocks, gcd_to_use);
+        working_blocks = reduce_blocks(blocks, gcd_to_use);
+    }
+
+    let mut matched_scaled = matched_faces.to_vec();
+    for entry in &mut matched_scaled {
+        entry.divide_indices(gcd_to_use);
+    }
+
+    let mut outer_scaled = outer_faces.to_vec();
+    for dict in &mut outer_scaled {
+        dict.divide_indices(gcd_to_use);
     }
 
     let rotation_angle_rad = rotation_angle_deg.to_radians();
-    let rotation_matrix_forward = create_rotation_matrix(rotation_angle_rad, rotation_axis);
-    let rotation_matrix_reverse = create_rotation_matrix(-rotation_angle_rad, rotation_axis);
 
-    let rotated_blocks_forward: Vec<Block> = working_blocks
-        .iter()
-        .map(|b| rotate_block_with_matrix(b, rotation_matrix_forward))
-        .collect();
-    let rotated_blocks_reverse: Vec<Block> = working_blocks
-        .iter()
-        .map(|b| rotate_block_with_matrix(b, rotation_matrix_reverse))
-        .collect();
-
-    let mut outer_faces_all = outer_face_records_to_list(&working_blocks, outer_faces, gcd_to_use);
-    let matched_faces_all = match_faces_to_list(&working_blocks, matched_faces, gcd_to_use);
-
-    // Detect angular boundaries for annular domains
-    let (_, _, lower_angular, upper_angular) =
-        find_angular_bounding_faces(&working_blocks, &outer_faces_all, rotation_axis, 1e-6);
-    let use_angular = !lower_angular.is_empty() && !upper_angular.is_empty();
-    let lower_keys: HashSet<FaceKey> = lower_angular.iter().map(face_key).collect();
-    let upper_keys: HashSet<FaceKey> = upper_angular.iter().map(face_key).collect();
-
-    let mut periodic_pairs: Vec<(Face, Face, Option<Orientation>)> = Vec::new();
-    let mut non_matching: HashSet<(usize, usize)> = HashSet::new();
-
-    // ===== PHASE 1: Full face matching with rotation (fast, corner-based) =====
-    {
-        use crate::block_face_functions::full_face_match_transformed;
-
-        let transform_fwd = |p: [Float; 3]| apply_rotation(p, rotation_matrix_forward);
-        let transform_rev = |p: [Float; 3]| apply_rotation(p, rotation_matrix_reverse);
-        let mut consumed_keys: HashSet<FaceKey> = HashSet::new();
-
-        let n = outer_faces_all.len();
-        let pb = make_progress_bar(n as u64, "faces", "Rotated periodicity Phase 1 (corners)");
-
-        for idx_a in 0..n {
-            pb.inc(1);
-            if consumed_keys.contains(&face_key(&outer_faces_all[idx_a])) {
-                continue;
-            }
-            for idx_b in 0..n {
-                if idx_a == idx_b {
-                    continue;
-                }
-                if consumed_keys.contains(&face_key(&outer_faces_all[idx_b])) {
-                    continue;
-                }
-                let face_a = &outer_faces_all[idx_a];
-                let face_b = &outer_faces_all[idx_b];
-
-                if !faces_support_any(face_a, face_b) {
-                    continue;
-                }
-                if !faces_could_match_rotationally(
-                    face_a,
-                    face_b,
-                    rotation_matrix_forward,
-                    rotation_axis,
-                    0.1,
-                ) && !faces_could_match_rotationally(
-                    face_a,
-                    face_b,
-                    rotation_matrix_reverse,
-                    rotation_axis,
-                    0.1,
-                ) {
-                    continue;
-                }
-
-                let tol = adaptive_corner_tol(face_a, face_b);
-                if let Some(orientation) =
-                    full_face_match_transformed(face_a, face_b, &transform_fwd, tol)
-                {
-                    consumed_keys.insert(face_key(face_a));
-                    consumed_keys.insert(face_key(face_b));
-                    periodic_pairs.push((face_a.clone(), face_b.clone(), Some(orientation)));
-                    break;
-                }
-                if let Some(orientation) =
-                    full_face_match_transformed(face_a, face_b, &transform_rev, tol)
-                {
-                    consumed_keys.insert(face_key(face_a));
-                    consumed_keys.insert(face_key(face_b));
-                    periodic_pairs.push((face_a.clone(), face_b.clone(), Some(orientation)));
-                    break;
-                }
-            }
-        }
-        pb.finish_and_clear();
-
-        // Remove Phase 1 consumed faces
-        outer_faces_all.retain(|f| !consumed_keys.contains(&face_key(f)));
-    }
-
-    // ===== PHASE 2: Partial face matching with splitting (slow) =====
-    let mut periodic_found = true;
-
-    while periodic_found {
-        periodic_found = false;
-        let combos_all = permutations_indices(outer_faces_all.len());
-        // If angular boundaries detected, only pair lower vs upper faces
-        let combos: Vec<(usize, usize)> = combos_all
-            .into_iter()
-            .filter(|&(a, b)| {
-                if !use_angular {
-                    return true;
-                }
-                let key_a = face_key(&outer_faces_all[a]);
-                let key_b = face_key(&outer_faces_all[b]);
-                (lower_keys.contains(&key_a) && upper_keys.contains(&key_b))
-                    || (upper_keys.contains(&key_a) && lower_keys.contains(&key_b))
-                    // Also allow non-boundary faces to participate
-                    || (!lower_keys.contains(&key_a)
-                        && !upper_keys.contains(&key_a)
-                        && !lower_keys.contains(&key_b)
-                        && !upper_keys.contains(&key_b))
-            })
-            .filter(|pair| !non_matching.contains(pair))
-            .collect();
-        // Search for a match in parallel using rayon find_first
-        let pb = make_progress_bar(combos.len() as u64, "pairs", "Rotated periodicity Phase 2");
-
-        let match_result = combos
-            .par_iter()
-            .find_first(|&&(idx_a, idx_b)| {
-                pb.inc(1);
-                if idx_a >= outer_faces_all.len() || idx_b >= outer_faces_all.len() {
-                    return false;
-                }
-                let face_a = &outer_faces_all[idx_a];
-                let face_b = &outer_faces_all[idx_b];
-
-                if !faces_support_any(face_a, face_b) {
-                    return false;
-                }
-
-                if !faces_could_match_rotationally(
-                    face_a,
-                    face_b,
-                    rotation_matrix_forward,
-                    rotation_axis,
-                    0.1,
-                ) && !faces_could_match_rotationally(
-                    face_a,
-                    face_b,
-                    rotation_matrix_reverse,
-                    rotation_axis,
-                    0.1,
-                ) {
-                    return false;
-                }
-
-                let block_idx_a = match face_a.block_index() {
-                    Some(idx) => idx,
-                    None => return false,
-                };
-                let block_idx_b = match face_b.block_index() {
-                    Some(idx) => idx,
-                    None => return false,
-                };
-
-                if block_idx_a >= working_blocks.len() || block_idx_b >= working_blocks.len() {
-                    return false;
-                }
-
-                let rotated_fwd = &rotated_blocks_forward[block_idx_a];
-                let rotated_rev = &rotated_blocks_reverse[block_idx_a];
-                let base = &working_blocks[block_idx_b];
-
-                let fa_valid_fwd = is_valid_face(face_a, rotated_fwd);
-                let fa_valid_rev = is_valid_face(face_a, rotated_rev);
-                if (!fa_valid_fwd && !fa_valid_rev) || !is_valid_face(face_b, base) {
-                    return false;
-                }
-
-                if fa_valid_fwd {
-                    if periodicity_check(face_a, face_b, rotated_fwd, base).is_some() {
-                        return true;
-                    }
-                }
-                if fa_valid_rev {
-                    if periodicity_check(face_a, face_b, rotated_rev, base).is_some() {
-                        return true;
-                    }
-                }
-                false
-            })
-            .copied();
-        pb.finish_and_clear();
-
-        // If a match was found, re-run the matching (cheap: single pair) to get the result
-        let mut outer_faces_to_remove: Vec<Face> = Vec::new();
-        let mut split_faces: Vec<Face> = Vec::new();
-
-        if let Some((idx_a, idx_b)) = match_result {
-            let face_a = outer_faces_all[idx_a].clone();
-            let face_b = outer_faces_all[idx_b].clone();
-
-            let block_idx_a = face_a.block_index().unwrap();
-            let block_idx_b = face_b.block_index().unwrap();
-
-            let rotated_fwd = &rotated_blocks_forward[block_idx_a];
-            let rotated_rev = &rotated_blocks_reverse[block_idx_a];
-            let base = &working_blocks[block_idx_b];
-
-            let matched = periodicity_check(&face_a, &face_b, rotated_fwd, base)
-                .or_else(|| periodicity_check(&face_a, &face_b, rotated_rev, base));
-
-            if let Some((pair_faces, splits)) = matched {
-                periodic_pairs.push((pair_faces[0].clone(), pair_faces[1].clone(), None));
-                outer_faces_to_remove.push(face_a);
-                outer_faces_to_remove.push(face_b);
-                outer_faces_to_remove.extend(pair_faces.into_iter());
-                split_faces.extend(splits);
-                periodic_found = true;
-            }
-        }
-
-        if periodic_found {
-            let removal_keys: HashSet<FaceKey> =
-                outer_faces_to_remove.iter().map(face_key).collect();
-
-            outer_faces_all = outer_faces_all
-                .into_iter()
-                .filter(|face| !removal_keys.contains(&face_key(face)))
-                .collect();
-
-            if !split_faces.is_empty() {
-                outer_faces_all.extend(split_faces.into_iter());
-            }
-
-            non_matching.clear();
-        }
-    }
-
-    // ===== PHASE 3: Relaxed matching for remaining wavy-surface faces =====
-    // Skip faces_could_match_rotationally precheck entirely and brute-force
-    // every remaining pair with relaxed tolerances.
-    {
-        use crate::block_face_functions::full_face_match_transformed;
-
-        let transform_fwd = |p: [Float; 3]| apply_rotation(p, rotation_matrix_forward);
-        let transform_rev = |p: [Float; 3]| apply_rotation(p, rotation_matrix_reverse);
-        let relaxed_tol_frac = MATCH_TOL_FRAC * 5.0;
-
-        let mut changed_p3 = true;
-        let mut iteration_p3 = 0usize;
-        let mut non_matching_p3: HashSet<(FaceKey, FaceKey)> = HashSet::new();
-        while changed_p3 {
-            changed_p3 = false;
-            iteration_p3 += 1;
-            if iteration_p3 > 50 {
-                break;
-            }
-
-            let combos: Vec<(usize, usize)> = permutations_indices(outer_faces_all.len());
-
-            let pb = make_progress_bar(combos.len() as u64, "pairs", format!("Rotated periodicity Phase 3 pass {iteration_p3}"));
-
-            let mut removal_faces: Vec<Face> = Vec::new();
-            let mut split_faces: Vec<Face> = Vec::new();
-
-            'phase3_rot: for (idx_a, idx_b) in combos {
-                pb.inc(1);
-                if idx_a >= outer_faces_all.len() || idx_b >= outer_faces_all.len() {
-                    continue;
-                }
-                let face_a = &outer_faces_all[idx_a];
-                let face_b = &outer_faces_all[idx_b];
-
-                let key_pair = ordered_pair(face_key(face_a), face_key(face_b));
-                if non_matching_p3.contains(&key_pair) {
-                    continue;
-                }
-
-                // Lightweight filters only — no centroid precheck
-                if !faces_support_any(face_a, face_b) {
-                    continue;
-                }
-                if face_a.const_type() != face_b.const_type() || face_a.const_type() == -1 {
-                    continue;
-                }
-
-                let block_idx_a = match face_a.block_index() {
-                    Some(idx) => idx,
-                    None => continue,
-                };
-                let block_idx_b = match face_b.block_index() {
-                    Some(idx) => idx,
-                    None => continue,
-                };
-                if block_idx_a >= working_blocks.len() || block_idx_b >= working_blocks.len()
-                {
-                    continue;
-                }
-
-                let rotated_fwd = &rotated_blocks_forward[block_idx_a];
-                let rotated_rev = &rotated_blocks_reverse[block_idx_a];
-                let base = &working_blocks[block_idx_b];
-
-                // Try forward rotation
-                if is_valid_face(face_a, rotated_fwd) && is_valid_face(face_b, base) {
-                    // Fast corner-based with relaxed tolerance
-                    let tol = adaptive_corner_tol(face_a, face_b) * 10.0;
-                    if let Some(orientation) =
-                        full_face_match_transformed(face_a, face_b, &transform_fwd, tol)
-                    {
-                        periodic_pairs.push((
-                            face_a.clone(),
-                            face_b.clone(),
-                            Some(orientation),
-                        ));
-                        removal_faces.push(face_a.clone());
-                        removal_faces.push(face_b.clone());
-                        changed_p3 = true;
-                        break 'phase3_rot;
-                    }
-                    // Fall back to node-based with relaxed tolerance
-                    if let Some((pair_faces, splits)) = periodicity_check_with_tol(
-                        face_a,
-                        face_b,
-                        rotated_fwd,
-                        base,
-                        relaxed_tol_frac,
-                    ) {
-                        periodic_pairs.push((
-                            pair_faces[0].clone(),
-                            pair_faces[1].clone(),
-                            None,
-                        ));
-                        removal_faces.push(face_a.clone());
-                        removal_faces.push(face_b.clone());
-                        removal_faces.extend(pair_faces.into_iter());
-                        split_faces.extend(splits);
-                        changed_p3 = true;
-                        break 'phase3_rot;
-                    }
-                }
-
-                // Try backward rotation
-                if is_valid_face(face_a, rotated_rev) && is_valid_face(face_b, base) {
-                    let tol = adaptive_corner_tol(face_a, face_b) * 10.0;
-                    if let Some(orientation) =
-                        full_face_match_transformed(face_a, face_b, &transform_rev, tol)
-                    {
-                        periodic_pairs.push((
-                            face_a.clone(),
-                            face_b.clone(),
-                            Some(orientation),
-                        ));
-                        removal_faces.push(face_a.clone());
-                        removal_faces.push(face_b.clone());
-                        changed_p3 = true;
-                        break 'phase3_rot;
-                    }
-                    if let Some((pair_faces, splits)) = periodicity_check_with_tol(
-                        face_a,
-                        face_b,
-                        rotated_rev,
-                        base,
-                        relaxed_tol_frac,
-                    ) {
-                        periodic_pairs.push((
-                            pair_faces[0].clone(),
-                            pair_faces[1].clone(),
-                            None,
-                        ));
-                        removal_faces.push(face_a.clone());
-                        removal_faces.push(face_b.clone());
-                        removal_faces.extend(pair_faces.into_iter());
-                        split_faces.extend(splits);
-                        changed_p3 = true;
-                        break 'phase3_rot;
-                    }
-                }
-                // This pair didn't match — remember it so we don't retry
-                non_matching_p3.insert(key_pair);
-            }
-            pb.finish_and_clear();
-
-            if changed_p3 {
-                let removal_key_set: HashSet<FaceKey> =
-                    removal_faces.iter().map(face_key).collect();
-                outer_faces_all = outer_faces_all
-                    .into_iter()
-                    .filter(|face| !removal_key_set.contains(&face_key(face)))
-                    .collect();
-                if !split_faces.is_empty() {
-                    outer_faces_all.extend(split_faces.into_iter());
-                }
-                non_matching_p3.clear(); // splits create new faces that may match old ones
-            }
-        }
-    }
-
-    let mut removal_keys: HashSet<FaceKey> = matched_faces_all.iter().map(face_key).collect();
-
-    for (face_a, face_b, _) in &periodic_pairs {
-        removal_keys.insert(face_key(face_a));
-        removal_keys.insert(face_key(face_b));
-    }
-    outer_faces_all.retain(|face| !removal_keys.contains(&face_key(face)));
-
-    // Remove duplicate periodic pairs (order-insensitive)
-    let mut dedup: HashSet<(FaceKey, FaceKey)> = HashSet::new();
-    periodic_pairs.retain(|(a, b, _)| {
-        let key = ordered_pair(face_key(a), face_key(b));
-        dedup.insert(key)
-    });
-
-    let mut periodic_exports: Vec<FaceMatch> = periodic_pairs
-        .into_iter()
-        .map(|(a, b, orient)| FaceMatch {
-            block1: FaceRecord::from_face(&a),
-            block2: FaceRecord::from_face(&b),
-            points: Vec::new(),
-            orientation: orient,
-        })
-        .collect();
-
-    let mut outer_export: Vec<FaceRecord> = outer_faces_all.iter().map(Face::to_record).collect();
+    // Use "any" as periodic direction since rotated_periodicity supports all directions
+    let (mut periodic_export, mut outer_export) = rotational_periodicity_core(
+        &working_blocks,
+        &matched_scaled,
+        &outer_scaled,
+        rotation_angle_rad,
+        "any",
+        rotation_axis,
+    );
 
     if gcd_to_use > 1 {
-        for rec in &mut periodic_exports {
+        for rec in &mut periodic_export {
             rec.block1.scale_indices(gcd_to_use);
             rec.block2.scale_indices(gcd_to_use);
         }
@@ -1021,7 +572,7 @@ pub fn rotated_periodicity(
         }
     }
 
-    (periodic_exports, outer_export)
+    (periodic_export, outer_export)
 }
 
 /// Create a styled progress bar with consistent formatting.
@@ -1068,12 +619,13 @@ fn ordered_pair(a: FaceKey, b: FaceKey) -> (FaceKey, FaceKey) {
 ///
 /// # Returns
 /// `true` when both faces hold constant indices along `direction`.
-fn faces_support_direction(face_a: &Face, face_b: &Face, direction: &str) -> bool {
+pub fn faces_support_direction(face_a: &Face, face_b: &Face, direction: &str) -> bool {
     let dir = direction.trim().to_ascii_lowercase();
     match dir.as_str() {
         "i" => face_a.imin() == face_a.imax() && face_b.imin() == face_b.imax(),
         "j" => face_a.jmin() == face_a.jmax() && face_b.jmin() == face_b.jmax(),
         "k" => face_a.kmin() == face_a.kmax() && face_b.kmin() == face_b.kmax(),
+        "any" => faces_support_any(face_a, face_b),
         _ => false,
     }
 }
@@ -1085,10 +637,14 @@ fn faces_support_direction(face_a: &Face, face_b: &Face, direction: &str) -> boo
 ///
 /// # Returns
 /// `true` when the faces are planar along a shared axis.
-fn faces_support_any(face_a: &Face, face_b: &Face) -> bool {
-    faces_support_direction(face_a, face_b, "i")
-        || faces_support_direction(face_a, face_b, "j")
-        || faces_support_direction(face_a, face_b, "k")
+pub fn faces_support_any(face_a: &Face, face_b: &Face) -> bool {
+    let a_planar = face_a.imin() == face_a.imax()
+        || face_a.jmin() == face_a.jmax()
+        || face_a.kmin() == face_a.kmax();
+    let b_planar = face_b.imin() == face_b.imax()
+        || face_b.jmin() == face_b.jmax()
+        || face_b.kmin() == face_b.kmax();
+    a_planar && b_planar
 }
 
 /// Check whether face indices fit within a block's dimensions.
@@ -1104,95 +660,53 @@ fn is_valid_face(face: &Face, block: &Block) -> bool {
         && face.kmax() < block.kmax
 }
 
-/// Compute adaptive Phase 1 corner tolerance from face diagonal lengths.
-///
-/// Scales with mesh size so wavy/non-rectangular surfaces get a reasonable tolerance.
-fn adaptive_corner_tol(face_a: &Face, face_b: &Face) -> Float {
-    let max_diag = face_a.diagonal_length().max(face_b.diagonal_length());
-    (max_diag * 1e-4).max(1e-6)
-}
 
-/// Cheap geometric pre-check to reject obviously non-matching face pairs for
-/// rotational periodicity. Performs four tests in order of cost:
+/// Attempt a split-face intersection match between two faces after rotation.
 ///
-/// 1. Same `const_type` (I/J/K-constant).
-/// 2. Axial extent overlap along rotation axis.
-/// 3. Radial extent overlap perpendicular to rotation axis.
-/// 4. Rotated centroid proximity (within 1.5x max diagonal).
-fn faces_could_match_rotationally(
-    face1: &Face,
-    face2: &Face,
-    rotation_matrix: [[Float; 3]; 3],
-    rotation_axis: char,
-    tol_rel: Float,
+/// If the intersection succeeds, records the match in `periodic_exports`, consumes the
+/// originals from `pool`, and adds any split remnants back. Returns `true` on success.
+fn try_split_match(
+    face_a: &Face,
+    face_b: &Face,
+    block_a_rot: &Block,
+    block_b: &Block,
+    seen_pair_keys: &mut HashSet<(FaceKey, FaceKey)>,
+    periodic_exports: &mut Vec<FaceMatch>,
+    pool: &mut FacePool,
 ) -> bool {
-    // 1. Same const_type
-    let ct1 = face1.const_type();
-    let ct2 = face2.const_type();
-    if ct1 != ct2 || ct1 == -1 {
+    if !is_valid_face(face_a, block_a_rot) || !is_valid_face(face_b, block_b) {
         return false;
     }
+    if let Some((pair_faces, match_points, splits)) =
+        periodicity_check_with_points(face_a, face_b, block_a_rot, block_b, MATCH_TOL)
+    {
+        let pair_key = ordered_pair(face_key(&pair_faces[0]), face_key(&pair_faces[1]));
+        if seen_pair_keys.contains(&pair_key) {
+            return false;
+        }
+        seen_pair_keys.insert(pair_key);
 
-    // 2. Axial extent overlap
-    let (f1_ax_min, f1_ax_max) = face_axis_extent(face1, rotation_axis);
-    let (f2_ax_min, f2_ax_max) = face_axis_extent(face2, rotation_axis);
-    let axial_span = (f1_ax_max - f1_ax_min).max(f2_ax_max - f2_ax_min).max(1e-12);
-    let tol_axial = tol_rel * axial_span;
-    if f1_ax_max + tol_axial < f2_ax_min || f2_ax_max + tol_axial < f1_ax_min {
-        return false;
+        let orientation =
+            infer_orientation_from_match_points(&match_points, &pair_faces[0], &pair_faces[1]);
+
+        periodic_exports.push(FaceMatch {
+            block1: FaceRecord::from_face(&pair_faces[0]),
+            block2: FaceRecord::from_face(&pair_faces[1]),
+            points: match_points,
+            orientation,
+        });
+
+        let removal = collect_removal_keys(face_a, face_b, &pair_faces);
+        for key in &removal {
+            pool.consume(*key);
+        }
+        for s in splits {
+            pool.add_face(s);
+        }
+        return true;
     }
-
-    // 3. Radial extent overlap
-    let (r1_min, r1_max) = face_radial_extent(face1, rotation_axis);
-    let (r2_min, r2_max) = face_radial_extent(face2, rotation_axis);
-    let radial_span = (r1_max - r1_min).max(r2_max - r2_min).max(1e-12);
-    let tol_radial = tol_rel * radial_span;
-    if r1_max + tol_radial < r2_min || r2_max + tol_radial < r1_min {
-        return false;
-    }
-
-    // 4. Rotated centroid proximity
-    // Use 3x diagonal for wavy/non-rectangular surfaces where centroids can drift
-    let c1 = face1.centroid();
-    let c1_rot = apply_rotation(c1, rotation_matrix);
-    let c2 = face2.centroid();
-    let dist = distance3(c1_rot, c2);
-    let max_diag = face1.diagonal_length().max(face2.diagonal_length());
-    if dist > max_diag * 3.0 {
-        return false;
-    }
-
-    true
+    false
 }
-
-/// Axial coordinate extent of a face along the given rotation axis.
-fn face_axis_extent(face: &Face, axis: char) -> (Float, Float) {
-    let idx = match axis.to_ascii_lowercase() {
-        'x' => 0,
-        'y' => 1,
-        _ => 2,
-    };
-    let mut min_v = Float::INFINITY;
-    let mut max_v = Float::NEG_INFINITY;
-    for v in face.vertices() {
-        min_v = min_v.min(v[idx]);
-        max_v = max_v.max(v[idx]);
-    }
-    (min_v, max_v)
-}
-
-/// Radial extent of a face perpendicular to the given rotation axis.
-fn face_radial_extent(face: &Face, axis: char) -> (Float, Float) {
-    let mut min_r = Float::INFINITY;
-    let mut max_r = Float::NEG_INFINITY;
-    for v in face.vertices() {
-        let r = to_radius(v[0], v[1], v[2], axis);
-        min_r = min_r.min(r);
-        max_r = max_r.max(r);
-    }
-    (min_r, max_r)
-}
-
 
 /// Gather all face keys involved in a successful periodic match for removal.
 ///
@@ -1214,53 +728,25 @@ fn collect_removal_keys(face_a: &Face, face_b: &Face, pair_faces: &[Face]) -> Ve
     keys
 }
 
-/// Attempt to intersect two faces after rotation and return the matching subfaces when successful.
-///
-/// Uses the default `MATCH_TOL_FRAC` tolerance. See [`periodicity_check_with_tol`] for a
-/// caller-specified tolerance.
-fn periodicity_check(
-    face1: &Face,
-    face2: &Face,
-    block1: &Block,
-    block2: &Block,
-) -> Option<(Vec<Face>, Vec<Face>)> {
-    periodicity_check_with_tol(face1, face2, block1, block2, MATCH_TOL_FRAC)
-}
-
-/// Attempt to intersect two faces after rotation and return the matching subfaces when successful.
+/// Intersect two faces after rotation and return matching subfaces, match points, and splits.
 ///
 /// # Arguments
 /// * `face1`, `face2` - Faces inspected for overlap.
 /// * `block1`, `block2` - Blocks providing geometric detail for each face.
-/// * `tol_frac` - Fraction of median edge spacing used as matching tolerance.
+/// * `tol` - Node coincidence tolerance.
 ///
 /// # Returns
-/// `Some((matched_faces, splits))` when an overlap exists, where `matched_faces` contains the
-/// oriented interface pair and `splits` lists any child faces created during splitting. Returns
-/// `None` when the faces do not meet the matching criteria.
-fn periodicity_check_with_tol(
+/// `Some((matched_faces, match_points, splits))` when overlap exists.
+pub fn periodicity_check_with_points(
     face1: &Face,
     face2: &Face,
     block1: &Block,
     block2: &Block,
-    tol_frac: Float,
-) -> Option<(Vec<Face>, Vec<Face>)> {
-    debug_assert!(face1.imin() < block1.imax);
-    debug_assert!(face1.jmin() < block1.jmax);
-    debug_assert!(face1.kmin() < block1.kmax);
-    debug_assert!(face1.imax() < block1.imax);
-    debug_assert!(face1.jmax() < block1.jmax);
-    debug_assert!(face1.kmax() < block1.kmax);
-    debug_assert!(face2.imin() < block2.imax);
-    debug_assert!(face2.jmin() < block2.jmax);
-    debug_assert!(face2.kmin() < block2.kmax);
-    debug_assert!(face2.imax() < block2.imax);
-    debug_assert!(face2.jmax() < block2.jmax);
-    debug_assert!(face2.kmax() < block2.kmax);
+    tol: Float,
+) -> Option<(Vec<Face>, Vec<MatchPoint>, Vec<Face>)> {
     let mut face_a = face1.clone();
     let mut face_b = face2.clone();
     let mut swapped = false;
-    // Swap both faces AND blocks so face_a always corresponds to block_a
     let (block_a, block_b) = if face_b.diagonal_length() < face_a.diagonal_length() {
         std::mem::swap(&mut face_a, &mut face_b);
         swapped = true;
@@ -1269,14 +755,8 @@ fn periodicity_check_with_tol(
         (block1, block2)
     };
 
-    // Adaptive tolerance: use a fraction of the smaller face's median edge spacing.
-    // This handles wavy/non-rectangular surfaces where fixed 1e-6 is too tight.
-    let spacing_a = face_a.median_edge_spacing(block_a);
-    let spacing_b = face_b.median_edge_spacing(block_b);
-    let adaptive_tol = (tol_frac * spacing_a.min(spacing_b)).max(MATCH_TOL_MIN);
-
     let (matches, mut split1, split2) =
-        get_face_intersection(&face_a, &face_b, block_a, block_b, adaptive_tol);
+        get_face_intersection(&face_a, &face_b, block_a, block_b, tol);
     if matches.len() < 4 {
         return None;
     }
@@ -1303,12 +783,12 @@ fn periodicity_check_with_tol(
     split1.extend(split2);
 
     let pair = if swapped {
-        vec![out2.clone(), out1.clone()]
+        vec![out2, out1]
     } else {
-        vec![out1.clone(), out2.clone()]
+        vec![out1, out2]
     };
 
-    Some((pair, split1))
+    Some((pair, matches, split1))
 }
 
 /// Determine the bounds of matching points for either the first or second face.
@@ -1345,28 +825,577 @@ fn match_bounds(
     (imin, imax, jmin, jmax, kmin, kmax)
 }
 
-/// Fraction of median edge spacing used as matching tolerance.
-const MATCH_TOL_FRAC: Float = 0.03;
-/// Absolute floor for matching tolerance (never go below this).
-const MATCH_TOL_MIN: Float = 1e-6;
+/// Fixed matching tolerance for node coincidence checks.
+const MATCH_TOL: Float = 1e-6;
 
-/// Generate all permutations `(i, j)` for `len`, excluding pairs where `i == j`.
-///
-/// # Arguments
-/// * `len` - Number of elements to permute.
-///
-/// # Returns
-/// Vector of ordered index pairs suitable for exhaustive comparisons.
-fn permutations_indices(len: usize) -> Vec<(usize, usize)> {
-    let mut out = Vec::new();
-    for i in 0..len {
-        for j in 0..len {
-            if i != j {
-                out.push((i, j));
+// ============================================================================
+// New data structures for the improved algorithm
+// ============================================================================
+
+/// Precomputed cylindrical-coordinate metadata for a single face in the pool.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+struct CylindricalFaceInfo {
+    theta_centroid: Float,
+    axial_centroid: Float,
+    radial_centroid: Float,
+    theta_min: Float,
+    theta_max: Float,
+    axial_min: Float,
+    axial_max: Float,
+    radial_min: Float,
+    radial_max: Float,
+}
+
+impl CylindricalFaceInfo {
+    fn from_face(face: &Face, rotation_axis: char) -> Self {
+        let verts = face.vertices();
+        let c = face.centroid();
+        let theta_c = to_theta(c[0], c[1], c[2], rotation_axis);
+        let axial_c = axial_coord(c, rotation_axis);
+        let radial_c = to_radius(c[0], c[1], c[2], rotation_axis);
+
+        let mut theta_min = theta_c;
+        let mut theta_max = theta_c;
+        let mut axial_min = axial_c;
+        let mut axial_max = axial_c;
+        let mut radial_min = radial_c;
+        let mut radial_max = radial_c;
+
+        for v in verts {
+            let th = to_theta(v[0], v[1], v[2], rotation_axis);
+            let ax = axial_coord(*v, rotation_axis);
+            let r = to_radius(v[0], v[1], v[2], rotation_axis);
+            theta_min = theta_min.min(th);
+            theta_max = theta_max.max(th);
+            axial_min = axial_min.min(ax);
+            axial_max = axial_max.max(ax);
+            radial_min = radial_min.min(r);
+            radial_max = radial_max.max(r);
+        }
+
+        Self {
+            theta_centroid: theta_c,
+            axial_centroid: axial_c,
+            radial_centroid: radial_c,
+            theta_min,
+            theta_max,
+            axial_min,
+            axial_max,
+            radial_min,
+            radial_max,
+        }
+    }
+}
+
+/// Extract the axial coordinate (along the rotation axis) from a 3D point.
+#[inline]
+fn axial_coord(p: [Float; 3], rotation_axis: char) -> Float {
+    match rotation_axis.to_ascii_lowercase() {
+        'x' => p[0],
+        'y' => p[1],
+        _ => p[2],
+    }
+}
+
+/// A 1D line of grid points along one boundary of a structured face.
+#[derive(Clone, Debug)]
+struct StructuredEdge {
+    coords: Vec<[Float; 3]>,
+}
+
+/// Result of comparing two structured edges (one rotated).
+#[derive(Debug)]
+enum EdgeMatchResult {
+    None,
+    Full,
+    Partial,
+}
+
+/// Managed pool of outer faces with cylindrical-coordinate lookup.
+struct FacePool {
+    faces: Vec<Face>,
+    cyl_info: Vec<CylindricalFaceInfo>,
+    /// Indices into `faces` sorted by theta_centroid (ascending).
+    theta_sorted: Vec<usize>,
+    consumed: HashSet<FaceKey>,
+    rotation_axis: char,
+}
+
+impl FacePool {
+    fn new(faces: Vec<Face>, rotation_axis: char) -> Self {
+        let cyl_info: Vec<CylindricalFaceInfo> = faces
+            .iter()
+            .map(|f| CylindricalFaceInfo::from_face(f, rotation_axis))
+            .collect();
+        let mut theta_sorted: Vec<usize> = (0..faces.len()).collect();
+        theta_sorted.sort_by(|&a, &b| {
+            cyl_info[a]
+                .theta_centroid
+                .partial_cmp(&cyl_info[b].theta_centroid)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Self {
+            faces,
+            cyl_info,
+            theta_sorted,
+            consumed: HashSet::new(),
+            rotation_axis,
+        }
+    }
+
+    fn add_face(&mut self, face: Face) {
+        let info = CylindricalFaceInfo::from_face(&face, self.rotation_axis);
+        let idx = self.faces.len();
+        self.faces.push(face);
+        self.cyl_info.push(info);
+        // Insert into sorted list at correct position
+        let theta = self.cyl_info[idx].theta_centroid;
+        let pos = self
+            .theta_sorted
+            .binary_search_by(|&i| {
+                self.cyl_info[i]
+                    .theta_centroid
+                    .partial_cmp(&theta)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or_else(|p| p);
+        self.theta_sorted.insert(pos, idx);
+    }
+
+    fn consume(&mut self, key: FaceKey) {
+        self.consumed.insert(key);
+    }
+
+    fn is_consumed(&self, idx: usize) -> bool {
+        self.consumed.contains(&face_key(&self.faces[idx]))
+    }
+
+    /// Find face indices whose cylindrical extents could overlap with the given
+    /// target theta and matching axial/radial ranges.
+    fn find_candidates(
+        &self,
+        target_theta: Float,
+        axial_range: (Float, Float),
+        radial_range: (Float, Float),
+        theta_tol: Float,
+    ) -> Vec<usize> {
+        let theta_lo = target_theta - theta_tol;
+        let theta_hi = target_theta + theta_tol;
+
+        let mut candidates = Vec::new();
+
+        // Binary search for the starting position in sorted theta
+        let start = self
+            .theta_sorted
+            .binary_search_by(|&i| {
+                self.cyl_info[i]
+                    .theta_centroid
+                    .partial_cmp(&theta_lo)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or_else(|p| p);
+
+        // Scan forward from start
+        for &pool_idx in &self.theta_sorted[start..] {
+            let info = &self.cyl_info[pool_idx];
+            if info.theta_centroid > theta_hi {
+                break;
+            }
+            if self.is_consumed(pool_idx) {
+                continue;
+            }
+            // Check axial overlap
+            if info.axial_max < axial_range.0 - 0.1 * (axial_range.1 - axial_range.0).abs().max(1e-12)
+                || info.axial_min > axial_range.1 + 0.1 * (axial_range.1 - axial_range.0).abs().max(1e-12)
+            {
+                continue;
+            }
+            // Check radial overlap
+            if info.radial_max < radial_range.0 - 0.1 * (radial_range.1 - radial_range.0).abs().max(1e-12)
+                || info.radial_min > radial_range.1 + 0.1 * (radial_range.1 - radial_range.0).abs().max(1e-12)
+            {
+                continue;
+            }
+            candidates.push(pool_idx);
+        }
+
+        // Handle theta wrapping at ±π boundary
+        // If theta_lo < -π, also search near +π end
+        if theta_lo < -PI {
+            let wrapped_lo = theta_lo + 2.0 * PI;
+            let wrapped_hi = PI; // search from wrapped_lo to +π
+            let ws = self
+                .theta_sorted
+                .binary_search_by(|&i| {
+                    self.cyl_info[i]
+                        .theta_centroid
+                        .partial_cmp(&wrapped_lo)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or_else(|p| p);
+            for &pool_idx in &self.theta_sorted[ws..] {
+                let info = &self.cyl_info[pool_idx];
+                if info.theta_centroid > wrapped_hi {
+                    break;
+                }
+                if self.is_consumed(pool_idx) {
+                    continue;
+                }
+                if info.axial_max < axial_range.0 - 0.1 * (axial_range.1 - axial_range.0).abs().max(1e-12)
+                    || info.axial_min > axial_range.1 + 0.1 * (axial_range.1 - axial_range.0).abs().max(1e-12)
+                {
+                    continue;
+                }
+                if info.radial_max < radial_range.0 - 0.1 * (radial_range.1 - radial_range.0).abs().max(1e-12)
+                    || info.radial_min > radial_range.1 + 0.1 * (radial_range.1 - radial_range.0).abs().max(1e-12)
+                {
+                    continue;
+                }
+                candidates.push(pool_idx);
+            }
+        }
+        // If theta_hi > π, also search near -π end
+        if theta_hi > PI {
+            let wrapped_hi = theta_hi - 2.0 * PI;
+            let wrapped_lo = -PI;
+            let ws = self
+                .theta_sorted
+                .binary_search_by(|&i| {
+                    self.cyl_info[i]
+                        .theta_centroid
+                        .partial_cmp(&wrapped_lo)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or_else(|p| p);
+            for &pool_idx in &self.theta_sorted[ws..] {
+                let info = &self.cyl_info[pool_idx];
+                if info.theta_centroid > wrapped_hi {
+                    break;
+                }
+                if self.is_consumed(pool_idx) {
+                    continue;
+                }
+                if info.axial_max < axial_range.0 - 0.1 * (axial_range.1 - axial_range.0).abs().max(1e-12)
+                    || info.axial_min > axial_range.1 + 0.1 * (axial_range.1 - axial_range.0).abs().max(1e-12)
+                {
+                    continue;
+                }
+                if info.radial_max < radial_range.0 - 0.1 * (radial_range.1 - radial_range.0).abs().max(1e-12)
+                    || info.radial_min > radial_range.1 + 0.1 * (radial_range.1 - radial_range.0).abs().max(1e-12)
+                {
+                    continue;
+                }
+                candidates.push(pool_idx);
+            }
+        }
+
+        candidates
+    }
+
+    /// Find candidates for a face at the given index by searching both +angle and -angle
+    /// theta targets, deduplicating the results.
+    fn find_rotational_candidates(
+        &self,
+        idx: usize,
+        rotation_angle: Float,
+        theta_tol: Float,
+    ) -> Vec<usize> {
+        let info = &self.cyl_info[idx];
+        let target_fwd = info.theta_centroid + rotation_angle;
+        let target_rev = info.theta_centroid - rotation_angle;
+        let axial_range = (info.axial_min, info.axial_max);
+        let radial_range = (info.radial_min, info.radial_max);
+        let mut candidates = self.find_candidates(target_fwd, axial_range, radial_range, theta_tol);
+        candidates.extend(self.find_candidates(target_rev, axial_range, radial_range, theta_tol));
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates
+    }
+
+    /// Collect all unconsumed face indices.
+    fn active_indices(&self) -> Vec<usize> {
+        (0..self.faces.len())
+            .filter(|&i| !self.is_consumed(i))
+            .collect()
+    }
+
+    /// Drain all unconsumed faces as FaceRecords.
+    fn drain_as_records(&self) -> Vec<FaceRecord> {
+        self.faces
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !self.is_consumed(*i))
+            .map(|(_, f)| f.to_record())
+            .collect()
+    }
+}
+
+// ============================================================================
+// Edge extraction and matching
+// ============================================================================
+
+/// Extract the 4 boundary edges of a structured face from its parent block.
+fn extract_face_edges(face: &Face, block: &Block) -> Vec<StructuredEdge> {
+    let axis = match face.const_axis() {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    let mut edges = Vec::with_capacity(4);
+
+    match axis {
+        FaceAxis::I => {
+            let ic = face.imin();
+            edges.push(build_edge(block, (face.kmin()..=face.kmax()).map(|k| (ic, face.jmin(), k)).collect()));
+            edges.push(build_edge(block, (face.kmin()..=face.kmax()).map(|k| (ic, face.jmax(), k)).collect()));
+            edges.push(build_edge(block, (face.jmin()..=face.jmax()).map(|j| (ic, j, face.kmin())).collect()));
+            edges.push(build_edge(block, (face.jmin()..=face.jmax()).map(|j| (ic, j, face.kmax())).collect()));
+        }
+        FaceAxis::J => {
+            let jc = face.jmin();
+            edges.push(build_edge(block, (face.kmin()..=face.kmax()).map(|k| (face.imin(), jc, k)).collect()));
+            edges.push(build_edge(block, (face.kmin()..=face.kmax()).map(|k| (face.imax(), jc, k)).collect()));
+            edges.push(build_edge(block, (face.imin()..=face.imax()).map(|i| (i, jc, face.kmin())).collect()));
+            edges.push(build_edge(block, (face.imin()..=face.imax()).map(|i| (i, jc, face.kmax())).collect()));
+        }
+        FaceAxis::K => {
+            let kc = face.kmin();
+            edges.push(build_edge(block, (face.jmin()..=face.jmax()).map(|j| (face.imin(), j, kc)).collect()));
+            edges.push(build_edge(block, (face.jmin()..=face.jmax()).map(|j| (face.imax(), j, kc)).collect()));
+            edges.push(build_edge(block, (face.imin()..=face.imax()).map(|i| (i, face.jmin(), kc)).collect()));
+            edges.push(build_edge(block, (face.imin()..=face.imax()).map(|i| (i, face.jmax(), kc)).collect()));
+        }
+    }
+    edges
+}
+
+fn build_edge(block: &Block, ijk_list: Vec<(usize, usize, usize)>) -> StructuredEdge {
+    let coords: Vec<[Float; 3]> = ijk_list
+        .iter()
+        .map(|&(i, j, k)| {
+            let (x, y, z) = block.xyz(i, j, k);
+            [x, y, z]
+        })
+        .collect();
+    StructuredEdge { coords }
+}
+
+/// Compare two structured edges. Points of edge_a are rotated before comparison.
+/// Returns Full if all points match, Partial if >=2 contiguous match, None otherwise.
+fn match_edges(
+    edge_a: &StructuredEdge,
+    edge_b: &StructuredEdge,
+    rotation_matrix: [[Float; 3]; 3],
+    tol: Float,
+) -> EdgeMatchResult {
+    if edge_a.coords.is_empty() || edge_b.coords.is_empty() {
+        return EdgeMatchResult::None;
+    }
+
+    let rotated_a: Vec<[Float; 3]> = edge_a
+        .coords
+        .iter()
+        .map(|p| apply_rotation(*p, rotation_matrix))
+        .collect();
+
+    // Find longest contiguous run of point-to-point matches
+    let mut best_len = 0usize;
+    let mut cur_len = 0usize;
+
+    for ra in &rotated_a {
+        let has_match = edge_b.coords.iter().any(|pb| distance3(*ra, *pb) <= tol);
+        if has_match {
+            cur_len += 1;
+            best_len = best_len.max(cur_len);
+        } else {
+            cur_len = 0;
+        }
+    }
+
+    if best_len < 2 {
+        EdgeMatchResult::None
+    } else if best_len == rotated_a.len() && best_len == edge_b.coords.len() {
+        EdgeMatchResult::Full
+    } else {
+        EdgeMatchResult::Partial
+    }
+}
+
+/// Count how many edge pairs between two faces have Full or Partial matches.
+fn count_edge_matches(
+    edges_a: &[StructuredEdge],
+    edges_b: &[StructuredEdge],
+    rotation_matrix: [[Float; 3]; 3],
+    tol: Float,
+) -> usize {
+    let mut count = 0;
+    for ea in edges_a {
+        for eb in edges_b {
+            match match_edges(ea, eb, rotation_matrix, tol) {
+                EdgeMatchResult::None => {}
+                _ => count += 1,
             }
         }
     }
-    out
+    count
+}
+
+// ============================================================================
+// Orientation inference from match points
+// ============================================================================
+
+/// Infer orientation (u_reversed, v_reversed, swapped) from node-level MatchPoints.
+///
+/// Examines how block1 parametric indices map to block2 parametric indices.
+fn infer_orientation_from_match_points(
+    points: &[MatchPoint],
+    face1: &Face,
+    face2: &Face,
+) -> Option<Orientation> {
+    if points.len() < 2 {
+        return None;
+    }
+
+    let axis1 = face1.const_axis()?;
+    let axis2 = face2.const_axis()?;
+
+    // Extract parametric (u, v) for each face based on constant axis
+    let to_uv1 = |p: &MatchPoint| -> (isize, isize) {
+        match axis1 {
+            FaceAxis::I => (p.j1 as isize, p.k1 as isize),
+            FaceAxis::J => (p.i1 as isize, p.k1 as isize),
+            FaceAxis::K => (p.i1 as isize, p.j1 as isize),
+        }
+    };
+    let to_uv2 = |p: &MatchPoint| -> (isize, isize) {
+        match axis2 {
+            FaceAxis::I => (p.j2 as isize, p.k2 as isize),
+            FaceAxis::J => (p.i2 as isize, p.k2 as isize),
+            FaceAxis::K => (p.i2 as isize, p.j2 as isize),
+        }
+    };
+
+    // Find two points where u1 differs (along u-direction)
+    let (u1_0, v1_0) = to_uv1(&points[0]);
+    let (u2_0, v2_0) = to_uv2(&points[0]);
+
+    // Look for a point with different u1
+    let mut u_pair = None;
+    let mut v_pair = None;
+    for p in points.iter().skip(1) {
+        let (u1, v1) = to_uv1(p);
+        let (u2, v2) = to_uv2(p);
+        if u1 != u1_0 && u_pair.is_none() {
+            u_pair = Some((u1 - u1_0, v1 - v1_0, u2 - u2_0, v2 - v2_0));
+        }
+        if v1 != v1_0 && v_pair.is_none() {
+            v_pair = Some((u1 - u1_0, v1 - v1_0, u2 - u2_0, v2 - v2_0));
+        }
+        if u_pair.is_some() && v_pair.is_some() {
+            break;
+        }
+    }
+
+    // Determine orientation from the mapping
+    // When u1 changes: if u2 also changes → not swapped; if v2 changes → swapped
+    let u_info = u_pair?;
+    let du1 = u_info.0; // delta_u1
+    let du2 = u_info.2; // delta_u2
+    let dv2_from_u = u_info.3; // delta_v2 when u1 changes
+
+    let swapped = du2 == 0 && dv2_from_u != 0;
+
+    if swapped {
+        // u1 maps to v2, need to figure out v1 maps to u2
+        let u_reversed = if let Some(v_info) = v_pair {
+            // v1 changes → check u2
+            v_info.1.signum() != v_info.2.signum()
+        } else {
+            false
+        };
+        let v_reversed = dv2_from_u != 0 && (du1.signum() != dv2_from_u.signum());
+        Some(Orientation {
+            u_reversed,
+            v_reversed,
+            swapped: true,
+        })
+    } else {
+        let u_reversed = du1 != 0 && du2 != 0 && (du1.signum() != du2.signum());
+        let v_reversed = if let Some(v_info) = v_pair {
+            let dv1 = v_info.1;
+            let dv2 = v_info.3;
+            dv1 != 0 && dv2 != 0 && (dv1.signum() != dv2.signum())
+        } else {
+            false
+        };
+        Some(Orientation {
+            u_reversed,
+            v_reversed,
+            swapped: false,
+        })
+    }
+}
+
+/// Count how many of face_a's corners (after rotation) land near grid points of face_b.
+pub fn count_rotated_corners_on_face(
+    face_a: &Face,
+    face_b: &Face,
+    block_b: &Block,
+    rotation_matrix: [[Float; 3]; 3],
+    tol: Float,
+) -> usize {
+    let corners_a = face_a.vertices();
+    let mut count = 0;
+
+    // Sample face_b's boundary nodes
+    let axis_b = match face_b.const_axis() {
+        Some(a) => a,
+        None => return 0,
+    };
+    let mut face_b_nodes: Vec<[Float; 3]> = Vec::new();
+    match axis_b {
+        FaceAxis::I => {
+            let ic = face_b.imin();
+            for j in face_b.jmin()..=face_b.jmax() {
+                for k in face_b.kmin()..=face_b.kmax() {
+                    if j < block_b.jmax && k < block_b.kmax && ic < block_b.imax {
+                        let (x, y, z) = block_b.xyz(ic, j, k);
+                        face_b_nodes.push([x, y, z]);
+                    }
+                }
+            }
+        }
+        FaceAxis::J => {
+            let jc = face_b.jmin();
+            for i in face_b.imin()..=face_b.imax() {
+                for k in face_b.kmin()..=face_b.kmax() {
+                    if i < block_b.imax && k < block_b.kmax && jc < block_b.jmax {
+                        let (x, y, z) = block_b.xyz(i, jc, k);
+                        face_b_nodes.push([x, y, z]);
+                    }
+                }
+            }
+        }
+        FaceAxis::K => {
+            let kc = face_b.kmin();
+            for i in face_b.imin()..=face_b.imax() {
+                for j in face_b.jmin()..=face_b.jmax() {
+                    if i < block_b.imax && j < block_b.jmax && kc < block_b.kmax {
+                        let (x, y, z) = block_b.xyz(i, j, kc);
+                        face_b_nodes.push([x, y, z]);
+                    }
+                }
+            }
+        }
+    }
+
+    for corner in corners_a {
+        let rotated = apply_rotation(*corner, rotation_matrix);
+        if face_b_nodes.iter().any(|n| distance3(rotated, *n) <= tol) {
+            count += 1;
+        }
+    }
+    count
 }
 
 /// Compute the rotation angle and matrix from `face1` to `face2`.
@@ -1484,9 +1513,9 @@ pub fn verify_periodicity(
     let rot_pos = create_rotation_matrix(theta, rotation_axis);
     let rot_neg = create_rotation_matrix(-theta, rotation_axis);
 
-    // Pre-rotate all reduced blocks in both directions
-    let rotated_pos: Vec<Block> = reduced.iter().map(|b| rotate_block(b, rot_pos)).collect();
-    let rotated_neg: Vec<Block> = reduced.iter().map(|b| rotate_block(b, rot_neg)).collect();
+    // Pre-rotate all reduced blocks in both directions (parallel)
+    let rotated_pos: Vec<Block> = reduced.par_iter().map(|b| rotate_block(b, rot_pos)).collect();
+    let rotated_neg: Vec<Block> = reduced.par_iter().map(|b| rotate_block(b, rot_neg)).collect();
 
     // Scale down face_match indices by GCD
     let mut scaled_matches: Vec<FaceMatch> = face_matches.to_vec();
