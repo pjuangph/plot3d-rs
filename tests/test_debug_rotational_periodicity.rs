@@ -70,6 +70,12 @@ fn test_cases() -> Vec<PairTestCase> {
             face_a: (4216, 12, 264, 0, 12, 444, 28),
             faces_b: vec![(4544, 24, 12, 0, 24, 40, 180)],
         },
+        // Pair 5: Missing — Block 3994 I-const remnant (K=36..60) <-> Block 3664 K-const
+        PairTestCase {
+            name: "Pair 5 (MISSING) Block 3994 I-const <-> Block 3664 K-const",
+            face_a: (3994, 12, 0, 36, 12, 264, 60),
+            faces_b: vec![(3664, 0, 0, 124, 48, 12, 124)],
+        },
     ]
 }
 
@@ -476,18 +482,18 @@ fn debug_pipeline() {
         }
     }
 
-    println!("\nDone.");
+    println!("\nDone (debug_pipeline).");
 }
 
 // ===========================================================================
-// TEST 3: Full mesh with GCD reduction
+// TEST 3: Full mesh with GCD reduction — detailed diagnostics
 // ===========================================================================
 #[test]
 fn debug_full_mesh_gcd() {
     let rotation_angle_deg: Float = 360.0 / NBLADES as Float;
 
     println!("\n{}", "=".repeat(70));
-    println!("FULL MESH WITH GCD REDUCTION");
+    println!("FULL MESH WITH GCD REDUCTION — DIAGNOSTICS");
     println!("{}", "=".repeat(70));
 
     println!("Loading full mesh (this takes a while)...");
@@ -508,34 +514,61 @@ fn debug_full_mesh_gcd() {
         outer_faces.len()
     );
 
-    println!("Running rotated_periodicity (reduce_mesh=true, GCD)...");
-    let (periodic_faces, remaining_outer) = rotated_periodicity(
+    // Collect all block indices referenced by our test cases
+    let cases = test_cases();
+    let mut target_blocks: Vec<usize> = Vec::new();
+    for case in &cases {
+        target_blocks.push(case.face_a.0);
+        for sb in &case.faces_b {
+            target_blocks.push(sb.0);
+        }
+    }
+    target_blocks.sort_unstable();
+    target_blocks.dedup();
+
+    // ── Diagnostic 1: Check outer_faces for target blocks ──
+    println!("\n--- Diagnostic 1: Outer faces from connectivity for target blocks ---");
+    for &blk_idx in &target_blocks {
+        let faces_for_block: Vec<_> = outer_faces
+            .iter()
+            .filter(|f| f.block_index == blk_idx)
+            .collect();
+        println!("  Block {}: {} outer faces", blk_idx, faces_for_block.len());
+        for f in &faces_for_block {
+            println!(
+                "    ({},{},{},{},{},{},{})",
+                f.block_index, f.il, f.jl, f.kl, f.ih, f.jh, f.kh
+            );
+        }
+    }
+
+    // ── Run periodicity WITHOUT GCD first ──
+    println!("\n--- Diagnostic 2: Periodicity WITHOUT GCD reduction ---");
+    let (periodic_no_gcd, remaining_no_gcd) = rotated_periodicity(
         &blocks,
         &face_matches,
         &outer_faces,
         rotation_angle_deg,
         ROTATION_AXIS,
-        true,
+        false, // NO GCD
     );
     println!(
         "  {} periodic face pairs, {} remaining outer faces",
-        periodic_faces.len(),
-        remaining_outer.len()
+        periodic_no_gcd.len(),
+        remaining_no_gcd.len()
     );
 
-    // Check test cases
-    let cases = test_cases();
-    println!("\n  Test case results:");
+    println!("\n  Test case results (no GCD):");
     for case in &cases {
         for spec_b in &case.faces_b {
-            let found = periodic_faces.iter().any(|pp| {
+            let found = periodic_no_gcd.iter().any(|pp| {
                 let b1 = pp.block1.block_index;
                 let b2 = pp.block2.block_index;
                 (b1 == case.face_a.0 && b2 == spec_b.0)
                     || (b1 == spec_b.0 && b2 == case.face_a.0)
             });
             println!(
-                "    {} orig[{}]<=>orig[{}]: {}",
+                "    {} [{}]<->[{}]: {}",
                 case.name,
                 case.face_a.0,
                 spec_b.0,
@@ -544,5 +577,262 @@ fn debug_full_mesh_gcd() {
         }
     }
 
-    println!("\nDone.");
+    // Show all periodic matches involving target blocks (no GCD)
+    println!("\n  All periodic matches involving target blocks (no GCD):");
+    for pp in &periodic_no_gcd {
+        let b1 = pp.block1.block_index;
+        let b2 = pp.block2.block_index;
+        if target_blocks.contains(&b1) || target_blocks.contains(&b2) {
+            println!(
+                "    Block {} ({},{},{})..({},{},{}) <=> Block {} ({},{},{})..({},{},{})",
+                b1, pp.block1.il, pp.block1.jl, pp.block1.kl,
+                pp.block1.ih, pp.block1.jh, pp.block1.kh,
+                b2, pp.block2.il, pp.block2.jl, pp.block2.kl,
+                pp.block2.ih, pp.block2.jh, pp.block2.kh,
+            );
+        }
+    }
+
+    // Show remaining non-connected for target blocks (no GCD)
+    println!("\n  Remaining non-connected for target blocks (no GCD):");
+    for f in &remaining_no_gcd {
+        if target_blocks.contains(&f.block_index) {
+            println!(
+                "    Block {} ({},{},{})..({},{},{})",
+                f.block_index, f.il, f.jl, f.kl, f.ih, f.jh, f.kh
+            );
+        }
+    }
+
+    // ── Run periodicity WITH GCD ──
+    println!("\n--- Diagnostic 3: Periodicity WITH GCD reduction ---");
+    let (periodic_gcd, remaining_gcd) = rotated_periodicity(
+        &blocks,
+        &face_matches,
+        &outer_faces,
+        rotation_angle_deg,
+        ROTATION_AXIS,
+        true, // WITH GCD
+    );
+    println!(
+        "  {} periodic face pairs, {} remaining outer faces",
+        periodic_gcd.len(),
+        remaining_gcd.len()
+    );
+
+    println!("\n  Test case results (with GCD):");
+    for case in &cases {
+        for spec_b in &case.faces_b {
+            let found = periodic_gcd.iter().any(|pp| {
+                let b1 = pp.block1.block_index;
+                let b2 = pp.block2.block_index;
+                (b1 == case.face_a.0 && b2 == spec_b.0)
+                    || (b1 == spec_b.0 && b2 == case.face_a.0)
+            });
+            println!(
+                "    {} [{}]<->[{}]: {}",
+                case.name,
+                case.face_a.0,
+                spec_b.0,
+                if found { "FOUND" } else { "NOT FOUND" },
+            );
+        }
+    }
+
+    // Show all periodic matches involving target blocks (with GCD)
+    println!("\n  All periodic matches involving target blocks (with GCD):");
+    for pp in &periodic_gcd {
+        let b1 = pp.block1.block_index;
+        let b2 = pp.block2.block_index;
+        if target_blocks.contains(&b1) || target_blocks.contains(&b2) {
+            println!(
+                "    Block {} ({},{},{})..({},{},{}) <=> Block {} ({},{},{})..({},{},{})",
+                b1, pp.block1.il, pp.block1.jl, pp.block1.kl,
+                pp.block1.ih, pp.block1.jh, pp.block1.kh,
+                b2, pp.block2.il, pp.block2.jl, pp.block2.kl,
+                pp.block2.ih, pp.block2.jh, pp.block2.kh,
+            );
+        }
+    }
+
+    // Show remaining non-connected for target blocks (with GCD)
+    println!("\n  Remaining non-connected for target blocks (with GCD):");
+    for f in &remaining_gcd {
+        if target_blocks.contains(&f.block_index) {
+            println!(
+                "    Block {} ({},{},{})..({},{},{})",
+                f.block_index, f.il, f.jl, f.kl, f.ih, f.jh, f.kh
+            );
+        }
+    }
+
+    // ── Compare GCD vs no-GCD results ──
+    println!("\n--- Diagnostic 4: GCD vs no-GCD comparison ---");
+    println!(
+        "  Periodic pairs: no-GCD={}, with-GCD={}  (diff={})",
+        periodic_no_gcd.len(),
+        periodic_gcd.len(),
+        periodic_no_gcd.len() as isize - periodic_gcd.len() as isize
+    );
+    println!(
+        "  Remaining outer: no-GCD={}, with-GCD={}",
+        remaining_no_gcd.len(),
+        remaining_gcd.len()
+    );
+
+    // Find matches present in no-GCD but missing from GCD for target blocks
+    println!("\n  Matches in no-GCD but NOT in with-GCD (for target blocks):");
+    for pp in &periodic_no_gcd {
+        let b1 = pp.block1.block_index;
+        let b2 = pp.block2.block_index;
+        if !target_blocks.contains(&b1) && !target_blocks.contains(&b2) {
+            continue;
+        }
+        let in_gcd = periodic_gcd.iter().any(|gp| {
+            (gp.block1.block_index == b1 && gp.block2.block_index == b2)
+                || (gp.block1.block_index == b2 && gp.block2.block_index == b1)
+        });
+        if !in_gcd {
+            println!(
+                "    MISSING: Block {} ({},{},{})..({},{},{}) <=> Block {} ({},{},{})..({},{},{})",
+                b1, pp.block1.il, pp.block1.jl, pp.block1.kl,
+                pp.block1.ih, pp.block1.jh, pp.block1.kh,
+                b2, pp.block2.il, pp.block2.jl, pp.block2.kl,
+                pp.block2.ih, pp.block2.jh, pp.block2.kh,
+            );
+        }
+    }
+
+    println!("\nDone (debug_full_mesh_gcd).");
+}
+
+// ===========================================================================
+// TEST 4: Diagnose WHY remnant faces fail to match
+// ===========================================================================
+
+use plot3d::{get_face_intersection, rotate_block_with_matrix};
+
+/// Known remnant pairs that should match but don't.
+fn remnant_pairs() -> Vec<(&'static str, FaceSpec, FaceSpec)> {
+    vec![
+        ("4115 K=0..48 <-> 4561 K=0..24", (4115, 0, 108, 0, 24, 108, 48), (4561, 0, 0, 0, 0, 24, 24)),
+        ("4115 K=0..48 <-> 4565 K=0..24", (4115, 0, 108, 0, 24, 108, 48), (4565, 0, 0, 0, 0, 24, 24)),
+        ("4109 K=48..72 <-> 4562 K=24..216", (4109, 0, 0, 48, 192, 0, 72), (4562, 36, 0, 24, 36, 24, 216)),
+        ("3994 K=36..60 <-> 3664 K=124", (3994, 12, 0, 36, 12, 264, 60), (3664, 0, 0, 124, 48, 12, 124)),
+    ]
+}
+
+#[test]
+fn debug_remnant_matching() {
+    let rotation_angle_deg: Float = 360.0 / NBLADES as Float;
+    let rotation_angle_rad: Float = rotation_angle_deg.to_radians();
+    let rot_forward = create_rotation_matrix(rotation_angle_rad, ROTATION_AXIS);
+    let rot_backward = create_rotation_matrix(-rotation_angle_rad, ROTATION_AXIS);
+
+    println!("\n{}", "=".repeat(70));
+    println!("REMNANT MATCHING DIAGNOSTICS");
+    println!("{}", "=".repeat(70));
+
+    println!("Loading full mesh...");
+    let blocks = read_plot3d_binary(
+        FULL_MESH_FILE,
+        BinaryFormat::Raw,
+        FloatPrecision::F64,
+        Endian::Little,
+    )
+    .expect("Failed to read full mesh");
+    println!("Loaded {} blocks", blocks.len());
+
+    for (label, spec_a, spec_b) in remnant_pairs() {
+        println!("\n--- {} ---", label);
+        let (blk_a, a_il, a_jl, a_kl, a_ih, a_jh, a_kh) = spec_a;
+        let (blk_b, b_il, b_jl, b_kl, b_ih, b_jh, b_kh) = spec_b;
+
+        let block_a = &blocks[blk_a];
+        let block_b = &blocks[blk_b];
+
+        let face_a = create_face_from_diagonals(block_a, a_il, a_jl, a_kl, a_ih, a_jh, a_kh);
+        let face_b = create_face_from_diagonals(block_b, b_il, b_jl, b_kl, b_ih, b_jh, b_kh);
+
+        println!("  Face A: block={}, const_type={}, verts={}", blk_a, face_a.const_type(), face_a.vertices().len());
+        println!("  Face B: block={}, const_type={}, verts={}", blk_b, face_b.const_type(), face_b.vertices().len());
+
+        // Step 1: faces_support_any
+        println!("  faces_support_any: {}", faces_support_any(&face_a, &face_b));
+
+        // Step 2: Cylindrical coordinates
+        let ca = face_a.centroid();
+        let cb = face_b.centroid();
+        let theta_a = to_theta(ca[0], ca[1], ca[2], ROTATION_AXIS);
+        let theta_b = to_theta(cb[0], cb[1], cb[2], ROTATION_AXIS);
+
+        let verts_a = face_a.vertices();
+        let verts_b = face_b.vertices();
+        let (r_min_a, r_max_a) = verts_a.iter()
+            .map(|v| to_radius(v[0], v[1], v[2], ROTATION_AXIS))
+            .fold((Float::MAX, Float::MIN), |(mn, mx), r| (mn.min(r), mx.max(r)));
+        let (r_min_b, r_max_b) = verts_b.iter()
+            .map(|v| to_radius(v[0], v[1], v[2], ROTATION_AXIS))
+            .fold((Float::MAX, Float::MIN), |(mn, mx), r| (mn.min(r), mx.max(r)));
+
+        let (ax_min_a, ax_max_a) = verts_a.iter()
+            .map(|v| v[0])
+            .fold((Float::MAX, Float::MIN), |(mn, mx), a| (mn.min(a), mx.max(a)));
+        let (ax_min_b, ax_max_b) = verts_b.iter()
+            .map(|v| v[0])
+            .fold((Float::MAX, Float::MIN), |(mn, mx), a| (mn.min(a), mx.max(a)));
+
+        println!("  Theta: A={:.4} B={:.4} diff={:.4} expected={:.4}", theta_a, theta_b, (theta_a - theta_b).abs(), rotation_angle_rad);
+        println!("  Radius: A=[{:.4},{:.4}] B=[{:.4},{:.4}]", r_min_a, r_max_a, r_min_b, r_max_b);
+        println!("  Axial:  A=[{:.4},{:.4}] B=[{:.4},{:.4}]", ax_min_a, ax_max_a, ax_min_b, ax_max_b);
+
+        // Radial overlap
+        let r_tol_a = 0.1 * (r_max_a - r_min_a).abs().max(1e-12);
+        let r_tol_b = 0.1 * (r_max_b - r_min_b).abs().max(1e-12);
+        println!("  Radial overlap: A->B={}, B->A={}",
+            r_max_b >= r_min_a - r_tol_a && r_min_b <= r_max_a + r_tol_a,
+            r_max_a >= r_min_b - r_tol_b && r_min_a <= r_max_b + r_tol_b);
+
+        // Axial overlap
+        let ax_tol_a = 0.1 * (ax_max_a - ax_min_a).abs().max(1e-12);
+        let ax_tol_b = 0.1 * (ax_max_b - ax_min_b).abs().max(1e-12);
+        println!("  Axial overlap:  A->B={}, B->A={}",
+            ax_max_b >= ax_min_a - ax_tol_a && ax_min_b <= ax_max_a + ax_tol_a,
+            ax_max_a >= ax_min_b - ax_tol_b && ax_min_a <= ax_max_b + ax_tol_b);
+
+        // Step 3: Corner check
+        for (dir, rot) in [("fwd", rot_forward), ("rev", rot_backward)] {
+            let ab = count_rotated_corners_on_face(&face_a, &face_b, block_b, rot, MATCH_TOL);
+            let ba = count_rotated_corners_on_face(&face_b, &face_a, block_a, rot, MATCH_TOL);
+            println!("  Corners ({}): A->B={}, B->A={}", dir, ab, ba);
+        }
+
+        // Step 4: full_face_match_transformed
+        let fwd = |p: [Float; 3]| apply_rotation(p, rot_forward);
+        let rev = |p: [Float; 3]| apply_rotation(p, rot_backward);
+        println!("  full_face_match: fwd={}, rev={}",
+            full_face_match_transformed(&face_a, &face_b, &fwd, MATCH_TOL).is_some(),
+            full_face_match_transformed(&face_a, &face_b, &rev, MATCH_TOL).is_some());
+
+        // Step 5: get_face_intersection + periodicity_check
+        for (dir, rot) in [("fwd", rot_forward), ("rev", rot_backward)] {
+            let block_a_rot = rotate_block_with_matrix(block_a, rot);
+            let (m1, s1a, s1b) = get_face_intersection(&face_a, &face_b, &block_a_rot, block_b, MATCH_TOL);
+            println!("  intersection(rot_A {}): {} matches, {} sp_a, {} sp_b", dir, m1.len(), s1a.len(), s1b.len());
+
+            let block_b_rot = rotate_block_with_matrix(block_b, rot);
+            let (m2, s2a, s2b) = get_face_intersection(&face_b, &face_a, &block_b_rot, block_a, MATCH_TOL);
+            println!("  intersection(rot_B {}): {} matches, {} sp_b, {} sp_a", dir, m2.len(), s2a.len(), s2b.len());
+
+            match periodicity_check_with_points(&face_a, &face_b, &block_a_rot, block_b, MATCH_TOL) {
+                Some((pf, mp, sp)) => {
+                    println!("  periodicity_check(rot_A {}): MATCH pairs={} pts={} splits={}", dir, pf.len(), mp.len(), sp.len());
+                    for f in &pf { println!("    pair: blk={} ({},{},{})..({},{},{})", f.block_index().unwrap_or(9999), f.imin(), f.jmin(), f.kmin(), f.imax(), f.jmax(), f.kmax()); }
+                    for f in &sp { println!("    split: blk={} ({},{},{})..({},{},{})", f.block_index().unwrap_or(9999), f.imin(), f.jmin(), f.kmin(), f.imax(), f.jmax(), f.kmax()); }
+                }
+                None => println!("  periodicity_check(rot_A {}): no match", dir),
+            }
+        }
+    }
+    println!("\nDone (debug_remnant_matching).");
 }

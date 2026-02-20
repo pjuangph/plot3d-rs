@@ -236,11 +236,17 @@ fn rotational_periodicity_core(
         let mut changed = true;
         let mut iteration = 0usize;
         let mut non_matching_p2: HashSet<(FaceKey, FaceKey)> = HashSet::new();
+        let max_iterations_p2 = pool.faces.len().max(500);
 
         while changed {
             changed = false;
             iteration += 1;
-            if iteration > 50 {
+            if iteration > max_iterations_p2 {
+                eprintln!(
+                    "Phase 2: hit iteration limit ({}) with {} active faces remaining",
+                    max_iterations_p2,
+                    pool.active_indices().len()
+                );
                 break;
             }
 
@@ -345,6 +351,10 @@ fn rotational_periodicity_core(
                 }
             }
         }
+        eprintln!(
+            "Phase 2 completed: {} iterations, {} periodic matches so far, {} active faces remaining",
+            iteration, periodic_exports.len(), pool.active_indices().len()
+        );
     }
 
     // ===== PHASE 3: Edge-based matching =====
@@ -352,11 +362,17 @@ fn rotational_periodicity_core(
         let mut changed_p3 = true;
         let mut iteration_p3 = 0usize;
         let mut non_matching_p3: HashSet<(FaceKey, FaceKey)> = HashSet::new();
+        let max_iterations_p3 = pool.faces.len().max(500);
 
         while changed_p3 {
             changed_p3 = false;
             iteration_p3 += 1;
-            if iteration_p3 > 50 {
+            if iteration_p3 > max_iterations_p3 {
+                eprintln!(
+                    "Phase 3: hit iteration limit ({}) with {} active faces remaining",
+                    max_iterations_p3,
+                    pool.active_indices().len()
+                );
                 break;
             }
 
