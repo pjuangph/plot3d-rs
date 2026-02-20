@@ -4,11 +4,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::{
     block::Block,
-    connectivity::{FaceMatch, FaceRecord},
-    utils::{
-        compute_min_gcd, cross3, distance3, dot3, sub3, vec_norm3,
-        FaceKey,
-    },
+    face_record::{FaceKey, FaceMatch, FaceRecord},
+    utils::{compute_min_gcd, cross3, distance3, dot3, sub3, vec_norm3},
     Float,
 };
 
@@ -487,12 +484,12 @@ impl Face {
     pub fn to_record(&self) -> FaceRecord {
         FaceRecord {
             block_index: self.block_index.unwrap_or(usize::MAX),
-            imin: self.imin(),
-            jmin: self.jmin(),
-            kmin: self.kmin(),
-            imax: self.imax(),
-            jmax: self.jmax(),
-            kmax: self.kmax(),
+            il: self.imin(),
+            jl: self.jmin(),
+            kl: self.kmin(),
+            ih: self.imax(),
+            jh: self.jmax(),
+            kh: self.kmax(),
             id: self.id,
             u_physical: None,
             v_physical: None,
@@ -1070,7 +1067,7 @@ pub fn full_face_match(
     face_a: &Face,
     face_b: &Face,
     tol: Float,
-) -> Option<crate::connectivity::Orientation> {
+) -> Option<crate::face_record::Orientation> {
     let corners_a = face_a.get_all_corners()?;
     let corners_b = face_b.get_all_corners()?;
     try_corner_permutations(&corners_a, &corners_b, tol)
@@ -1086,7 +1083,7 @@ pub fn full_face_match_transformed<F>(
     face_b: &Face,
     transform: F,
     tol: Float,
-) -> Option<crate::connectivity::Orientation>
+) -> Option<crate::face_record::Orientation>
 where
     F: Fn([Float; 3]) -> [Float; 3],
 {
@@ -1112,8 +1109,8 @@ fn try_corner_permutations(
     ca: &[[Float; 3]; 4],
     cb: &[[Float; 3]; 4],
     tol: Float,
-) -> Option<crate::connectivity::Orientation> {
-    use crate::connectivity::Orientation;
+) -> Option<crate::face_record::Orientation> {
+    use crate::face_record::Orientation;
 
     // Each entry: (index permutation of cb, u_reversed, v_reversed, swapped)
     const PERMS: [([usize; 4], bool, bool, bool); 8] = [
@@ -1320,8 +1317,8 @@ pub fn outer_face_records_to_list(
         }
         let block = &blocks[block_idx];
         let scale = gcd.max(1);
-        let (si, sj, sk) = (record.imin / scale, record.jmin / scale, record.kmin / scale);
-        let (ei, ej, ek) = (record.imax / scale, record.jmax / scale, record.kmax / scale);
+        let (si, sj, sk) = (record.i_lo() / scale, record.j_lo() / scale, record.k_lo() / scale);
+        let (ei, ej, ek) = (record.i_hi() / scale, record.j_hi() / scale, record.k_hi() / scale);
         // Skip records whose scaled indices exceed the reduced block dimensions
         if ei >= block.imax || ej >= block.jmax || ek >= block.kmax {
             continue;

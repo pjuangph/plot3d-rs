@@ -1,370 +1,23 @@
+//! Block-to-block face connectivity detection.
+//!
+//! The core data types ([`FaceRecord`], [`FaceMatch`], [`MatchPoint`],
+//! [`Orientation`]) live in [`crate::face_record`]. This module provides the
+//! algorithms that populate them.
+
 use std::collections::{HashMap, HashSet};
 
 use indicatif::{ProgressBar, ProgressStyle};
-use serde::Serialize;
 
 use crate::{
     block::Block,
     block_face_functions::{
         create_face_from_diagonals, get_outer_faces, reduce_blocks, split_face, Face,
     },
+    face_record::{FaceKey, FaceMatch, FaceRecord, MatchPoint, Orientation},
     Float,
 };
 
 const DEFAULT_TOL: Float = 1e-6;
-
-/// Describe a single coincident node between two faces.
-///
-/// Fields ending in `1` correspond to the first block/face, while those ending
-/// in `2` refer to the second face. Indices are Plot3D structured-grid indices.
-
-/// Pointwise correspondence between two block faces.
-#[derive(Clone, Debug, Serialize)]
-pub struct MatchPoint {
-    pub i1: usize,
-    pub j1: usize,
-    pub k1: usize,
-    pub i2: usize,
-    pub j2: usize,
-    pub k2: usize,
-}
-
-/// Compact record describing a face on a particular block.
-#[derive(Clone, Debug, Serialize)]
-pub struct FaceRecord {
-    pub block_index: usize,
-    pub imin: usize,
-    pub jmin: usize,
-    pub kmin: usize,
-    pub imax: usize,
-    pub jmax: usize,
-    pub kmax: usize,
-    pub id: Option<usize>,
-    /// Which physical axis ('x','y','z') the u-parameter primarily aligns with,
-    /// and whether the physical coordinate increases as the u-index increases.
-    /// `None` when not yet computed.
-    #[serde(default)]
-    pub u_physical: Option<(char, bool)>,
-    /// Same for the v-parameter (second varying index of the face).
-    #[serde(default)]
-    pub v_physical: Option<(char, bool)>,
-}
-
-impl FaceRecord {
-    /// Build a corner description from matching points.
-    ///
-    /// * `block_index` – Owning block index.
-    /// * `points` – Matched nodes.
-    /// * `first` – If `true` we use the indices from block1; otherwise block2.
-    ///
-    /// Returns `None` when `points` is empty.
-    fn from_match_points(block_index: usize, points: &[MatchPoint], first: bool) -> Option<Self> {
-        if points.is_empty() {
-            return None;
-        }
-        let imin = points
-            .iter()
-            .map(|p| if first { p.i1 } else { p.i2 })
-            .min()?;
-        let jmin = points
-            .iter()
-            .map(|p| if first { p.j1 } else { p.j2 })
-            .min()?;
-        let kmin = points
-            .iter()
-            .map(|p| if first { p.k1 } else { p.k2 })
-            .min()?;
-        let imax = points
-            .iter()
-            .map(|p| if first { p.i1 } else { p.i2 })
-            .max()?;
-        let jmax = points
-            .iter()
-            .map(|p| if first { p.j1 } else { p.j2 })
-            .max()?;
-        let kmax = points
-            .iter()
-            .map(|p| if first { p.k1 } else { p.k2 })
-            .max()?;
-        Some(Self {
-            block_index,
-            imin,
-            jmin,
-            kmin,
-            imax,
-            jmax,
-            kmax,
-            id: None,
-            u_physical: None,
-            v_physical: None,
-        })
-    }
-
-    /// Construct a record from a Face instance.
-    pub fn from_face(face: &crate::block_face_functions::Face) -> Self {
-        Self {
-            block_index: face.block_index().unwrap_or(usize::MAX),
-            imin: face.imin(),
-            jmin: face.jmin(),
-            kmin: face.kmin(),
-            imax: face.imax(),
-            jmax: face.jmax(),
-            kmax: face.kmax(),
-            id: face.id(),
-            u_physical: None,
-            v_physical: None,
-        }
-    }
-
-    /// Compute and fill in the physical direction metadata by sampling the block.
-    ///
-    /// For a face with one constant axis (e.g. K-constant), the two varying axes
-    /// form u and v.  We sample the block at the min and max corners of each
-    /// varying axis to determine which physical axis (x, y, z) it primarily
-    /// aligns with and whether it is increasing.
-    pub fn compute_direction(&mut self, block: &crate::block::Block) {
-        // Determine which axis is constant
-        let i_const = self.imin == self.imax;
-        let j_const = self.jmin == self.jmax;
-        let k_const = self.kmin == self.kmax;
-
-        // Identify u and v varying axes
-        // Convention: for K-const → u=I, v=J; for J-const → u=I, v=K; for I-const → u=J, v=K
-        let (u_min_ijk, u_max_ijk, v_min_ijk, v_max_ijk) = if k_const || (!i_const && !j_const && !k_const) {
-            // K-constant (or all varying, default to K-const convention)
-            (
-                (self.imin, self.jmin, self.kmin),
-                (self.imax, self.jmin, self.kmin),
-                (self.imin, self.jmin, self.kmin),
-                (self.imin, self.jmax, self.kmin),
-            )
-        } else if j_const {
-            (
-                (self.imin, self.jmin, self.kmin),
-                (self.imax, self.jmin, self.kmin),
-                (self.imin, self.jmin, self.kmin),
-                (self.imin, self.jmin, self.kmax),
-            )
-        } else {
-            // I-constant
-            (
-                (self.imin, self.jmin, self.kmin),
-                (self.imin, self.jmax, self.kmin),
-                (self.imin, self.jmin, self.kmin),
-                (self.imin, self.jmin, self.kmax),
-            )
-        };
-
-        // Sample block coordinates
-        let (ux0, uy0, uz0) = block.xyz(u_min_ijk.0, u_min_ijk.1, u_min_ijk.2);
-        let (ux1, uy1, uz1) = block.xyz(u_max_ijk.0, u_max_ijk.1, u_max_ijk.2);
-        let (vx0, vy0, vz0) = block.xyz(v_min_ijk.0, v_min_ijk.1, v_min_ijk.2);
-        let (vx1, vy1, vz1) = block.xyz(v_max_ijk.0, v_max_ijk.1, v_max_ijk.2);
-
-        // Determine dominant physical axis for u
-        let du = [(ux1 - ux0), (uy1 - uy0), (uz1 - uz0)];
-        let abs_du = [du[0].abs(), du[1].abs(), du[2].abs()];
-        let u_axis_idx = if abs_du[0] >= abs_du[1] && abs_du[0] >= abs_du[2] {
-            0
-        } else if abs_du[1] >= abs_du[2] {
-            1
-        } else {
-            2
-        };
-        let u_axis = ['x', 'y', 'z'][u_axis_idx];
-        let u_increasing = du[u_axis_idx] >= 0.0;
-
-        // Determine dominant physical axis for v
-        let dv = [(vx1 - vx0), (vy1 - vy0), (vz1 - vz0)];
-        let abs_dv = [dv[0].abs(), dv[1].abs(), dv[2].abs()];
-        let v_axis_idx = if abs_dv[0] >= abs_dv[1] && abs_dv[0] >= abs_dv[2] {
-            0
-        } else if abs_dv[1] >= abs_dv[2] {
-            1
-        } else {
-            2
-        };
-        let v_axis = ['x', 'y', 'z'][v_axis_idx];
-        let v_increasing = dv[v_axis_idx] >= 0.0;
-
-        self.u_physical = Some((u_axis, u_increasing));
-        self.v_physical = Some((v_axis, v_increasing));
-    }
-
-    /// Scale the index ranges by `factor`.
-    pub fn scale_indices(&mut self, factor: usize) {
-        if factor <= 1 {
-            return;
-        }
-        self.imin *= factor;
-        self.jmin *= factor;
-        self.kmin *= factor;
-        self.imax *= factor;
-        self.jmax *= factor;
-        self.kmax *= factor;
-    }
-
-    /// Reduce the index ranges by `divisor`.
-    pub fn divide_indices(&mut self, divisor: usize) {
-        if divisor <= 1 {
-            return;
-        }
-        self.imin /= divisor;
-        self.jmin /= divisor;
-        self.kmin /= divisor;
-        self.imax /= divisor;
-        self.jmax /= divisor;
-        self.kmax /= divisor;
-    }
-
-    /// Build a compact key tuple for set/map lookups.
-    #[inline]
-    pub fn index_key(&self) -> crate::utils::FaceKey {
-        (
-            self.block_index,
-            self.imin,
-            self.jmin,
-            self.kmin,
-            self.imax,
-            self.jmax,
-            self.kmax,
-        )
-    }
-
-    /// Reconstruct a Face from this record using the provided blocks.
-    pub fn to_face(
-        &self,
-        blocks: &[crate::block::Block],
-    ) -> Option<crate::block_face_functions::Face> {
-        let block = blocks.get(self.block_index)?;
-        let mut face = crate::block_face_functions::create_face_from_diagonals(
-            block, self.imin, self.jmin, self.kmin, self.imax, self.jmax, self.kmax,
-        );
-        face.set_block_index(self.block_index);
-        if let Some(id) = self.id {
-            face.set_id(id);
-        }
-        Some(face)
-    }
-}
-
-/// Helper trait to print summaries of face records.
-pub trait FaceRecordTraits {
-    fn print(&self);
-}
-
-impl FaceRecordTraits for [FaceRecord] {
-    fn print(&self) {
-        for face in self {
-            println!(
-                "face block{} id {:?}: [{},{},{} → {},{},{}]",
-                face.block_index,
-                face.id,
-                face.imin,
-                face.jmin,
-                face.kmin,
-                face.imax,
-                face.jmax,
-                face.kmax
-            );
-        }
-    }
-}
-
-impl FaceRecordTraits for Vec<FaceRecord> {
-    fn print(&self) {
-        self.as_slice().print();
-    }
-}
-
-/// Describes the index mapping between two matched faces.
-///
-/// For a face with a constant axis (e.g., K-constant), the two varying
-/// dimensions form a (u, v) parametric space.  `u_reversed` and `v_reversed`
-/// indicate whether block2's u/v directions run opposite to block1's.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-pub struct Orientation {
-    /// When true, block2's u-axis increases in the opposite spatial direction
-    /// to block1's u-axis (min-to-max mapping).
-    pub u_reversed: bool,
-    /// When true, block2's v-axis increases in the opposite spatial direction
-    /// to block1's v-axis.
-    pub v_reversed: bool,
-    /// When true, block2's u and v axes are transposed relative to block1's
-    /// (e.g., block1 has u=J,v=K but block2 has u=K,v=J).
-    pub swapped: bool,
-}
-
-/// Aggregates the matching data between two faces.
-///
-/// Each entry stores the corner ranges (on both blocks) and every coincident
-/// node that was found for that interface.
-#[derive(Clone, Debug, Serialize)]
-pub struct FaceMatch {
-    pub block1: FaceRecord,
-    pub block2: FaceRecord,
-    pub points: Vec<MatchPoint>,
-    /// Orientation relationship between block1 and block2 faces.
-    /// `None` for legacy code paths or partial matches where orientation
-    /// was not detected.
-    #[serde(default)]
-    pub orientation: Option<Orientation>,
-}
-
-impl FaceMatch {
-    /// Downscale both participating face records by `divisor`.
-    pub fn divide_indices(&mut self, divisor: usize) {
-        self.block1.divide_indices(divisor);
-        self.block2.divide_indices(divisor);
-    }
-
-    /// Upscale both participating face records by `factor`.
-    pub fn scale_indices(&mut self, factor: usize) {
-        self.block1.scale_indices(factor);
-        self.block2.scale_indices(factor);
-    }
-}
-
-/// Helper trait to print summaries of face matches.
-pub trait FaceMatchPrinter {
-    fn print(&self);
-}
-
-impl FaceMatchPrinter for [FaceMatch] {
-    fn print(&self) {
-        for (idx, m) in self.iter().enumerate() {
-            let block1 = &m.block1;
-            let block2 = &m.block2;
-            let node_count = m.points.len();
-            let node_label = if node_count == 1 { "node" } else { "nodes" };
-            println!(
-                "match #{idx}: block{block1_idx:02} [{imin1:03},{jmin1:03},{kmin1:03} -> {imax1:03},{jmax1:03},{kmax1:03}] <-> block{block2_idx:02} [{imin2:03},{jmin2:03},{kmin2:03} -> {imax2:03},{jmax2:03},{kmax2:03}] ({node_count} {node_label})",
-                block1_idx = block1.block_index,
-                imin1 = block1.imin,
-                jmin1 = block1.jmin,
-                kmin1 = block1.kmin,
-                imax1 = block1.imax,
-                jmax1 = block1.jmax,
-                kmax1 = block1.kmax,
-                block2_idx = block2.block_index,
-                imin2 = block2.imin,
-                jmin2 = block2.jmin,
-                kmin2 = block2.kmin,
-                imax2 = block2.imax,
-                jmax2 = block2.jmax,
-                kmax2 = block2.kmax,
-                node_count = node_count,
-                node_label = node_label,
-            );
-        }
-    }
-}
-
-impl FaceMatchPrinter for Vec<FaceMatch> {
-    fn print(&self) {
-        self.as_slice().print();
-    }
-}
 
 /// Structured-grid node on a face, capturing indices and XYZ coordinate.
 #[derive(Clone, Debug)]
@@ -488,14 +141,7 @@ fn filter_block_increasing(
     for window in unique_vals.windows(2) {
         if window[1] == window[0] + 1 {
             keep.insert(window[0]);
-        }
-    }
-    if let (Some(last), Some(prev)) = (
-        unique_vals.last(),
-        unique_vals.get(unique_vals.len().saturating_sub(2)),
-    ) {
-        if *last == *prev + 1 {
-            keep.insert(*last);
+            keep.insert(window[1]);
         }
     }
     points
@@ -551,7 +197,7 @@ fn create_split_faces(
     if points.is_empty() {
         return Vec::new();
     }
-    let (imin, imax, jmin, jmax, kmin, kmax) = if use_block1 {
+    let (i_lo, i_hi, j_lo, j_hi, k_lo, k_hi) = if use_block1 {
         (
             points.iter().map(|p| p.i1).min().unwrap(),
             points.iter().map(|p| p.i1).max().unwrap(),
@@ -571,11 +217,11 @@ fn create_split_faces(
         )
     };
     let degeneracy =
-        usize::from(imin == imax) + usize::from(jmin == jmax) + usize::from(kmin == kmax);
+        usize::from(i_lo == i_hi) + usize::from(j_lo == j_hi) + usize::from(k_lo == k_hi);
     if degeneracy != 1 {
         return Vec::new();
     }
-    let mut split = split_face(face, block, imin, jmin, kmin, imax, jmax, kmax);
+    let mut split = split_face(face, block, i_lo, j_lo, k_lo, i_hi, j_hi, k_hi);
     for f in &mut split {
         if let Some(idx) = face.block_index() {
             f.set_block_index(idx);
@@ -738,16 +384,21 @@ fn build_match_points_from_orientation(
 /// only the 4 corner vertices.  When all 4 corners match (within tol),
 /// the faces are a full match and no splitting is needed.
 ///
+/// An interior-point verification step rejects false positives where
+/// corners coincidentally match (e.g. near the axis of rotation) but
+/// the face interiors are at different spatial locations.
+///
 /// Returns `(matches, consumed_face_keys)`.
 fn find_full_face_matches(
+    blocks: &[Block],
     block_outer_faces: &[Vec<Face>],
     candidate_pairs: &[(usize, usize)],
     tol: Float,
-) -> (Vec<FaceMatch>, HashSet<crate::utils::FaceKey>) {
+) -> (Vec<FaceMatch>, HashSet<FaceKey>) {
     use crate::block_face_functions::full_face_match;
 
     let mut face_matches = Vec::new();
-    let mut consumed: HashSet<crate::utils::FaceKey> = HashSet::new();
+    let mut consumed: HashSet<FaceKey> = HashSet::new();
 
     for &(i, j) in candidate_pairs {
         for face_i in &block_outer_faces[i] {
@@ -762,6 +413,11 @@ fn find_full_face_matches(
                     let points = build_match_points_from_orientation(
                         face_i, face_j, &orientation,
                     );
+
+                    // Verify interior points to reject false positives
+                    if !verify_match_interior(&blocks[i], &blocks[j], &points, tol) {
+                        continue;
+                    }
 
                     consumed.insert(face_i.index_key());
                     consumed.insert(face_j.index_key());
@@ -779,6 +435,38 @@ fn find_full_face_matches(
     }
 
     (face_matches, consumed)
+}
+
+/// Verify a face match by checking ALL interior node coordinates.
+///
+/// After corner-based matching finds a potential full-face match,
+/// this function checks every interior node pair to confirm they are
+/// spatially coincident. Returns `false` if any point exceeds the
+/// tolerance, indicating a false positive.
+///
+/// At GCD-reduced resolution faces are small (typically < 1000 nodes),
+/// so exhaustive checking is fast and avoids false positives that
+/// sparse sampling could miss.
+fn verify_match_interior(
+    block1: &Block,
+    block2: &Block,
+    points: &[MatchPoint],
+    tol: Float,
+) -> bool {
+    if points.len() <= 4 {
+        return true;
+    }
+
+    // Check every interior point (skip first and last which are corners)
+    for p in &points[1..points.len() - 1] {
+        let (x1, y1, z1) = block1.xyz(p.i1, p.j1, p.k1);
+        let (x2, y2, z2) = block2.xyz(p.i2, p.j2, p.k2);
+        let d = ((x1 - x2).powi(2) + (y1 - y2).powi(2) + (z1 - z2).powi(2)).sqrt();
+        if d > tol {
+            return false;
+        }
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -935,12 +623,20 @@ pub fn connectivity_fast(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) 
 pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
     use rayon::prelude::*;
 
-    // Parallelize outer face extraction per block
+    // Parallelize outer face extraction per block.
+    // Include degenerate faces (where opposite sides coincide) so that
+    // thin blocks can still participate in inter-block matching.
     let mut block_outer_faces: Vec<Vec<Face>> = blocks
         .par_iter()
         .enumerate()
         .map(|(idx, block)| {
-            let (faces, _) = get_outer_faces(block);
+            let (mut faces, degenerate_pairs) = get_outer_faces(block);
+            // Re-add degenerate faces to the pool — they still need to match
+            // with adjacent blocks even though they coincide on this block.
+            for (face_a, face_b) in degenerate_pairs {
+                faces.push(face_a);
+                faces.push(face_b);
+            }
             faces
                 .into_iter()
                 .map(|mut f| {
@@ -953,16 +649,16 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
 
     let combos = candidate_neighbor_pairs(blocks, DEFAULT_TOL);
 
-    // ===== PHASE 1: Full face matching (fast, corner-based) =====
+    // ===== PHASE 1: Full face matching (fast, corner-based + interior verification) =====
     let (mut matches, consumed_keys) =
-        find_full_face_matches(&block_outer_faces, &combos, DEFAULT_TOL);
+        find_full_face_matches(blocks, &block_outer_faces, &combos, DEFAULT_TOL);
 
     // Remove fully-matched faces from the outer face pools
     for faces in &mut block_outer_faces {
         faces.retain(|f| !consumed_keys.contains(&f.index_key()));
     }
 
-    let mut matches_to_remove: HashSet<crate::utils::FaceKey> = consumed_keys;
+    let mut matches_to_remove: HashSet<FaceKey> = consumed_keys;
 
     // ===== PHASE 2: Partial face matching (slow, node-by-node) =====
     let pb = ProgressBar::new(combos.len() as u64);
@@ -1092,24 +788,24 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
         for (face_a, face_b) in self_matches {
             let mut corner1 = FaceRecord {
                 block_index: idx,
-                imin: face_a.imin(),
-                jmin: face_a.jmin(),
-                kmin: face_a.kmin(),
-                imax: face_a.imax(),
-                jmax: face_a.jmax(),
-                kmax: face_a.kmax(),
+                il: face_a.imin(),
+                jl: face_a.jmin(),
+                kl: face_a.kmin(),
+                ih: face_a.imax(),
+                jh: face_a.jmax(),
+                kh: face_a.kmax(),
                 id: face_a.id(),
                 u_physical: None,
                 v_physical: None,
             };
             let corner2 = FaceRecord {
                 block_index: idx,
-                imin: face_b.imin(),
-                jmin: face_b.jmin(),
-                kmin: face_b.kmin(),
-                imax: face_b.imax(),
-                jmax: face_b.jmax(),
-                kmax: face_b.kmax(),
+                il: face_b.imin(),
+                jl: face_b.jmin(),
+                kl: face_b.kmin(),
+                ih: face_b.imax(),
+                jh: face_b.jmax(),
+                kh: face_b.kmax(),
                 id: face_b.id(),
                 u_physical: None,
                 v_physical: None,
@@ -1129,12 +825,12 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
     for face in outer_faces {
         formatted.push(FaceRecord {
             block_index: face.block_index().unwrap_or(usize::MAX),
-            imin: face.imin(),
-            jmin: face.jmin(),
-            kmin: face.kmin(),
-            imax: face.imax(),
-            jmax: face.jmax(),
-            kmax: face.kmax(),
+            il: face.imin(),
+            jl: face.jmin(),
+            kl: face.kmin(),
+            ih: face.imax(),
+            jh: face.jmax(),
+            kh: face.kmax(),
             id: Some(id_counter),
             u_physical: None,
             v_physical: None,
@@ -1207,10 +903,10 @@ pub fn verify_connectivity(
 
         // Fast path: if orientation is known from Phase 1, just verify stored diagonal
         if fm.orientation.is_some() {
-            let (x1_l, y1_l, z1_l) = block1.xyz(b1.imin, b1.jmin, b1.kmin);
-            let (x1_u, y1_u, z1_u) = block1.xyz(b1.imax, b1.jmax, b1.kmax);
-            let (x2_l, y2_l, z2_l) = block2.xyz(b2.imin, b2.jmin, b2.kmin);
-            let (x2_u, y2_u, z2_u) = block2.xyz(b2.imax, b2.jmax, b2.kmax);
+            let (x1_l, y1_l, z1_l) = block1.xyz(b1.il, b1.jl, b1.kl);
+            let (x1_u, y1_u, z1_u) = block1.xyz(b1.ih, b1.jh, b1.kh);
+            let (x2_l, y2_l, z2_l) = block2.xyz(b2.il, b2.jl, b2.kl);
+            let (x2_u, y2_u, z2_u) = block2.xyz(b2.ih, b2.jh, b2.kh);
 
             let d_lower = ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
             let d_upper = ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
@@ -1226,11 +922,11 @@ pub fn verify_connectivity(
         }
 
         // Slow path: no orientation — check stored diagonal then try permutations
-        let (x1_l, y1_l, z1_l) = block1.xyz(b1.imin, b1.jmin, b1.kmin);
-        let (x1_u, y1_u, z1_u) = block1.xyz(b1.imax, b1.jmax, b1.kmax);
+        let (x1_l, y1_l, z1_l) = block1.xyz(b1.il, b1.jl, b1.kl);
+        let (x1_u, y1_u, z1_u) = block1.xyz(b1.ih, b1.jh, b1.kh);
 
-        let (x2_l, y2_l, z2_l) = block2.xyz(b2.imin, b2.jmin, b2.kmin);
-        let (x2_u, y2_u, z2_u) = block2.xyz(b2.imax, b2.jmax, b2.kmax);
+        let (x2_l, y2_l, z2_l) = block2.xyz(b2.il, b2.jl, b2.kl);
+        let (x2_u, y2_u, z2_u) = block2.xyz(b2.ih, b2.jh, b2.kh);
 
         let d_lower = ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
         let d_upper = ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
@@ -1241,9 +937,9 @@ pub fn verify_connectivity(
         }
 
         // Enumerate unique corners of block2's face
-        let i_vals = [b2.imin, b2.imax];
-        let j_vals = [b2.jmin, b2.jmax];
-        let k_vals = [b2.kmin, b2.kmax];
+        let i_vals = [b2.il, b2.ih];
+        let j_vals = [b2.jl, b2.jh];
+        let k_vals = [b2.kl, b2.kh];
 
         let mut unique_corners: Vec<(usize, usize, usize)> = Vec::new();
         let mut seen = HashSet::new();
@@ -1273,12 +969,12 @@ pub fn verify_connectivity(
 
                 if dl < tol && du < tol {
                     let mut corrected = face_matches[idx].clone();
-                    corrected.block2.imin = il * gcd_to_use;
-                    corrected.block2.jmin = jl * gcd_to_use;
-                    corrected.block2.kmin = kl * gcd_to_use;
-                    corrected.block2.imax = iu * gcd_to_use;
-                    corrected.block2.jmax = ju * gcd_to_use;
-                    corrected.block2.kmax = ku * gcd_to_use;
+                    corrected.block2.il = il * gcd_to_use;
+                    corrected.block2.jl = jl * gcd_to_use;
+                    corrected.block2.kl = kl * gcd_to_use;
+                    corrected.block2.ih = iu * gcd_to_use;
+                    corrected.block2.jh = ju * gcd_to_use;
+                    corrected.block2.kh = ku * gcd_to_use;
                     verified.push(corrected);
                     found = true;
                     break;
@@ -1297,14 +993,14 @@ pub fn verify_connectivity(
             eprintln!(
                 "  block1 (block_index={}): lower=({},{},{}) upper=({},{},{})",
                 face_matches[idx].block1.block_index,
-                face_matches[idx].block1.imin, face_matches[idx].block1.jmin, face_matches[idx].block1.kmin,
-                face_matches[idx].block1.imax, face_matches[idx].block1.jmax, face_matches[idx].block1.kmax,
+                face_matches[idx].block1.il, face_matches[idx].block1.jl, face_matches[idx].block1.kl,
+                face_matches[idx].block1.ih, face_matches[idx].block1.jh, face_matches[idx].block1.kh,
             );
             eprintln!(
                 "  block2 (block_index={}): lower=({},{},{}) upper=({},{},{})",
                 face_matches[idx].block2.block_index,
-                face_matches[idx].block2.imin, face_matches[idx].block2.jmin, face_matches[idx].block2.kmin,
-                face_matches[idx].block2.imax, face_matches[idx].block2.jmax, face_matches[idx].block2.kmax,
+                face_matches[idx].block2.il, face_matches[idx].block2.jl, face_matches[idx].block2.kl,
+                face_matches[idx].block2.ih, face_matches[idx].block2.jh, face_matches[idx].block2.kh,
             );
             mismatched.push(face_matches[idx].clone());
         }
@@ -1341,14 +1037,14 @@ pub fn face_matches_to_dict(
             let mut result = fm.clone();
 
             // Block1 lower corner
-            let (x1_l, y1_l, z1_l) = block1.xyz(b1.imin, b1.jmin, b1.kmin);
+            let (x1_l, y1_l, z1_l) = block1.xyz(b1.il, b1.jl, b1.kl);
 
             // Search for closest block2 corner to block1's lower corner
-            let i_vals = [b2.imin, b2.imax];
-            let j_vals = [b2.jmin, b2.jmax];
-            let k_vals = [b2.kmin, b2.kmax];
+            let i_vals = [b2.i_lo(), b2.i_hi()];
+            let j_vals = [b2.j_lo(), b2.j_hi()];
+            let k_vals = [b2.k_lo(), b2.k_hi()];
 
-            let mut best_lower = (Float::MAX, b2.imin, b2.jmin, b2.kmin);
+            let mut best_lower = (Float::MAX, b2.il, b2.jl, b2.kl);
             for &i in &i_vals {
                 for &j in &j_vals {
                     for &k in &k_vals {
@@ -1360,14 +1056,14 @@ pub fn face_matches_to_dict(
                     }
                 }
             }
-            result.block2.imin = best_lower.1;
-            result.block2.jmin = best_lower.2;
-            result.block2.kmin = best_lower.3;
+            result.block2.il = best_lower.1;
+            result.block2.jl = best_lower.2;
+            result.block2.kl = best_lower.3;
 
             // Block1 upper corner
-            let (x1_u, y1_u, z1_u) = block1.xyz(b1.imax, b1.jmax, b1.kmax);
+            let (x1_u, y1_u, z1_u) = block1.xyz(b1.ih, b1.jh, b1.kh);
 
-            let mut best_upper = (Float::MAX, b2.imax, b2.jmax, b2.kmax);
+            let mut best_upper = (Float::MAX, b2.ih, b2.jh, b2.kh);
             for &i in &i_vals {
                 for &j in &j_vals {
                     for &k in &k_vals {
@@ -1379,17 +1075,17 @@ pub fn face_matches_to_dict(
                     }
                 }
             }
-            result.block2.imax = best_upper.1;
-            result.block2.jmax = best_upper.2;
-            result.block2.kmax = best_upper.3;
+            result.block2.ih = best_upper.1;
+            result.block2.jh = best_upper.2;
+            result.block2.kh = best_upper.3;
 
             // Preserve block1 indices as-is
-            result.block1.imin = b1.imin;
-            result.block1.jmin = b1.jmin;
-            result.block1.kmin = b1.kmin;
-            result.block1.imax = b1.imax;
-            result.block1.jmax = b1.jmax;
-            result.block1.kmax = b1.kmax;
+            result.block1.il = b1.il;
+            result.block1.jl = b1.jl;
+            result.block1.kl = b1.kl;
+            result.block1.ih = b1.ih;
+            result.block1.jh = b1.jh;
+            result.block1.kh = b1.kh;
 
             Some(result)
         })

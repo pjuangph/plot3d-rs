@@ -54,12 +54,12 @@ fn test_connectivity() {
     ) {
         (
             face.block_index,
-            face.imin,
-            face.jmin,
-            face.kmin,
-            face.imax,
-            face.jmax,
-            face.kmax,
+            face.il,
+            face.jl,
+            face.kl,
+            face.ih,
+            face.jh,
+            face.kh,
             face.id,
         )
     }

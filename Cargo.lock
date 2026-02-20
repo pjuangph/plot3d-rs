@@ -756,6 +756,7 @@ dependencies = [
  "rayon",
  "reqwest",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

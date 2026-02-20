@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{self, BufReader, Read};
 
 use crate::block::Block;
 use crate::utils::{self, read_fortran_record, Endian};
@@ -21,90 +21,61 @@ pub enum FloatPrecision {
 pub use crate::utils::Endian as EndianOrder;
 
 pub fn read_plot3d_ascii(path: &str) -> io::Result<Vec<Block>> {
-    let f = File::open(path)?;
-    let mut rdr = BufReader::new(f);
+    // Bulk-read the entire file into memory for faster tokenization
+    let mut contents = String::new();
+    File::open(path).and_then(|f| {
+        let mut rdr = BufReader::with_capacity(8 * 1024 * 1024, f);
+        rdr.read_to_string(&mut contents)
+    })?;
 
-    // first non-empty line = nblocks
-    let mut first = String::new();
-    loop {
-        first.clear();
-        let n = rdr.read_line(&mut first)?;
-        if n == 0 {
-            return Err(ioerr("empty file"));
-        }
-        if !first.trim().is_empty() {
-            break;
-        }
-    }
-    let nblocks: usize = first
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| ioerr("bad nblocks"))?
-        .parse()
-        .map_err(|_| ioerr("bad nblocks"))?;
+    let mut tokens = contents.split_whitespace();
 
-    // dims
+    let nblocks: usize = next_parse(&mut tokens, "bad nblocks")?;
+
     let mut dims = Vec::with_capacity(nblocks);
     for _ in 0..nblocks {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            rdr.read_line(&mut line)?;
-            if !line.trim().is_empty() {
-                break;
-            }
-        }
-        let mut it = line.split_whitespace();
-        let imax: usize = it
-            .next()
-            .ok_or_else(|| ioerr("bad dims"))?
-            .parse()
-            .map_err(|_| ioerr("bad dims"))?;
-        let jmax: usize = it
-            .next()
-            .ok_or_else(|| ioerr("bad dims"))?
-            .parse()
-            .map_err(|_| ioerr("bad dims"))?;
-        let kmax: usize = it
-            .next()
-            .ok_or_else(|| ioerr("bad dims"))?
-            .parse()
-            .map_err(|_| ioerr("bad dims"))?;
+        let imax: usize = next_parse(&mut tokens, "bad dims")?;
+        let jmax: usize = next_parse(&mut tokens, "bad dims")?;
+        let kmax: usize = next_parse(&mut tokens, "bad dims")?;
         dims.push((imax, jmax, kmax));
     }
 
-    // read N floats from ASCII
-    fn read_n(rdr: &mut BufReader<File>, n: usize) -> io::Result<Vec<Float>> {
-        let mut out = Vec::with_capacity(n);
-        while out.len() < n {
-            let mut line = String::new();
-            let cnt = rdr.read_line(&mut line)?;
-            if cnt == 0 {
-                break;
-            }
-            for t in line.split_whitespace() {
-                if out.len() == n {
-                    break;
-                }
-                out.push(t.parse::<Float>().map_err(|_| ioerr("bad float"))?);
-            }
-        }
-        if out.len() != n {
-            return Err(ioerr("unexpected EOF in payload"));
-        }
-        Ok(out)
-    }
-
-    // payload
     let mut blocks = Vec::with_capacity(nblocks);
     for (imax, jmax, kmax) in dims {
         let n = imax * jmax * kmax;
-        let x = read_n(&mut rdr, n)?;
-        let y = read_n(&mut rdr, n)?;
-        let z = read_n(&mut rdr, n)?;
+        let x = parse_n_floats(&mut tokens, n)?;
+        let y = parse_n_floats(&mut tokens, n)?;
+        let z = parse_n_floats(&mut tokens, n)?;
         blocks.push(Block::new(imax, jmax, kmax, x, y, z));
     }
     Ok(blocks)
+}
+
+/// Parse the next whitespace-delimited token as type `T`.
+fn next_parse<T: std::str::FromStr>(
+    tokens: &mut std::str::SplitWhitespace<'_>,
+    msg: &str,
+) -> io::Result<T> {
+    tokens
+        .next()
+        .ok_or_else(|| ioerr(msg))?
+        .parse::<T>()
+        .map_err(|_| ioerr(msg))
+}
+
+/// Parse exactly `n` float tokens from the iterator.
+fn parse_n_floats(
+    tokens: &mut std::str::SplitWhitespace<'_>,
+    n: usize,
+) -> io::Result<Vec<Float>> {
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let t = tokens
+            .next()
+            .ok_or_else(|| ioerr("unexpected EOF in payload"))?;
+        out.push(t.parse::<Float>().map_err(|_| ioerr("bad float"))?);
+    }
+    Ok(out)
 }
 
 pub fn read_plot3d_binary(
@@ -113,10 +84,11 @@ pub fn read_plot3d_binary(
     precision: FloatPrecision,
     endian: Endian,
 ) -> io::Result<Vec<Block>> {
-    let mut f = File::open(path)?;
+    let f = File::open(path)?;
+    let mut r = BufReader::with_capacity(8 * 1024 * 1024, f);
     match format {
-        BinaryFormat::Raw => read_binary_raw(&mut f, precision, endian),
-        BinaryFormat::Fortran => read_binary_fortran(&mut f, precision, endian),
+        BinaryFormat::Raw => read_binary_raw(&mut r, precision, endian),
+        BinaryFormat::Fortran => read_binary_fortran(&mut r, precision, endian),
     }
 }
 
@@ -249,28 +221,33 @@ fn read_vec_num(
     precision: FloatPrecision,
     endian: Endian,
 ) -> io::Result<Vec<Float>> {
-    use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
+    let bytes_per = match precision {
+        FloatPrecision::F32 => 4,
+        FloatPrecision::F64 => 8,
+    };
+    let mut buf = vec![0u8; n * bytes_per];
+    r.read_exact(&mut buf)?;
 
     let mut out = Vec::with_capacity(n);
     match (precision, endian) {
         (FloatPrecision::F32, Endian::Little) => {
-            for _ in 0..n {
-                out.push(r.read_f32::<LittleEndian>()? as Float);
+            for chunk in buf.chunks_exact(4) {
+                out.push(f32::from_le_bytes(chunk.try_into().unwrap()) as Float);
             }
         }
         (FloatPrecision::F32, Endian::Big) => {
-            for _ in 0..n {
-                out.push(r.read_f32::<BigEndian>()? as Float);
+            for chunk in buf.chunks_exact(4) {
+                out.push(f32::from_be_bytes(chunk.try_into().unwrap()) as Float);
             }
         }
         (FloatPrecision::F64, Endian::Little) => {
-            for _ in 0..n {
-                out.push(r.read_f64::<LittleEndian>()? as Float);
+            for chunk in buf.chunks_exact(8) {
+                out.push(f64::from_le_bytes(chunk.try_into().unwrap()) as Float);
             }
         }
         (FloatPrecision::F64, Endian::Big) => {
-            for _ in 0..n {
-                out.push(r.read_f64::<BigEndian>()? as Float);
+            for chunk in buf.chunks_exact(8) {
+                out.push(f64::from_be_bytes(chunk.try_into().unwrap()) as Float);
             }
         }
     }

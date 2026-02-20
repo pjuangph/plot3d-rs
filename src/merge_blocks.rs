@@ -5,7 +5,7 @@ use crate::{
     block_face_functions::{
         build_connectivity_graph, find_matching_faces, standardize_block_orientation,
     },
-    connectivity::FaceMatch,
+    face_record::FaceMatch,
     Float,
 };
 

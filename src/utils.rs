@@ -90,12 +90,6 @@ pub fn apply_rotation(p: [Float; 3], rot: [[Float; 3]; 3]) -> [Float; 3] {
     ]
 }
 
-// ---------------------------------------------------------------------------
-// FaceKey – shared identifier type for faces
-// ---------------------------------------------------------------------------
-
-/// Compact identifier for a face: `(block_index, imin, jmin, kmin, imax, jmax, kmax)`.
-pub type FaceKey = (usize, usize, usize, usize, usize, usize, usize);
 #[derive(Copy, Clone, Debug)]
 pub enum Endian {
     Little,

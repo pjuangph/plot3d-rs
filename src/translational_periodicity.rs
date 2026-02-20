@@ -12,8 +12,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use crate::{
     block::Block,
     block_face_functions::{find_bounding_faces, full_face_match_transformed, outer_face_records_to_list, Face},
-    connectivity::{FaceMatch, FaceRecord},
-    utils::{compute_min_gcd, FaceKey},
+    face_record::{FaceKey, FaceMatch, FaceRecord},
+    utils::compute_min_gcd,
     Float,
 };
 

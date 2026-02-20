@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
-use crate::connectivity::FaceMatch;
+use crate::face_record::FaceMatch;
 
 /// Strategy for combining weights when multiple faces connect the same
 /// pair of blocks.
@@ -55,9 +55,9 @@ pub fn build_weighted_graph_from_face_matches(
             continue;
         }
 
-        let di = (m.block1.imax as i64 - m.block1.imin as i64).unsigned_abs().max(1);
-        let dj = (m.block1.jmax as i64 - m.block1.jmin as i64).unsigned_abs().max(1);
-        let dk = (m.block1.kmax as i64 - m.block1.kmin as i64).unsigned_abs().max(1);
+        let di = (m.block1.ih as i64 - m.block1.il as i64).unsigned_abs().max(1);
+        let dj = (m.block1.jh as i64 - m.block1.jl as i64).unsigned_abs().max(1);
+        let dk = (m.block1.kh as i64 - m.block1.kl as i64).unsigned_abs().max(1);
         let w = (di * dj * dk) as i64;
 
         let (a, b) = if i < j { (i, j) } else { (j, i) };

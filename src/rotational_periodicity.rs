@@ -13,11 +13,13 @@ use crate::{
     block::Block,
     block_face_functions::{
         create_face_from_diagonals, match_faces_to_list, outer_face_records_to_list,
-        reduce_blocks, rotate_block, to_radius, to_theta, Face, FaceAxis,
+        reduce_blocks, rotate_block, Face, FaceAxis,
     },
-    connectivity::{get_face_intersection, FaceMatch, FaceRecord, MatchPoint, Orientation},
-    utils::{apply_rotation, compute_min_gcd, distance3, FaceKey},
-    Float, PI,
+    connectivity::get_face_intersection,
+    face_pool::{count_edge_matches, extract_face_edges, FacePool},
+    face_record::{FaceKey, FaceMatch, FaceRecord, MatchPoint, Orientation, PeriodicPair},
+    utils::{apply_rotation, compute_min_gcd, distance3},
+    Float,
 };
 
 /// Rotation matrix for the requested axis.
@@ -60,9 +62,6 @@ pub fn create_rotation_matrix(angle: Float, axis: char) -> [[Float; 3]; 3] {
 pub fn rotate_block_with_matrix(block: &Block, rotation: [[Float; 3]; 3]) -> Block {
     crate::block_face_functions::rotate_block(block, rotation)
 }
-
-/// Exportable description of a periodic face pairing.
-pub type PeriodicPair = FaceMatch;
 
 /// Detect rotational periodicity by reducing grids by the minimum shared GCD,
 /// running the 3-phase matching algorithm, then scaling results back.
@@ -183,7 +182,7 @@ fn rotational_periodicity_core(
                     if !faces_support_direction(face_a, face_b, periodic_direction) {
                         continue;
                     }
-                    if face_a.const_type() != face_b.const_type() || face_a.const_type() == -1 {
+                    if face_a.const_type() == -1 || face_b.const_type() == -1 {
                         continue;
                     }
 
@@ -278,7 +277,7 @@ fn rotational_periodicity_core(
                         non_matching_p2.insert(key_pair);
                         continue;
                     }
-                    if face_a.const_type() != face_b.const_type() || face_a.const_type() == -1 {
+                    if face_a.const_type() == -1 || face_b.const_type() == -1 {
                         non_matching_p2.insert(key_pair);
                         continue;
                     }
@@ -332,6 +331,7 @@ fn rotational_periodicity_core(
                     &face_b,
                     &block_a_rot,
                     block_b,
+                    blocks,
                     &mut seen_pair_keys,
                     &mut periodic_exports,
                     &mut pool,
@@ -409,7 +409,7 @@ fn rotational_periodicity_core(
                         non_matching_p3.insert(key_pair);
                         continue;
                     }
-                    if face_a.const_type() != face_b.const_type() || face_a.const_type() == -1 {
+                    if face_a.const_type() == -1 || face_b.const_type() == -1 {
                         non_matching_p3.insert(key_pair);
                         continue;
                     }
@@ -493,6 +493,7 @@ fn rotational_periodicity_core(
                         &face_b,
                         &block_a_rot,
                         block_b,
+                        blocks,
                         &mut seen_pair_keys,
                         &mut periodic_exports,
                         &mut pool,
@@ -665,11 +666,16 @@ fn is_valid_face(face: &Face, block: &Block) -> bool {
 ///
 /// If the intersection succeeds, records the match in `periodic_exports`, consumes the
 /// originals from `pool`, and adds any split remnants back. Returns `true` on success.
+///
+/// Split remnants from face_a's block are re-created using the original (unrotated)
+/// block so that their vertex coordinates and cylindrical metadata are correct for
+/// subsequent matching passes.
 fn try_split_match(
     face_a: &Face,
     face_b: &Face,
     block_a_rot: &Block,
     block_b: &Block,
+    blocks: &[Block],
     seen_pair_keys: &mut HashSet<(FaceKey, FaceKey)>,
     periodic_exports: &mut Vec<FaceMatch>,
     pool: &mut FacePool,
@@ -700,8 +706,32 @@ fn try_split_match(
         for key in &removal {
             pool.consume(*key);
         }
+
+        // Re-create split remnants from the rotated block using the original
+        // (unrotated) block coordinates. Without this fix, remnants from face_a's
+        // side would carry rotated vertex positions, causing their theta centroids
+        // to be offset by the rotation angle and preventing subsequent matches.
+        let block_idx_a = face_a.block_index().unwrap_or(usize::MAX);
         for s in splits {
-            pool.add_face(s);
+            let bidx = s.block_index().unwrap_or(usize::MAX);
+            if bidx == block_idx_a && bidx < blocks.len() {
+                let mut fixed = create_face_from_diagonals(
+                    &blocks[bidx],
+                    s.imin(),
+                    s.jmin(),
+                    s.kmin(),
+                    s.imax(),
+                    s.jmax(),
+                    s.kmax(),
+                );
+                fixed.set_block_index(bidx);
+                if let Some(id) = s.id() {
+                    fixed.set_id(id);
+                }
+                pool.add_face(fixed);
+            } else {
+                pool.add_face(s);
+            }
         }
         return true;
     }
@@ -800,445 +830,33 @@ pub fn periodicity_check_with_points(
 /// # Returns
 /// `(imin, imax, jmin, jmax, kmin, kmax)` describing the bounding box.
 fn match_bounds(
-    matches: &[crate::connectivity::MatchPoint],
+    matches: &[crate::face_record::MatchPoint],
     first: bool,
 ) -> (usize, usize, usize, usize, usize, usize) {
-    let mut imin = usize::MAX;
-    let mut jmin = usize::MAX;
-    let mut kmin = usize::MAX;
-    let mut imax = 0usize;
-    let mut jmax = 0usize;
-    let mut kmax = 0usize;
+    let mut i_lo = usize::MAX;
+    let mut j_lo = usize::MAX;
+    let mut k_lo = usize::MAX;
+    let mut i_hi = 0usize;
+    let mut j_hi = 0usize;
+    let mut k_hi = 0usize;
     for m in matches {
         let (i, j, k) = if first {
             (m.i1, m.j1, m.k1)
         } else {
             (m.i2, m.j2, m.k2)
         };
-        imin = imin.min(i);
-        jmin = jmin.min(j);
-        kmin = kmin.min(k);
-        imax = imax.max(i);
-        jmax = jmax.max(j);
-        kmax = kmax.max(k);
+        i_lo = i_lo.min(i);
+        j_lo = j_lo.min(j);
+        k_lo = k_lo.min(k);
+        i_hi = i_hi.max(i);
+        j_hi = j_hi.max(j);
+        k_hi = k_hi.max(k);
     }
-    (imin, imax, jmin, jmax, kmin, kmax)
+    (i_lo, i_hi, j_lo, j_hi, k_lo, k_hi)
 }
 
 /// Fixed matching tolerance for node coincidence checks.
 const MATCH_TOL: Float = 1e-6;
-
-// ============================================================================
-// New data structures for the improved algorithm
-// ============================================================================
-
-/// Precomputed cylindrical-coordinate metadata for a single face in the pool.
-#[derive(Clone, Debug)]
-#[allow(dead_code)]
-struct CylindricalFaceInfo {
-    theta_centroid: Float,
-    axial_centroid: Float,
-    radial_centroid: Float,
-    theta_min: Float,
-    theta_max: Float,
-    axial_min: Float,
-    axial_max: Float,
-    radial_min: Float,
-    radial_max: Float,
-}
-
-impl CylindricalFaceInfo {
-    fn from_face(face: &Face, rotation_axis: char) -> Self {
-        let verts = face.vertices();
-        let c = face.centroid();
-        let theta_c = to_theta(c[0], c[1], c[2], rotation_axis);
-        let axial_c = axial_coord(c, rotation_axis);
-        let radial_c = to_radius(c[0], c[1], c[2], rotation_axis);
-
-        let mut theta_min = theta_c;
-        let mut theta_max = theta_c;
-        let mut axial_min = axial_c;
-        let mut axial_max = axial_c;
-        let mut radial_min = radial_c;
-        let mut radial_max = radial_c;
-
-        for v in verts {
-            let th = to_theta(v[0], v[1], v[2], rotation_axis);
-            let ax = axial_coord(*v, rotation_axis);
-            let r = to_radius(v[0], v[1], v[2], rotation_axis);
-            theta_min = theta_min.min(th);
-            theta_max = theta_max.max(th);
-            axial_min = axial_min.min(ax);
-            axial_max = axial_max.max(ax);
-            radial_min = radial_min.min(r);
-            radial_max = radial_max.max(r);
-        }
-
-        Self {
-            theta_centroid: theta_c,
-            axial_centroid: axial_c,
-            radial_centroid: radial_c,
-            theta_min,
-            theta_max,
-            axial_min,
-            axial_max,
-            radial_min,
-            radial_max,
-        }
-    }
-}
-
-/// Extract the axial coordinate (along the rotation axis) from a 3D point.
-#[inline]
-fn axial_coord(p: [Float; 3], rotation_axis: char) -> Float {
-    match rotation_axis.to_ascii_lowercase() {
-        'x' => p[0],
-        'y' => p[1],
-        _ => p[2],
-    }
-}
-
-/// A 1D line of grid points along one boundary of a structured face.
-#[derive(Clone, Debug)]
-struct StructuredEdge {
-    coords: Vec<[Float; 3]>,
-}
-
-/// Result of comparing two structured edges (one rotated).
-#[derive(Debug)]
-enum EdgeMatchResult {
-    None,
-    Full,
-    Partial,
-}
-
-/// Managed pool of outer faces with cylindrical-coordinate lookup.
-struct FacePool {
-    faces: Vec<Face>,
-    cyl_info: Vec<CylindricalFaceInfo>,
-    /// Indices into `faces` sorted by theta_centroid (ascending).
-    theta_sorted: Vec<usize>,
-    consumed: HashSet<FaceKey>,
-    rotation_axis: char,
-}
-
-impl FacePool {
-    fn new(faces: Vec<Face>, rotation_axis: char) -> Self {
-        let cyl_info: Vec<CylindricalFaceInfo> = faces
-            .iter()
-            .map(|f| CylindricalFaceInfo::from_face(f, rotation_axis))
-            .collect();
-        let mut theta_sorted: Vec<usize> = (0..faces.len()).collect();
-        theta_sorted.sort_by(|&a, &b| {
-            cyl_info[a]
-                .theta_centroid
-                .partial_cmp(&cyl_info[b].theta_centroid)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        Self {
-            faces,
-            cyl_info,
-            theta_sorted,
-            consumed: HashSet::new(),
-            rotation_axis,
-        }
-    }
-
-    fn add_face(&mut self, face: Face) {
-        let info = CylindricalFaceInfo::from_face(&face, self.rotation_axis);
-        let idx = self.faces.len();
-        self.faces.push(face);
-        self.cyl_info.push(info);
-        // Insert into sorted list at correct position
-        let theta = self.cyl_info[idx].theta_centroid;
-        let pos = self
-            .theta_sorted
-            .binary_search_by(|&i| {
-                self.cyl_info[i]
-                    .theta_centroid
-                    .partial_cmp(&theta)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .unwrap_or_else(|p| p);
-        self.theta_sorted.insert(pos, idx);
-    }
-
-    fn consume(&mut self, key: FaceKey) {
-        self.consumed.insert(key);
-    }
-
-    fn is_consumed(&self, idx: usize) -> bool {
-        self.consumed.contains(&face_key(&self.faces[idx]))
-    }
-
-    /// Find face indices whose cylindrical extents could overlap with the given
-    /// target theta and matching axial/radial ranges.
-    fn find_candidates(
-        &self,
-        target_theta: Float,
-        axial_range: (Float, Float),
-        radial_range: (Float, Float),
-        theta_tol: Float,
-    ) -> Vec<usize> {
-        let theta_lo = target_theta - theta_tol;
-        let theta_hi = target_theta + theta_tol;
-
-        let mut candidates = Vec::new();
-
-        // Binary search for the starting position in sorted theta
-        let start = self
-            .theta_sorted
-            .binary_search_by(|&i| {
-                self.cyl_info[i]
-                    .theta_centroid
-                    .partial_cmp(&theta_lo)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .unwrap_or_else(|p| p);
-
-        // Scan forward from start
-        for &pool_idx in &self.theta_sorted[start..] {
-            let info = &self.cyl_info[pool_idx];
-            if info.theta_centroid > theta_hi {
-                break;
-            }
-            if self.is_consumed(pool_idx) {
-                continue;
-            }
-            // Check axial overlap
-            if info.axial_max < axial_range.0 - 0.1 * (axial_range.1 - axial_range.0).abs().max(1e-12)
-                || info.axial_min > axial_range.1 + 0.1 * (axial_range.1 - axial_range.0).abs().max(1e-12)
-            {
-                continue;
-            }
-            // Check radial overlap
-            if info.radial_max < radial_range.0 - 0.1 * (radial_range.1 - radial_range.0).abs().max(1e-12)
-                || info.radial_min > radial_range.1 + 0.1 * (radial_range.1 - radial_range.0).abs().max(1e-12)
-            {
-                continue;
-            }
-            candidates.push(pool_idx);
-        }
-
-        // Handle theta wrapping at ±π boundary
-        // If theta_lo < -π, also search near +π end
-        if theta_lo < -PI {
-            let wrapped_lo = theta_lo + 2.0 * PI;
-            let wrapped_hi = PI; // search from wrapped_lo to +π
-            let ws = self
-                .theta_sorted
-                .binary_search_by(|&i| {
-                    self.cyl_info[i]
-                        .theta_centroid
-                        .partial_cmp(&wrapped_lo)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .unwrap_or_else(|p| p);
-            for &pool_idx in &self.theta_sorted[ws..] {
-                let info = &self.cyl_info[pool_idx];
-                if info.theta_centroid > wrapped_hi {
-                    break;
-                }
-                if self.is_consumed(pool_idx) {
-                    continue;
-                }
-                if info.axial_max < axial_range.0 - 0.1 * (axial_range.1 - axial_range.0).abs().max(1e-12)
-                    || info.axial_min > axial_range.1 + 0.1 * (axial_range.1 - axial_range.0).abs().max(1e-12)
-                {
-                    continue;
-                }
-                if info.radial_max < radial_range.0 - 0.1 * (radial_range.1 - radial_range.0).abs().max(1e-12)
-                    || info.radial_min > radial_range.1 + 0.1 * (radial_range.1 - radial_range.0).abs().max(1e-12)
-                {
-                    continue;
-                }
-                candidates.push(pool_idx);
-            }
-        }
-        // If theta_hi > π, also search near -π end
-        if theta_hi > PI {
-            let wrapped_hi = theta_hi - 2.0 * PI;
-            let wrapped_lo = -PI;
-            let ws = self
-                .theta_sorted
-                .binary_search_by(|&i| {
-                    self.cyl_info[i]
-                        .theta_centroid
-                        .partial_cmp(&wrapped_lo)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .unwrap_or_else(|p| p);
-            for &pool_idx in &self.theta_sorted[ws..] {
-                let info = &self.cyl_info[pool_idx];
-                if info.theta_centroid > wrapped_hi {
-                    break;
-                }
-                if self.is_consumed(pool_idx) {
-                    continue;
-                }
-                if info.axial_max < axial_range.0 - 0.1 * (axial_range.1 - axial_range.0).abs().max(1e-12)
-                    || info.axial_min > axial_range.1 + 0.1 * (axial_range.1 - axial_range.0).abs().max(1e-12)
-                {
-                    continue;
-                }
-                if info.radial_max < radial_range.0 - 0.1 * (radial_range.1 - radial_range.0).abs().max(1e-12)
-                    || info.radial_min > radial_range.1 + 0.1 * (radial_range.1 - radial_range.0).abs().max(1e-12)
-                {
-                    continue;
-                }
-                candidates.push(pool_idx);
-            }
-        }
-
-        candidates
-    }
-
-    /// Find candidates for a face at the given index by searching both +angle and -angle
-    /// theta targets, deduplicating the results.
-    fn find_rotational_candidates(
-        &self,
-        idx: usize,
-        rotation_angle: Float,
-        theta_tol: Float,
-    ) -> Vec<usize> {
-        let info = &self.cyl_info[idx];
-        let target_fwd = info.theta_centroid + rotation_angle;
-        let target_rev = info.theta_centroid - rotation_angle;
-        let axial_range = (info.axial_min, info.axial_max);
-        let radial_range = (info.radial_min, info.radial_max);
-        let mut candidates = self.find_candidates(target_fwd, axial_range, radial_range, theta_tol);
-        candidates.extend(self.find_candidates(target_rev, axial_range, radial_range, theta_tol));
-        candidates.sort_unstable();
-        candidates.dedup();
-        candidates
-    }
-
-    /// Collect all unconsumed face indices.
-    fn active_indices(&self) -> Vec<usize> {
-        (0..self.faces.len())
-            .filter(|&i| !self.is_consumed(i))
-            .collect()
-    }
-
-    /// Drain all unconsumed faces as FaceRecords.
-    fn drain_as_records(&self) -> Vec<FaceRecord> {
-        self.faces
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !self.is_consumed(*i))
-            .map(|(_, f)| f.to_record())
-            .collect()
-    }
-}
-
-// ============================================================================
-// Edge extraction and matching
-// ============================================================================
-
-/// Extract the 4 boundary edges of a structured face from its parent block.
-fn extract_face_edges(face: &Face, block: &Block) -> Vec<StructuredEdge> {
-    let axis = match face.const_axis() {
-        Some(a) => a,
-        None => return Vec::new(),
-    };
-    let mut edges = Vec::with_capacity(4);
-
-    match axis {
-        FaceAxis::I => {
-            let ic = face.imin();
-            edges.push(build_edge(block, (face.kmin()..=face.kmax()).map(|k| (ic, face.jmin(), k)).collect()));
-            edges.push(build_edge(block, (face.kmin()..=face.kmax()).map(|k| (ic, face.jmax(), k)).collect()));
-            edges.push(build_edge(block, (face.jmin()..=face.jmax()).map(|j| (ic, j, face.kmin())).collect()));
-            edges.push(build_edge(block, (face.jmin()..=face.jmax()).map(|j| (ic, j, face.kmax())).collect()));
-        }
-        FaceAxis::J => {
-            let jc = face.jmin();
-            edges.push(build_edge(block, (face.kmin()..=face.kmax()).map(|k| (face.imin(), jc, k)).collect()));
-            edges.push(build_edge(block, (face.kmin()..=face.kmax()).map(|k| (face.imax(), jc, k)).collect()));
-            edges.push(build_edge(block, (face.imin()..=face.imax()).map(|i| (i, jc, face.kmin())).collect()));
-            edges.push(build_edge(block, (face.imin()..=face.imax()).map(|i| (i, jc, face.kmax())).collect()));
-        }
-        FaceAxis::K => {
-            let kc = face.kmin();
-            edges.push(build_edge(block, (face.jmin()..=face.jmax()).map(|j| (face.imin(), j, kc)).collect()));
-            edges.push(build_edge(block, (face.jmin()..=face.jmax()).map(|j| (face.imax(), j, kc)).collect()));
-            edges.push(build_edge(block, (face.imin()..=face.imax()).map(|i| (i, face.jmin(), kc)).collect()));
-            edges.push(build_edge(block, (face.imin()..=face.imax()).map(|i| (i, face.jmax(), kc)).collect()));
-        }
-    }
-    edges
-}
-
-fn build_edge(block: &Block, ijk_list: Vec<(usize, usize, usize)>) -> StructuredEdge {
-    let coords: Vec<[Float; 3]> = ijk_list
-        .iter()
-        .map(|&(i, j, k)| {
-            let (x, y, z) = block.xyz(i, j, k);
-            [x, y, z]
-        })
-        .collect();
-    StructuredEdge { coords }
-}
-
-/// Compare two structured edges. Points of edge_a are rotated before comparison.
-/// Returns Full if all points match, Partial if >=2 contiguous match, None otherwise.
-fn match_edges(
-    edge_a: &StructuredEdge,
-    edge_b: &StructuredEdge,
-    rotation_matrix: [[Float; 3]; 3],
-    tol: Float,
-) -> EdgeMatchResult {
-    if edge_a.coords.is_empty() || edge_b.coords.is_empty() {
-        return EdgeMatchResult::None;
-    }
-
-    let rotated_a: Vec<[Float; 3]> = edge_a
-        .coords
-        .iter()
-        .map(|p| apply_rotation(*p, rotation_matrix))
-        .collect();
-
-    // Find longest contiguous run of point-to-point matches
-    let mut best_len = 0usize;
-    let mut cur_len = 0usize;
-
-    for ra in &rotated_a {
-        let has_match = edge_b.coords.iter().any(|pb| distance3(*ra, *pb) <= tol);
-        if has_match {
-            cur_len += 1;
-            best_len = best_len.max(cur_len);
-        } else {
-            cur_len = 0;
-        }
-    }
-
-    if best_len < 2 {
-        EdgeMatchResult::None
-    } else if best_len == rotated_a.len() && best_len == edge_b.coords.len() {
-        EdgeMatchResult::Full
-    } else {
-        EdgeMatchResult::Partial
-    }
-}
-
-/// Count how many edge pairs between two faces have Full or Partial matches.
-fn count_edge_matches(
-    edges_a: &[StructuredEdge],
-    edges_b: &[StructuredEdge],
-    rotation_matrix: [[Float; 3]; 3],
-    tol: Float,
-) -> usize {
-    let mut count = 0;
-    for ea in edges_a {
-        for eb in edges_b {
-            match match_edges(ea, eb, rotation_matrix, tol) {
-                EdgeMatchResult::None => {}
-                _ => count += 1,
-            }
-        }
-    }
-    count
-}
 
 // ============================================================================
 // Orientation inference from match points
@@ -1547,9 +1165,9 @@ pub fn verify_periodicity(
         }
 
         // Slow path: no orientation — enumerate corner permutations with rotations
-        let i_vals = [b2.imin, b2.imax];
-        let j_vals = [b2.jmin, b2.jmax];
-        let k_vals = [b2.kmin, b2.kmax];
+        let i_vals = [b2.il, b2.ih];
+        let j_vals = [b2.jl, b2.jh];
+        let k_vals = [b2.kl, b2.kh];
 
         let mut unique_corners: Vec<(usize, usize, usize)> = Vec::new();
         {
@@ -1578,12 +1196,12 @@ pub fn verify_periodicity(
             let block1_rotated = &rotated_blocks[b1.block_index];
 
             // Block1 rotated diagonal coordinates
-            let (x1_l, y1_l, z1_l) = block1_rotated.xyz(b1.imin, b1.jmin, b1.kmin);
-            let (x1_u, y1_u, z1_u) = block1_rotated.xyz(b1.imax, b1.jmax, b1.kmax);
+            let (x1_l, y1_l, z1_l) = block1_rotated.xyz(b1.il, b1.jl, b1.kl);
+            let (x1_u, y1_u, z1_u) = block1_rotated.xyz(b1.ih, b1.jh, b1.kh);
 
             // Check stored diagonal first
-            let (x2_l, y2_l, z2_l) = block2.xyz(b2.imin, b2.jmin, b2.kmin);
-            let (x2_u, y2_u, z2_u) = block2.xyz(b2.imax, b2.jmax, b2.kmax);
+            let (x2_l, y2_l, z2_l) = block2.xyz(b2.il, b2.jl, b2.kl);
+            let (x2_u, y2_u, z2_u) = block2.xyz(b2.ih, b2.jh, b2.kh);
 
             let d_lower = ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
             let d_upper = ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
@@ -1623,12 +1241,12 @@ pub fn verify_periodicity(
 
                     if dl < tol && du < tol {
                         let mut corrected = face_matches[idx].clone();
-                        corrected.block2.imin = il * gcd_to_use;
-                        corrected.block2.jmin = jl * gcd_to_use;
-                        corrected.block2.kmin = kl * gcd_to_use;
-                        corrected.block2.imax = iu * gcd_to_use;
-                        corrected.block2.jmax = ju * gcd_to_use;
-                        corrected.block2.kmax = ku * gcd_to_use;
+                        corrected.block2.il = il * gcd_to_use;
+                        corrected.block2.jl = jl * gcd_to_use;
+                        corrected.block2.kl = kl * gcd_to_use;
+                        corrected.block2.ih = iu * gcd_to_use;
+                        corrected.block2.jh = ju * gcd_to_use;
+                        corrected.block2.kh = ku * gcd_to_use;
                         verified.push(corrected);
                         found = true;
                         break;
@@ -1648,14 +1266,14 @@ pub fn verify_periodicity(
             eprintln!(
                 "  block1 (block_index={}): lower=({},{},{}) upper=({},{},{})",
                 face_matches[idx].block1.block_index,
-                face_matches[idx].block1.imin, face_matches[idx].block1.jmin, face_matches[idx].block1.kmin,
-                face_matches[idx].block1.imax, face_matches[idx].block1.jmax, face_matches[idx].block1.kmax,
+                face_matches[idx].block1.il, face_matches[idx].block1.jl, face_matches[idx].block1.kl,
+                face_matches[idx].block1.ih, face_matches[idx].block1.jh, face_matches[idx].block1.kh,
             );
             eprintln!(
                 "  block2 (block_index={}): lower=({},{},{}) upper=({},{},{})",
                 face_matches[idx].block2.block_index,
-                face_matches[idx].block2.imin, face_matches[idx].block2.jmin, face_matches[idx].block2.kmin,
-                face_matches[idx].block2.imax, face_matches[idx].block2.jmax, face_matches[idx].block2.kmax,
+                face_matches[idx].block2.il, face_matches[idx].block2.jl, face_matches[idx].block2.kl,
+                face_matches[idx].block2.ih, face_matches[idx].block2.jh, face_matches[idx].block2.kh,
             );
             eprintln!(
                 "  Closest rotated block1 corner dist to block2 lower: {:.6e}",

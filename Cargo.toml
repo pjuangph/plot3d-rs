@@ -27,3 +27,4 @@ metis-partition = ["metis"]
 
 [dev-dependencies]
 tempfile = "3.10"
+serde_json = "1.0"
