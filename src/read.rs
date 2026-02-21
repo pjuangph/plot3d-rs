@@ -64,10 +64,7 @@ fn next_parse<T: std::str::FromStr>(
 }
 
 /// Parse exactly `n` float tokens from the iterator.
-fn parse_n_floats(
-    tokens: &mut std::str::SplitWhitespace<'_>,
-    n: usize,
-) -> io::Result<Vec<Float>> {
+fn parse_n_floats(tokens: &mut std::str::SplitWhitespace<'_>, n: usize) -> io::Result<Vec<Float>> {
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         let t = tokens

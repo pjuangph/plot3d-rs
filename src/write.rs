@@ -39,7 +39,11 @@ fn write_ascii(path: &str, blocks: &[Block], precision: FloatPrecision) -> std::
     Ok(())
 }
 
-fn write_var_ascii(w: &mut impl Write, v: &[Float], precision: FloatPrecision) -> std::io::Result<()> {
+fn write_var_ascii(
+    w: &mut impl Write,
+    v: &[Float],
+    precision: FloatPrecision,
+) -> std::io::Result<()> {
     let mut col = 0usize;
     for val in v {
         match precision {

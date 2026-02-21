@@ -2,9 +2,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::{
     block::Block,
-    block_face_functions::{
-        build_connectivity_graph, find_matching_faces, standardize_block_orientation,
-    },
+    block_analysis::{build_connectivity_graph, standardize_block_orientation},
+    block_face_functions::find_matching_faces,
     face_record::FaceMatch,
     Float,
 };
@@ -91,7 +90,11 @@ pub fn combine_2_blocks_mixed_pairing(block1: &Block, block2: &Block, tol: Float
 /// greedy, mirroring the original Python helper: once a pair is merged it is
 /// replaced by the new block and the pass restarts until no further reductions
 /// occur or `max_tries` is hit.
-pub fn combine_blocks_mixed_pairs(blocks: &[Block], tol: Float, max_tries: usize) -> CombinedBlocks {
+pub fn combine_blocks_mixed_pairs(
+    blocks: &[Block],
+    tol: Float,
+    max_tries: usize,
+) -> CombinedBlocks {
     let mut merged_blocks: Vec<Block> = blocks.to_vec();
     let mut tries = 0usize;
 
@@ -213,8 +216,7 @@ pub fn combine_nxnxn_cubes_mixed_pairs(
                 sorted_group.iter().map(|&i| blocks[i].clone()).collect();
             // Follow Python default: attempt several passes (4) when merging
             // a candidate group, instead of tying tries to `cube_size`.
-            let (partial_merges, local_indices) =
-                combine_blocks_mixed_pairs(&group_blocks, tol, 4);
+            let (partial_merges, local_indices) = combine_blocks_mixed_pairs(&group_blocks, tol, 4);
 
             let index_mapping: HashMap<usize, usize> = sorted_group
                 .iter()

@@ -27,18 +27,21 @@ pub type Float = f64;
 #[cfg(feature = "f32")]
 pub type Float = f32;
 
+#[cfg(feature = "f32")]
+pub use std::f32::consts::PI;
 /// Pi constant matching the active [`Float`] precision.
 #[cfg(not(feature = "f32"))]
 pub use std::f64::consts::PI;
-#[cfg(feature = "f32")]
-pub use std::f32::consts::PI;
 
 pub mod block;
+pub mod block_analysis;
 pub mod block_face_functions;
 pub mod connectivity;
+pub mod cylindrical;
 pub mod differencing;
 pub mod face_pool;
 pub mod face_record;
+pub(crate) mod geometry;
 pub mod graph;
 pub mod merge_blocks;
 pub mod point_match;
@@ -50,15 +53,20 @@ pub mod utils;
 pub mod write;
 
 pub use block::{Block, FaceData};
+pub use block_analysis::{
+    block_connection_matrix, build_connectivity_graph, calculate_outward_normals,
+    check_collinearity, find_bounding_faces, find_closest_block, get_outer_bounds,
+    standardize_block_orientation, BlockConnectionOptions,
+};
 pub use block_face_functions::{
-    create_face_from_diagonals, find_angular_bounding_faces, full_face_match,
-    full_face_match_transformed, get_outer_faces, reduce_blocks, rotate_block, to_radius, to_theta,
-    Face,
+    create_face_from_diagonals, full_face_match, full_face_match_transformed, get_outer_faces,
+    reduce_blocks, rotate_block, Face,
 };
 pub use connectivity::{
     connectivity, connectivity_fast, face_matches_to_dict, get_face_intersection,
     verify_connectivity,
 };
+pub use cylindrical::{find_angular_bounding_faces, to_radius, to_theta};
 pub use differencing::{find_edges, find_face_edges, BlockDiff, FaceDiff};
 pub use face_record::{
     FaceKey, FaceMatch, FaceMatchPrinter, FaceRecord, FaceRecordTraits, MatchPoint, Orientation,

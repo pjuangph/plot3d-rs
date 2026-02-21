@@ -100,8 +100,13 @@ fn full_pipeline() {
 
     // Verify periodicity
     println!("\nVerifying periodic matches...");
-    let (verified, mismatched) =
-        verify_periodicity(&blocks, &periodic_faces, rotation_angle_rad, ROTATION_AXIS, 1e-4);
+    let (verified, mismatched) = verify_periodicity(
+        &blocks,
+        &periodic_faces,
+        rotation_angle_rad,
+        ROTATION_AXIS,
+        1e-4,
+    );
     println!(
         "  {} verified, {} mismatched",
         verified.len(),

@@ -3,8 +3,8 @@ use std::path::Path;
 use plot3d::write::{BinaryFormat as WriteBinaryFormat, FloatPrecision as WriteFloatPrecision};
 use plot3d::{
     block_face_functions, combine_nxnxn_cubes_mixed_pairs, connectivity_fast, read_plot3d_ascii,
-    read_plot3d_binary, write_plot3d, BinaryFormat as ReadBinaryFormat, Block, Endian,
-    FloatPrecision as ReadFloatPrecision, Float,
+    read_plot3d_binary, write_plot3d, BinaryFormat as ReadBinaryFormat, Block, Endian, Float,
+    FloatPrecision as ReadFloatPrecision,
 };
 
 #[test]

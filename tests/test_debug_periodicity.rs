@@ -46,10 +46,7 @@ fn diagnostic_cases() -> Vec<DiagnosticCase> {
         DiagnosticCase {
             name: "Pair 2 (SPLIT) Block 4115 J-const <-> Block 4561 + Block 4565 I-const",
             face_a: (4115, 0, 108, 0, 24, 108, 48),
-            faces_b: vec![
-                (4561, 0, 0, 0, 0, 24, 24),
-                (4565, 0, 0, 0, 0, 24, 24),
-            ],
+            faces_b: vec![(4561, 0, 0, 0, 0, 24, 24), (4565, 0, 0, 0, 0, 24, 24)],
         },
         // Pair 3: Missing — Block 3994 (remnant I=12, K=36..60) <-> Block 3664 (K=124)
         DiagnosticCase {
@@ -79,8 +76,16 @@ fn diagnose_single_pair(
 
     println!("\n  --- {} ---", label);
 
-    assert!(blk_a_idx < blocks.len(), "Block A {} out of range", blk_a_idx);
-    assert!(blk_b_idx < blocks.len(), "Block B {} out of range", blk_b_idx);
+    assert!(
+        blk_a_idx < blocks.len(),
+        "Block A {} out of range",
+        blk_a_idx
+    );
+    assert!(
+        blk_b_idx < blocks.len(),
+        "Block B {} out of range",
+        blk_b_idx
+    );
 
     let block_a = &blocks[blk_a_idx];
     let block_b = &blocks[blk_b_idx];
@@ -95,18 +100,30 @@ fn diagnose_single_pair(
     );
 
     // Step 2: Create faces
-    let face_a = create_face_from_diagonals(block_a, a_imin, a_jmin, a_kmin, a_imax, a_jmax, a_kmax);
-    let face_b = create_face_from_diagonals(block_b, b_imin, b_jmin, b_kmin, b_imax, b_jmax, b_kmax);
+    let face_a =
+        create_face_from_diagonals(block_a, a_imin, a_jmin, a_kmin, a_imax, a_jmax, a_kmax);
+    let face_b =
+        create_face_from_diagonals(block_b, b_imin, b_jmin, b_kmin, b_imax, b_jmax, b_kmax);
 
     println!(
         "  Face A: diag=({},{},{})..({},{},{}), verts={}, const_type={}",
-        a_imin, a_jmin, a_kmin, a_imax, a_jmax, a_kmax,
+        a_imin,
+        a_jmin,
+        a_kmin,
+        a_imax,
+        a_jmax,
+        a_kmax,
         face_a.vertices().len(),
         face_a.const_type()
     );
     println!(
         "  Face B: diag=({},{},{})..({},{},{}), verts={}, const_type={}",
-        b_imin, b_jmin, b_kmin, b_imax, b_jmax, b_kmax,
+        b_imin,
+        b_jmin,
+        b_kmin,
+        b_imax,
+        b_jmax,
+        b_kmax,
         face_b.vertices().len(),
         face_b.const_type()
     );
@@ -117,7 +134,10 @@ fn diagnose_single_pair(
     let support_k = faces_support_direction(&face_a, &face_b, "k");
     let support_any = faces_support_any(&face_a, &face_b);
 
-    println!("  faces_support: any={} i={} j={} k={}", support_any, support_i, support_j, support_k);
+    println!(
+        "  faces_support: any={} i={} j={} k={}",
+        support_any, support_i, support_j, support_k
+    );
 
     if !support_any {
         println!("  FAIL: faces_support_any=false, algorithm skips this pair");
@@ -128,12 +148,38 @@ fn diagnose_single_pair(
     let verts_a = face_a.vertices();
     let verts_b = face_b.vertices();
 
-    let theta_a: Vec<Float> = verts_a.iter().map(|v| to_theta(v[0], v[1], v[2], ROTATION_AXIS)).collect();
-    let theta_b: Vec<Float> = verts_b.iter().map(|v| to_theta(v[0], v[1], v[2], ROTATION_AXIS)).collect();
-    let radius_a: Vec<Float> = verts_a.iter().map(|v| to_radius(v[0], v[1], v[2], ROTATION_AXIS)).collect();
-    let radius_b: Vec<Float> = verts_b.iter().map(|v| to_radius(v[0], v[1], v[2], ROTATION_AXIS)).collect();
-    let axial_a: Vec<Float> = verts_a.iter().map(|v| match ROTATION_AXIS { 'x' => v[0], 'y' => v[1], _ => v[2] }).collect();
-    let axial_b: Vec<Float> = verts_b.iter().map(|v| match ROTATION_AXIS { 'x' => v[0], 'y' => v[1], _ => v[2] }).collect();
+    let theta_a: Vec<Float> = verts_a
+        .iter()
+        .map(|v| to_theta(v[0], v[1], v[2], ROTATION_AXIS))
+        .collect();
+    let theta_b: Vec<Float> = verts_b
+        .iter()
+        .map(|v| to_theta(v[0], v[1], v[2], ROTATION_AXIS))
+        .collect();
+    let radius_a: Vec<Float> = verts_a
+        .iter()
+        .map(|v| to_radius(v[0], v[1], v[2], ROTATION_AXIS))
+        .collect();
+    let radius_b: Vec<Float> = verts_b
+        .iter()
+        .map(|v| to_radius(v[0], v[1], v[2], ROTATION_AXIS))
+        .collect();
+    let axial_a: Vec<Float> = verts_a
+        .iter()
+        .map(|v| match ROTATION_AXIS {
+            'x' => v[0],
+            'y' => v[1],
+            _ => v[2],
+        })
+        .collect();
+    let axial_b: Vec<Float> = verts_b
+        .iter()
+        .map(|v| match ROTATION_AXIS {
+            'x' => v[0],
+            'y' => v[1],
+            _ => v[2],
+        })
+        .collect();
 
     let mean = |v: &[Float]| v.iter().sum::<Float>() / v.len() as Float;
     let min_f = |v: &[Float]| v.iter().cloned().fold(Float::INFINITY, Float::min);
@@ -145,19 +191,32 @@ fn diagnose_single_pair(
 
     println!(
         "  Theta: A_mean={:.4} B_mean={:.4} diff={:.4}rad={:.2}deg (expect {:.4}rad={:.2}deg)",
-        theta_a_mean, theta_b_mean, theta_diff, theta_diff.to_degrees(),
-        rotation_angle_rad, rotation_angle_deg
+        theta_a_mean,
+        theta_b_mean,
+        theta_diff,
+        theta_diff.to_degrees(),
+        rotation_angle_rad,
+        rotation_angle_deg
     );
 
-    let radial_overlap = min_f(&radius_a) <= max_f(&radius_b) && min_f(&radius_b) <= max_f(&radius_a);
+    let radial_overlap =
+        min_f(&radius_a) <= max_f(&radius_b) && min_f(&radius_b) <= max_f(&radius_a);
     let axial_overlap = min_f(&axial_a) <= max_f(&axial_b) && min_f(&axial_b) <= max_f(&axial_a);
     println!(
         "  Radial: A=[{:.4},{:.4}] B=[{:.4},{:.4}] overlap={}",
-        min_f(&radius_a), max_f(&radius_a), min_f(&radius_b), max_f(&radius_b), radial_overlap
+        min_f(&radius_a),
+        max_f(&radius_a),
+        min_f(&radius_b),
+        max_f(&radius_b),
+        radial_overlap
     );
     println!(
         "  Axial:  A=[{:.4},{:.4}] B=[{:.4},{:.4}] overlap={}",
-        min_f(&axial_a), max_f(&axial_a), min_f(&axial_b), max_f(&axial_b), axial_overlap
+        min_f(&axial_a),
+        max_f(&axial_a),
+        min_f(&axial_b),
+        max_f(&axial_b),
+        axial_overlap
     );
 
     // Step 5: Phase 1 full-face match
@@ -167,48 +226,77 @@ fn diagnose_single_pair(
     let match_fwd = full_face_match_transformed(&face_a, &face_b, transform_fwd, MATCH_TOL);
     let match_rev = full_face_match_transformed(&face_a, &face_b, transform_rev, MATCH_TOL);
 
-    println!("  Phase 1 full-face: fwd={:?} rev={:?}", match_fwd.is_some(), match_rev.is_some());
+    println!(
+        "  Phase 1 full-face: fwd={:?} rev={:?}",
+        match_fwd.is_some(),
+        match_rev.is_some()
+    );
 
     // Step 6: Phase 2 corner pre-check
-    let corners_fwd = count_rotated_corners_on_face(&face_a, &face_b, block_b, rot_forward, MATCH_TOL);
-    let corners_rev = count_rotated_corners_on_face(&face_a, &face_b, block_b, rot_backward, MATCH_TOL);
+    let corners_fwd =
+        count_rotated_corners_on_face(&face_a, &face_b, block_b, rot_forward, MATCH_TOL);
+    let corners_rev =
+        count_rotated_corners_on_face(&face_a, &face_b, block_b, rot_backward, MATCH_TOL);
 
-    println!("  Phase 2 corners: fwd={}/4 rev={}/4", corners_fwd, corners_rev);
+    println!(
+        "  Phase 2 corners: fwd={}/4 rev={}/4",
+        corners_fwd, corners_rev
+    );
 
     if corners_fwd < 2 && corners_rev < 2 {
         // Try relaxed tolerances
         for tol_factor in [10.0, 100.0, 1000.0] {
             let relaxed_tol = MATCH_TOL * tol_factor;
-            let c_fwd = count_rotated_corners_on_face(&face_a, &face_b, block_b, rot_forward, relaxed_tol);
-            let c_rev = count_rotated_corners_on_face(&face_a, &face_b, block_b, rot_backward, relaxed_tol);
+            let c_fwd =
+                count_rotated_corners_on_face(&face_a, &face_b, block_b, rot_forward, relaxed_tol);
+            let c_rev =
+                count_rotated_corners_on_face(&face_a, &face_b, block_b, rot_backward, relaxed_tol);
             if c_fwd > corners_fwd || c_rev > corners_rev {
-                println!("    (relaxed tol={:.0e}): fwd={} rev={}", relaxed_tol, c_fwd, c_rev);
+                println!(
+                    "    (relaxed tol={:.0e}): fwd={} rev={}",
+                    relaxed_tol, c_fwd, c_rev
+                );
             }
         }
         // Also try reversed direction: face_b corners on face_a
-        let corners_rev_ba = count_rotated_corners_on_face(&face_b, &face_a, block_a, rot_forward, MATCH_TOL);
-        let corners_fwd_ba = count_rotated_corners_on_face(&face_b, &face_a, block_a, rot_backward, MATCH_TOL);
-        println!("  Phase 2 corners REVERSED (B->A): fwd={}/4 rev={}/4", corners_fwd_ba, corners_rev_ba);
+        let corners_rev_ba =
+            count_rotated_corners_on_face(&face_b, &face_a, block_a, rot_forward, MATCH_TOL);
+        let corners_fwd_ba =
+            count_rotated_corners_on_face(&face_b, &face_a, block_a, rot_backward, MATCH_TOL);
+        println!(
+            "  Phase 2 corners REVERSED (B->A): fwd={}/4 rev={}/4",
+            corners_fwd_ba, corners_rev_ba
+        );
     }
 
     // Step 7: Phase 2 intersection
     let block_a_rot_fwd = rotate_block(block_a, rot_forward);
     let block_a_rot_rev = rotate_block(block_a, rot_backward);
 
-    let result_fwd = periodicity_check_with_points(&face_a, &face_b, &block_a_rot_fwd, block_b, MATCH_TOL);
-    let result_rev = periodicity_check_with_points(&face_a, &face_b, &block_a_rot_rev, block_b, MATCH_TOL);
+    let result_fwd =
+        periodicity_check_with_points(&face_a, &face_b, &block_a_rot_fwd, block_b, MATCH_TOL);
+    let result_rev =
+        periodicity_check_with_points(&face_a, &face_b, &block_a_rot_rev, block_b, MATCH_TOL);
 
     match &result_fwd {
         Some((faces, points, splits)) => {
-            println!("  Phase 2 intersection fwd: {} face pair(s), {} match pts, {} splits",
-                faces.len(), points.len(), splits.len());
+            println!(
+                "  Phase 2 intersection fwd: {} face pair(s), {} match pts, {} splits",
+                faces.len(),
+                points.len(),
+                splits.len()
+            );
         }
         None => println!("  Phase 2 intersection fwd: none"),
     }
     match &result_rev {
         Some((faces, points, splits)) => {
-            println!("  Phase 2 intersection rev: {} face pair(s), {} match pts, {} splits",
-                faces.len(), points.len(), splits.len());
+            println!(
+                "  Phase 2 intersection rev: {} face pair(s), {} match pts, {} splits",
+                faces.len(),
+                points.len(),
+                splits.len()
+            );
         }
         None => println!("  Phase 2 intersection rev: none"),
     }
@@ -217,19 +305,29 @@ fn diagnose_single_pair(
     if result_fwd.is_none() && result_rev.is_none() {
         let block_b_rot_fwd = rotate_block(block_b, rot_forward);
         let block_b_rot_rev = rotate_block(block_b, rot_backward);
-        let result_ba_fwd = periodicity_check_with_points(&face_b, &face_a, &block_b_rot_fwd, block_a, MATCH_TOL);
-        let result_ba_rev = periodicity_check_with_points(&face_b, &face_a, &block_b_rot_rev, block_a, MATCH_TOL);
+        let result_ba_fwd =
+            periodicity_check_with_points(&face_b, &face_a, &block_b_rot_fwd, block_a, MATCH_TOL);
+        let result_ba_rev =
+            periodicity_check_with_points(&face_b, &face_a, &block_b_rot_rev, block_a, MATCH_TOL);
         match &result_ba_fwd {
             Some((faces, points, splits)) => {
-                println!("  Phase 2 intersection REVERSED fwd: {} face pair(s), {} match pts, {} splits",
-                    faces.len(), points.len(), splits.len());
+                println!(
+                    "  Phase 2 intersection REVERSED fwd: {} face pair(s), {} match pts, {} splits",
+                    faces.len(),
+                    points.len(),
+                    splits.len()
+                );
             }
             None => {}
         }
         match &result_ba_rev {
             Some((faces, points, splits)) => {
-                println!("  Phase 2 intersection REVERSED rev: {} face pair(s), {} match pts, {} splits",
-                    faces.len(), points.len(), splits.len());
+                println!(
+                    "  Phase 2 intersection REVERSED rev: {} face pair(s), {} match pts, {} splits",
+                    faces.len(),
+                    points.len(),
+                    splits.len()
+                );
             }
             None => {}
         }
@@ -253,19 +351,34 @@ fn diagnose_single_pair(
         for rv in &rotated_verts {
             let mut closest = Float::INFINITY;
             for bv in verts_b {
-                let d = ((rv[0] - bv[0]).powi(2) + (rv[1] - bv[1]).powi(2) + (rv[2] - bv[2]).powi(2)).sqrt();
-                if d < closest { closest = d; }
+                let d =
+                    ((rv[0] - bv[0]).powi(2) + (rv[1] - bv[1]).powi(2) + (rv[2] - bv[2]).powi(2))
+                        .sqrt();
+                if d < closest {
+                    closest = d;
+                }
             }
-            if closest < min_dist { min_dist = closest; }
-            if closest > max_min_dist { max_min_dist = closest; }
+            if closest < min_dist {
+                min_dist = closest;
+            }
+            if closest > max_min_dist {
+                max_min_dist = closest;
+            }
             sum_min_dist += closest;
-            if closest < MATCH_TOL { within_tol += 1; }
+            if closest < MATCH_TOL {
+                within_tol += 1;
+            }
         }
 
         let avg_min_dist = sum_min_dist / rotated_verts.len() as Float;
         println!(
             "  {} rotation: min={:.2e} max_min={:.2e} avg={:.2e} within_tol={}/{}",
-            dir_label, min_dist, max_min_dist, avg_min_dist, within_tol, rotated_verts.len()
+            dir_label,
+            min_dist,
+            max_min_dist,
+            avg_min_dist,
+            within_tol,
+            rotated_verts.len()
         );
     }
 
@@ -333,7 +446,12 @@ fn diagnose_face_pair() {
             let label = if case.faces_b.len() == 1 {
                 format!("Block {} <-> Block {}", case.face_a.0, spec_b.0)
             } else {
-                format!("Block {} <-> Block {} (sub-face {})", case.face_a.0, spec_b.0, bi + 1)
+                format!(
+                    "Block {} <-> Block {} (sub-face {})",
+                    case.face_a.0,
+                    spec_b.0,
+                    bi + 1
+                )
             };
 
             let ok = diagnose_single_pair(
@@ -348,7 +466,9 @@ fn diagnose_face_pair() {
             );
 
             total_sub += 1;
-            if ok { total_pass += 1; }
+            if ok {
+                total_pass += 1;
+            }
         }
     }
 

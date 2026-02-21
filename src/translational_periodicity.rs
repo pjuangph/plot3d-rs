@@ -1,4 +1,11 @@
-//! Translational periodicity utilities that mirror the original Python implementation.
+//! Translational periodicity detection for structured multi-block grids.
+//!
+//! Identifies periodic face pairs along a translational axis (x, y, or z).
+//! The algorithm uses [`find_bounding_faces`] to collect faces on the min/max
+//! extremes of the specified axis, then matches them using
+//! `full_face_match_transformed` with a translation offset.
+//!
+//! [`find_bounding_faces`]: crate::block_analysis::find_bounding_faces
 //!
 //! While there is not yet a dedicated Rust integration test, the `tests/test_rotational_periodicity.rs`
 //! fixture demonstrates the expected data flow for the periodicity modules and should be referenced
@@ -11,7 +18,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::{
     block::Block,
-    block_face_functions::{find_bounding_faces, full_face_match_transformed, outer_face_records_to_list, Face},
+    block_analysis::find_bounding_faces,
+    block_face_functions::{full_face_match_transformed, outer_face_records_to_list, Face},
     face_record::{FaceKey, FaceMatch, FaceRecord},
     utils::compute_min_gcd,
     Float,
@@ -55,7 +63,12 @@ pub fn translational_periodicity(
         "x" => {
             let min_x = blocks_reduced
                 .iter()
-                .map(|b| b.x_slice().iter().cloned().fold(Float::INFINITY, Float::min))
+                .map(|b| {
+                    b.x_slice()
+                        .iter()
+                        .cloned()
+                        .fold(Float::INFINITY, Float::min)
+                })
                 .fold(Float::INFINITY, Float::min);
             let max_x = blocks_reduced
                 .iter()
@@ -71,7 +84,12 @@ pub fn translational_periodicity(
         "y" => {
             let min_y = blocks_reduced
                 .iter()
-                .map(|b| b.y_slice().iter().cloned().fold(Float::INFINITY, Float::min))
+                .map(|b| {
+                    b.y_slice()
+                        .iter()
+                        .cloned()
+                        .fold(Float::INFINITY, Float::min)
+                })
                 .fold(Float::INFINITY, Float::min);
             let max_y = blocks_reduced
                 .iter()
@@ -87,7 +105,12 @@ pub fn translational_periodicity(
         _ => {
             let min_z = blocks_reduced
                 .iter()
-                .map(|b| b.z_slice().iter().cloned().fold(Float::INFINITY, Float::min))
+                .map(|b| {
+                    b.z_slice()
+                        .iter()
+                        .cloned()
+                        .fold(Float::INFINITY, Float::min)
+                })
                 .fold(Float::INFINITY, Float::min);
             let max_z = blocks_reduced
                 .iter()
@@ -134,12 +157,12 @@ pub fn translational_periodicity(
 
     for face_l in &lower_pool {
         pb1.inc(1);
-        if consumed_lower.contains(&face_key(face_l)) {
+        if consumed_lower.contains(&face_l.index_key()) {
             continue;
         }
         // Build forward translation transform: shift face_l by +delta along axis
         let matched = upper_pool.iter().find_map(|face_u| {
-            if consumed_upper.contains(&face_key(face_u)) {
+            if consumed_upper.contains(&face_u.index_key()) {
                 return None;
             }
             // Try lower shifted up vs upper original
@@ -179,8 +202,8 @@ pub fn translational_periodicity(
             None
         });
         if let Some((face_u, orient)) = matched {
-            consumed_lower.insert(face_key(face_l));
-            consumed_upper.insert(face_key(&face_u));
+            consumed_lower.insert(face_l.index_key());
+            consumed_upper.insert(face_u.index_key());
             periodic_matches.push(FaceMatch {
                 block1: FaceRecord::from_face(face_l),
                 block2: FaceRecord::from_face(&face_u),
@@ -194,12 +217,12 @@ pub fn translational_periodicity(
     // Build remainder pools for Phase 2
     let lower_remainder: Vec<Face> = lower_pool
         .iter()
-        .filter(|f| !consumed_lower.contains(&face_key(f)))
+        .filter(|f| !consumed_lower.contains(&f.index_key()))
         .cloned()
         .collect();
     let mut upper_remainder: Vec<Face> = upper_pool
         .iter()
-        .filter(|f| !consumed_upper.contains(&face_key(f)))
+        .filter(|f| !consumed_upper.contains(&f.index_key()))
         .cloned()
         .collect();
 
@@ -460,12 +483,6 @@ fn project_plane(points: &[[Float; 3]], axis: &str) -> Vec<[Float; 2]> {
 /// Remove duplicate faces while preserving the first occurrence.
 fn dedup_faces(mut faces: Vec<Face>) -> Vec<Face> {
     let mut seen = HashSet::new();
-    faces.retain(|f| seen.insert(face_key(f)));
+    faces.retain(|f| seen.insert(f.index_key()));
     faces
-}
-
-/// Build a unique key directly from a `Face`.
-#[inline]
-fn face_key(face: &Face) -> FaceKey {
-    face.index_key()
 }

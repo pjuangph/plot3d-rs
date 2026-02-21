@@ -6,7 +6,7 @@ use crate::Float;
 pub struct Block {
     pub imax: usize,
     pub jmax: usize,
-    pub kmax: usize, // 2D supported via kmax == 1
+    pub kmax: usize,   // 2D supported via kmax == 1
     pub x: Vec<Float>, // length = imax*jmax*kmax
     pub y: Vec<Float>,
     pub z: Vec<Float>,
@@ -138,7 +138,7 @@ impl Block {
         }
     }
 
-    /// Alias for [`npoints`]. Returns `imax * jmax * kmax`.
+    /// Alias for [`Block::npoints`]. Returns `imax * jmax * kmax`.
     #[inline]
     pub fn size(&self) -> usize {
         self.npoints()
@@ -264,63 +264,81 @@ impl Block {
                     // 6 face centroids (cf[face][component])
                     let mut cf = [[0.0; 3]; 6];
                     // Face 0: i-1 face (csi=const, low side)
-                    cf[0][0] = self.x[idx(i - 1, j - 1, k - 1)] + self.x[idx(i - 1, j - 1, k)]
+                    cf[0][0] = self.x[idx(i - 1, j - 1, k - 1)]
+                        + self.x[idx(i - 1, j - 1, k)]
                         + self.x[idx(i - 1, j, k - 1)]
                         + self.x[idx(i - 1, j, k)];
-                    cf[0][1] = self.y[idx(i - 1, j - 1, k - 1)] + self.y[idx(i - 1, j - 1, k)]
+                    cf[0][1] = self.y[idx(i - 1, j - 1, k - 1)]
+                        + self.y[idx(i - 1, j - 1, k)]
                         + self.y[idx(i - 1, j, k - 1)]
                         + self.y[idx(i - 1, j, k)];
-                    cf[0][2] = self.z[idx(i - 1, j - 1, k - 1)] + self.z[idx(i - 1, j - 1, k)]
+                    cf[0][2] = self.z[idx(i - 1, j - 1, k - 1)]
+                        + self.z[idx(i - 1, j - 1, k)]
                         + self.z[idx(i - 1, j, k - 1)]
                         + self.z[idx(i - 1, j, k)];
                     // Face 1: i face (csi=const, high side)
-                    cf[1][0] = self.x[idx(i, j - 1, k - 1)] + self.x[idx(i, j - 1, k)]
+                    cf[1][0] = self.x[idx(i, j - 1, k - 1)]
+                        + self.x[idx(i, j - 1, k)]
                         + self.x[idx(i, j, k - 1)]
                         + self.x[idx(i, j, k)];
-                    cf[1][1] = self.y[idx(i, j - 1, k - 1)] + self.y[idx(i, j - 1, k)]
+                    cf[1][1] = self.y[idx(i, j - 1, k - 1)]
+                        + self.y[idx(i, j - 1, k)]
                         + self.y[idx(i, j, k - 1)]
                         + self.y[idx(i, j, k)];
-                    cf[1][2] = self.z[idx(i, j - 1, k - 1)] + self.z[idx(i, j - 1, k)]
+                    cf[1][2] = self.z[idx(i, j - 1, k - 1)]
+                        + self.z[idx(i, j - 1, k)]
                         + self.z[idx(i, j, k - 1)]
                         + self.z[idx(i, j, k)];
                     // Face 2: j-1 face (eta=const, low side)
-                    cf[2][0] = self.x[idx(i - 1, j - 1, k - 1)] + self.x[idx(i - 1, j - 1, k)]
+                    cf[2][0] = self.x[idx(i - 1, j - 1, k - 1)]
+                        + self.x[idx(i - 1, j - 1, k)]
                         + self.x[idx(i, j - 1, k - 1)]
                         + self.x[idx(i, j - 1, k)];
-                    cf[2][1] = self.y[idx(i - 1, j - 1, k - 1)] + self.y[idx(i - 1, j - 1, k)]
+                    cf[2][1] = self.y[idx(i - 1, j - 1, k - 1)]
+                        + self.y[idx(i - 1, j - 1, k)]
                         + self.y[idx(i, j - 1, k - 1)]
                         + self.y[idx(i, j - 1, k)];
-                    cf[2][2] = self.z[idx(i - 1, j - 1, k - 1)] + self.z[idx(i - 1, j - 1, k)]
+                    cf[2][2] = self.z[idx(i - 1, j - 1, k - 1)]
+                        + self.z[idx(i - 1, j - 1, k)]
                         + self.z[idx(i, j - 1, k - 1)]
                         + self.z[idx(i, j - 1, k)];
                     // Face 3: j face (eta=const, high side)
-                    cf[3][0] = self.x[idx(i - 1, j, k - 1)] + self.x[idx(i - 1, j, k)]
+                    cf[3][0] = self.x[idx(i - 1, j, k - 1)]
+                        + self.x[idx(i - 1, j, k)]
                         + self.x[idx(i, j, k - 1)]
                         + self.x[idx(i, j, k)];
-                    cf[3][1] = self.y[idx(i - 1, j, k - 1)] + self.y[idx(i - 1, j, k)]
+                    cf[3][1] = self.y[idx(i - 1, j, k - 1)]
+                        + self.y[idx(i - 1, j, k)]
                         + self.y[idx(i, j, k - 1)]
                         + self.y[idx(i, j, k)];
-                    cf[3][2] = self.z[idx(i - 1, j, k - 1)] + self.z[idx(i - 1, j, k)]
+                    cf[3][2] = self.z[idx(i - 1, j, k - 1)]
+                        + self.z[idx(i - 1, j, k)]
                         + self.z[idx(i, j, k - 1)]
                         + self.z[idx(i, j, k)];
                     // Face 4: k-1 face (zeta=const, low side)
-                    cf[4][0] = self.x[idx(i - 1, j - 1, k - 1)] + self.x[idx(i - 1, j, k - 1)]
+                    cf[4][0] = self.x[idx(i - 1, j - 1, k - 1)]
+                        + self.x[idx(i - 1, j, k - 1)]
                         + self.x[idx(i, j - 1, k - 1)]
                         + self.x[idx(i, j, k - 1)];
-                    cf[4][1] = self.y[idx(i - 1, j - 1, k - 1)] + self.y[idx(i - 1, j, k - 1)]
+                    cf[4][1] = self.y[idx(i - 1, j - 1, k - 1)]
+                        + self.y[idx(i - 1, j, k - 1)]
                         + self.y[idx(i, j - 1, k - 1)]
                         + self.y[idx(i, j, k - 1)];
-                    cf[4][2] = self.z[idx(i - 1, j - 1, k - 1)] + self.z[idx(i - 1, j, k - 1)]
+                    cf[4][2] = self.z[idx(i - 1, j - 1, k - 1)]
+                        + self.z[idx(i - 1, j, k - 1)]
                         + self.z[idx(i, j - 1, k - 1)]
                         + self.z[idx(i, j, k - 1)];
                     // Face 5: k face (zeta=const, high side)
-                    cf[5][0] = self.x[idx(i - 1, j - 1, k)] + self.x[idx(i - 1, j, k)]
+                    cf[5][0] = self.x[idx(i - 1, j - 1, k)]
+                        + self.x[idx(i - 1, j, k)]
                         + self.x[idx(i, j - 1, k)]
                         + self.x[idx(i, j, k)];
-                    cf[5][1] = self.y[idx(i - 1, j - 1, k)] + self.y[idx(i - 1, j, k)]
+                    cf[5][1] = self.y[idx(i - 1, j - 1, k)]
+                        + self.y[idx(i - 1, j, k)]
                         + self.y[idx(i, j - 1, k)]
                         + self.y[idx(i, j, k)];
-                    cf[5][2] = self.z[idx(i - 1, j - 1, k)] + self.z[idx(i - 1, j, k)]
+                    cf[5][2] = self.z[idx(i - 1, j - 1, k)]
+                        + self.z[idx(i - 1, j, k)]
                         + self.z[idx(i, j - 1, k)]
                         + self.z[idx(i, j, k)];
 
@@ -351,32 +369,36 @@ impl Block {
         let mut map = HashMap::with_capacity(6);
 
         // Helper to extract a face by iterating over the two free dimensions.
-        let extract =
-            |fix_axis: usize, fix_val: usize| -> FaceData {
-                let (nu, nv) = match fix_axis {
-                    0 => (self.jmax, self.kmax), // i-const: j varies first, k second
-                    1 => (self.imax, self.kmax), // j-const: i varies first, k second
-                    _ => (self.imax, self.jmax), // k-const: i varies first, j second
-                };
-                let cap = nu * nv;
-                let mut xf = Vec::with_capacity(cap);
-                let mut yf = Vec::with_capacity(cap);
-                let mut zf = Vec::with_capacity(cap);
-                for v in 0..nv {
-                    for u in 0..nu {
-                        let (i, j, k) = match fix_axis {
-                            0 => (fix_val, u, v),
-                            1 => (u, fix_val, v),
-                            _ => (u, v, fix_val),
-                        };
-                        let id = self.idx(i, j, k);
-                        xf.push(self.x[id]);
-                        yf.push(self.y[id]);
-                        zf.push(self.z[id]);
-                    }
-                }
-                FaceData { x: xf, y: yf, z: zf, dims: (nu, nv) }
+        let extract = |fix_axis: usize, fix_val: usize| -> FaceData {
+            let (nu, nv) = match fix_axis {
+                0 => (self.jmax, self.kmax), // i-const: j varies first, k second
+                1 => (self.imax, self.kmax), // j-const: i varies first, k second
+                _ => (self.imax, self.jmax), // k-const: i varies first, j second
             };
+            let cap = nu * nv;
+            let mut xf = Vec::with_capacity(cap);
+            let mut yf = Vec::with_capacity(cap);
+            let mut zf = Vec::with_capacity(cap);
+            for v in 0..nv {
+                for u in 0..nu {
+                    let (i, j, k) = match fix_axis {
+                        0 => (fix_val, u, v),
+                        1 => (u, fix_val, v),
+                        _ => (u, v, fix_val),
+                    };
+                    let id = self.idx(i, j, k);
+                    xf.push(self.x[id]);
+                    yf.push(self.y[id]);
+                    zf.push(self.z[id]);
+                }
+            }
+            FaceData {
+                x: xf,
+                y: yf,
+                z: zf,
+                dims: (nu, nv),
+            }
+        };
 
         map.insert("imin", extract(0, 0));
         map.insert("imax", extract(0, self.imax - 1));

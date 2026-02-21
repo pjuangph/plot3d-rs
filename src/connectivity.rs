@@ -3,6 +3,39 @@
 //! The core data types ([`FaceRecord`], [`FaceMatch`], [`MatchPoint`],
 //! [`Orientation`]) live in [`crate::face_record`]. This module provides the
 //! algorithms that populate them.
+//!
+//! # Three-Phase Connectivity Algorithm
+//!
+//! The [`connectivity_fast`] function detects face matches in three phases:
+//!
+//! **Phase 1 — Full-face corner matching (O(1) per pair)**
+//!
+//! For every pair of outer faces, the four corner vertices are compared using
+//! all 8 valid orientation permutations (4 flip combinations × 2 swap).
+//! When all four corners match within tolerance, a [`FaceMatch`] is recorded
+//! immediately. This is the fast path for 1:1 face matches.
+//!
+//! **Phase 2 — Partial / split-face node-by-node matching**
+//!
+//! Remaining unmatched faces are tested for partial overlap via
+//! [`get_face_intersection`]. When a partial match is found, both faces are
+//! split along the intersection boundary. The matched sub-faces produce
+//! [`FaceMatch`] records, while the leftover remnants are fed back into the
+//! pool for subsequent iterations. This loop continues until no new matches
+//! are discovered during a full pass.
+//!
+//! **Phase 3 — Fresh-face validation with all-node AABB pre-checks**
+//!
+//! After Phase 2 converges, any remaining unmatched faces may still have
+//! partial overlaps with faces that were *already matched* in Phases 1 or 2.
+//! Phase 3 re-examines these by computing axis-aligned bounding boxes
+//! (AABBs) using **all face nodes** (not just corners), then testing AABB
+//! overlap before calling `get_face_intersection`. This catches edge cases
+//! where two corners of a sub-face lie outside the bounding diagonal of
+//! a candidate face, which the 2-corner AABB would miss.
+//!
+//! Use [`verify_connectivity`] after running connectivity to confirm that
+//! all matched face pairs have coincident nodes.
 
 use std::collections::{HashMap, HashSet};
 
@@ -291,7 +324,10 @@ use crate::block_face_functions::FaceAxis;
 fn face_uv_ranges(
     face: &Face,
     axis: FaceAxis,
-) -> (std::ops::RangeInclusive<usize>, std::ops::RangeInclusive<usize>) {
+) -> (
+    std::ops::RangeInclusive<usize>,
+    std::ops::RangeInclusive<usize>,
+) {
     match axis {
         FaceAxis::I => (face.jmin()..=face.jmax(), face.kmin()..=face.kmax()),
         FaceAxis::J => (face.imin()..=face.imax(), face.kmin()..=face.kmax()),
@@ -410,9 +446,7 @@ fn find_full_face_matches(
                     continue;
                 }
                 if let Some(orientation) = full_face_match(face_i, face_j, tol) {
-                    let points = build_match_points_from_orientation(
-                        face_i, face_j, &orientation,
-                    );
+                    let points = build_match_points_from_orientation(face_i, face_j, &orientation);
 
                     // Verify interior points to reject false positives
                     if !verify_match_interior(&blocks[i], &blocks[j], &points, tol) {
@@ -589,6 +623,11 @@ fn candidate_neighbor_pairs(blocks: &[Block], tol: Float) -> Vec<(usize, usize)>
 
 /// Connectivity computation performed on GCD-reduced blocks.
 ///
+/// This is the main entry point for connectivity detection. It down-samples
+/// all blocks by the minimum GCD of their dimensions, runs the three-phase
+/// connectivity algorithm (see module docs), then scales indices back to
+/// the original resolution.
+///
 /// # Arguments
 /// * `blocks` - Original block list. Each block is down-sampled by the
 ///   smallest index GCD across the set.
@@ -678,7 +717,10 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
             .unwrap()
             .progress_chars("=>-"),
         );
-        pb.set_message(format!("Connectivity (partial matching, round {})", phase2_round));
+        pb.set_message(format!(
+            "Connectivity (partial matching, round {})",
+            phase2_round
+        ));
 
         for &(i, j) in &combos {
             pb.inc(1);
@@ -954,9 +996,8 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
                         continue;
                     }
 
-                    let (pts, _, _) = get_face_intersection(
-                        face, ff, &blocks[bi], &blocks[bj], DEFAULT_TOL,
-                    );
+                    let (pts, _, _) =
+                        get_face_intersection(face, ff, &blocks[bi], &blocks[bj], DEFAULT_TOL);
                     if pts.is_empty() {
                         continue;
                     }
@@ -1073,8 +1114,10 @@ pub fn verify_connectivity(
             let (x2_l, y2_l, z2_l) = block2.xyz(b2.il, b2.jl, b2.kl);
             let (x2_u, y2_u, z2_u) = block2.xyz(b2.ih, b2.jh, b2.kh);
 
-            let d_lower = ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
-            let d_upper = ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
+            let d_lower =
+                ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
+            let d_upper =
+                ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
 
             if d_lower < tol && d_upper < tol {
                 verified.push(face_matches[idx].clone());
@@ -1093,8 +1136,10 @@ pub fn verify_connectivity(
         let (x2_l, y2_l, z2_l) = block2.xyz(b2.il, b2.jl, b2.kl);
         let (x2_u, y2_u, z2_u) = block2.xyz(b2.ih, b2.jh, b2.kh);
 
-        let d_lower = ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
-        let d_upper = ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
+        let d_lower =
+            ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
+        let d_upper =
+            ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
 
         if d_lower < tol && d_upper < tol {
             verified.push(face_matches[idx].clone());
@@ -1129,8 +1174,10 @@ pub fn verify_connectivity(
                 let (x2_l, y2_l, z2_l) = block2.xyz(il, jl, kl);
                 let (x2_u, y2_u, z2_u) = block2.xyz(iu, ju, ku);
 
-                let dl = ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
-                let du = ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
+                let dl =
+                    ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
+                let du =
+                    ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
 
                 if dl < tol && du < tol {
                     let mut corrected = face_matches[idx].clone();
@@ -1151,21 +1198,26 @@ pub fn verify_connectivity(
         }
 
         if !found {
-            eprintln!(
-                "verify_connectivity: MISMATCH at face_match index {}",
-                idx
-            );
+            eprintln!("verify_connectivity: MISMATCH at face_match index {}", idx);
             eprintln!(
                 "  block1 (block_index={}): lower=({},{},{}) upper=({},{},{})",
                 face_matches[idx].block1.block_index,
-                face_matches[idx].block1.il, face_matches[idx].block1.jl, face_matches[idx].block1.kl,
-                face_matches[idx].block1.ih, face_matches[idx].block1.jh, face_matches[idx].block1.kh,
+                face_matches[idx].block1.il,
+                face_matches[idx].block1.jl,
+                face_matches[idx].block1.kl,
+                face_matches[idx].block1.ih,
+                face_matches[idx].block1.jh,
+                face_matches[idx].block1.kh,
             );
             eprintln!(
                 "  block2 (block_index={}): lower=({},{},{}) upper=({},{},{})",
                 face_matches[idx].block2.block_index,
-                face_matches[idx].block2.il, face_matches[idx].block2.jl, face_matches[idx].block2.kl,
-                face_matches[idx].block2.ih, face_matches[idx].block2.jh, face_matches[idx].block2.kh,
+                face_matches[idx].block2.il,
+                face_matches[idx].block2.jl,
+                face_matches[idx].block2.kl,
+                face_matches[idx].block2.ih,
+                face_matches[idx].block2.jh,
+                face_matches[idx].block2.kh,
             );
             mismatched.push(face_matches[idx].clone());
         }
@@ -1186,10 +1238,7 @@ pub fn verify_connectivity(
 ///
 /// # Returns
 /// Validated face matches with corrected block2 diagonal indices.
-pub fn face_matches_to_dict(
-    blocks: &[Block],
-    face_matches: &[FaceMatch],
-) -> Vec<FaceMatch> {
+pub fn face_matches_to_dict(blocks: &[Block], face_matches: &[FaceMatch]) -> Vec<FaceMatch> {
     face_matches
         .iter()
         .filter_map(|fm| {
@@ -1214,7 +1263,8 @@ pub fn face_matches_to_dict(
                 for &j in &j_vals {
                     for &k in &k_vals {
                         let (x2, y2, z2) = block2.xyz(i, j, k);
-                        let d = ((x2 - x1_l).powi(2) + (y2 - y1_l).powi(2) + (z2 - z1_l).powi(2)).sqrt();
+                        let d = ((x2 - x1_l).powi(2) + (y2 - y1_l).powi(2) + (z2 - z1_l).powi(2))
+                            .sqrt();
                         if d < best_lower.0 {
                             best_lower = (d, i, j, k);
                         }
@@ -1233,7 +1283,8 @@ pub fn face_matches_to_dict(
                 for &j in &j_vals {
                     for &k in &k_vals {
                         let (x2, y2, z2) = block2.xyz(i, j, k);
-                        let d = ((x2 - x1_u).powi(2) + (y2 - y1_u).powi(2) + (z2 - z1_u).powi(2)).sqrt();
+                        let d = ((x2 - x1_u).powi(2) + (y2 - y1_u).powi(2) + (z2 - z1_u).powi(2))
+                            .sqrt();
                         if d < best_upper.0 {
                             best_upper = (d, i, j, k);
                         }

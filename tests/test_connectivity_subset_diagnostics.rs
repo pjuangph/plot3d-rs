@@ -9,13 +9,18 @@
 //!   2. Then iterate quickly with:
 //!      cargo test --release --test test_connectivity_subset_diagnostics -- --nocapture
 
-use std::collections::{HashMap, HashSet};
+mod common;
 
-use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 
 use plot3d::{
     connectivity_fast, full_face_match, get_face_intersection, get_outer_faces, read_plot3d_binary,
-    reduce_blocks, BinaryFormat, Endian, FaceMatch, FaceRecord, FloatPrecision,
+    reduce_blocks, BinaryFormat, Endian, FloatPrecision,
+};
+
+use common::{
+    aabb_overlap, build_computed_keys, build_json_keys, group_by_block_pair, min_corner_distance,
+    GridProConnectivity, JsonFaceMatch, MatchKey, NormalizedFaceRecord,
 };
 
 // ---------------------------------------------------------------------------
@@ -26,208 +31,6 @@ const SUBSET_FILE: &str = "/tmp/connectivity_debug_subset.p3d";
 const SUBSET_INDICES_FILE: &str = "/tmp/connectivity_debug_subset_indices.json";
 const JSON_FILE: &str =
     "/Users/pjuangph/Documents/GitHub/plot3d_troubleshoot/gridpro_connectivity.json";
-
-// ---------------------------------------------------------------------------
-// JSON deserialization (same as main test)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Deserialize)]
-struct JsonBlockRecord {
-    block_index: usize,
-    #[serde(rename = "IMIN")]
-    imin: usize,
-    #[serde(rename = "JMIN")]
-    jmin: usize,
-    #[serde(rename = "KMIN")]
-    kmin: usize,
-    #[serde(rename = "IMAX")]
-    imax: usize,
-    #[serde(rename = "JMAX")]
-    jmax: usize,
-    #[serde(rename = "KMAX")]
-    kmax: usize,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct JsonFaceMatch {
-    block1: JsonBlockRecord,
-    block2: JsonBlockRecord,
-}
-
-#[derive(Debug, Deserialize)]
-struct GridProConnectivity {
-    face_matches: Vec<JsonFaceMatch>,
-}
-
-// ---------------------------------------------------------------------------
-// Normalized face record (orientation-agnostic)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct NormalizedFaceRecord {
-    block_index: usize,
-    imin: usize,
-    jmin: usize,
-    kmin: usize,
-    imax: usize,
-    jmax: usize,
-    kmax: usize,
-}
-
-impl NormalizedFaceRecord {
-    fn from_json_block(b: &JsonBlockRecord) -> Self {
-        Self {
-            block_index: b.block_index,
-            imin: b.imin.min(b.imax),
-            jmin: b.jmin.min(b.jmax),
-            kmin: b.kmin.min(b.kmax),
-            imax: b.imin.max(b.imax),
-            jmax: b.jmin.max(b.jmax),
-            kmax: b.kmin.max(b.kmax),
-        }
-    }
-
-    fn from_face_record(r: &FaceRecord) -> Self {
-        Self {
-            block_index: r.block_index,
-            imin: r.i_lo(),
-            jmin: r.j_lo(),
-            kmin: r.k_lo(),
-            imax: r.i_hi(),
-            jmax: r.j_hi(),
-            kmax: r.k_hi(),
-        }
-    }
-
-    fn face_tuple(&self) -> (usize, usize, usize, usize, usize, usize) {
-        (self.imin, self.jmin, self.kmin, self.imax, self.jmax, self.kmax)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// MatchKey: canonical unordered pair of faces
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct MatchKey {
-    face_a: NormalizedFaceRecord,
-    face_b: NormalizedFaceRecord,
-}
-
-impl MatchKey {
-    fn new(a: NormalizedFaceRecord, b: NormalizedFaceRecord) -> Self {
-        if a.block_index < b.block_index
-            || (a.block_index == b.block_index && a.face_tuple() <= b.face_tuple())
-        {
-            MatchKey { face_a: a, face_b: b }
-        } else {
-            MatchKey { face_a: b, face_b: a }
-        }
-    }
-
-    fn block_pair(&self) -> (usize, usize) {
-        let lo = self.face_a.block_index.min(self.face_b.block_index);
-        let hi = self.face_a.block_index.max(self.face_b.block_index);
-        (lo, hi)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn build_json_keys(json_matches: &[JsonFaceMatch]) -> HashSet<MatchKey> {
-    json_matches
-        .iter()
-        .map(|jm| {
-            let a = NormalizedFaceRecord::from_json_block(&jm.block1);
-            let b = NormalizedFaceRecord::from_json_block(&jm.block2);
-            MatchKey::new(a, b)
-        })
-        .collect()
-}
-
-fn build_computed_keys(computed_matches: &[FaceMatch]) -> HashSet<MatchKey> {
-    computed_matches
-        .iter()
-        .map(|fm| {
-            let a = NormalizedFaceRecord::from_face_record(&fm.block1);
-            let b = NormalizedFaceRecord::from_face_record(&fm.block2);
-            MatchKey::new(a, b)
-        })
-        .collect()
-}
-
-fn group_by_block_pair(keys: &HashSet<MatchKey>) -> HashMap<(usize, usize), Vec<MatchKey>> {
-    let mut map: HashMap<(usize, usize), Vec<MatchKey>> = HashMap::new();
-    for k in keys {
-        map.entry(k.block_pair()).or_default().push(k.clone());
-    }
-    map
-}
-
-/// Compute minimum corner distance between two JSON face records.
-fn min_corner_distance(
-    jm: &JsonFaceMatch,
-    blocks: &[plot3d::Block],
-) -> Option<(f64, bool)> {
-    let b1_idx = jm.block1.block_index;
-    let b2_idx = jm.block2.block_index;
-    if b1_idx >= blocks.len() || b2_idx >= blocks.len() {
-        return None;
-    }
-    let block1 = &blocks[b1_idx];
-    let block2 = &blocks[b2_idx];
-
-    let n1 = NormalizedFaceRecord::from_json_block(&jm.block1);
-    let n2 = NormalizedFaceRecord::from_json_block(&jm.block2);
-
-    if n1.imax >= block1.imax || n1.jmax >= block1.jmax || n1.kmax >= block1.kmax {
-        return None;
-    }
-    if n2.imax >= block2.imax || n2.jmax >= block2.jmax || n2.kmax >= block2.kmax {
-        return None;
-    }
-
-    let (x1_lo, y1_lo, z1_lo) = block1.xyz(n1.imin, n1.jmin, n1.kmin);
-    let (x1_hi, y1_hi, z1_hi) = block1.xyz(n1.imax, n1.jmax, n1.kmax);
-    let (x2_lo, y2_lo, z2_lo) = block2.xyz(n2.imin, n2.jmin, n2.kmin);
-    let (x2_hi, y2_hi, z2_hi) = block2.xyz(n2.imax, n2.jmax, n2.kmax);
-
-    let d_direct = ((x1_lo - x2_lo).powi(2) + (y1_lo - y2_lo).powi(2) + (z1_lo - z2_lo).powi(2))
-        .sqrt()
-        .max(
-            ((x1_hi - x2_hi).powi(2) + (y1_hi - y2_hi).powi(2) + (z1_hi - z2_hi).powi(2)).sqrt(),
-        );
-    let d_swapped = ((x1_lo - x2_hi).powi(2) + (y1_lo - y2_hi).powi(2) + (z1_lo - z2_hi).powi(2))
-        .sqrt()
-        .max(
-            ((x1_hi - x2_lo).powi(2) + (y1_hi - y2_lo).powi(2) + (z1_hi - z2_lo).powi(2)).sqrt(),
-        );
-
-    if d_direct <= d_swapped {
-        Some((d_direct, false))
-    } else {
-        Some((d_swapped, true))
-    }
-}
-
-/// Check if two blocks have overlapping AABBs.
-fn aabb_overlap(b1: &plot3d::Block, b2: &plot3d::Block, tol: f64) -> bool {
-    let aabb = |b: &plot3d::Block| -> [f64; 6] {
-        let mut mn = [f64::INFINITY; 3];
-        let mut mx = [f64::NEG_INFINITY; 3];
-        for &x in &b.x { mn[0] = mn[0].min(x); mx[0] = mx[0].max(x); }
-        for &y in &b.y { mn[1] = mn[1].min(y); mx[1] = mx[1].max(y); }
-        for &z in &b.z { mn[2] = mn[2].min(z); mx[2] = mx[2].max(z); }
-        [mn[0], mx[0], mn[1], mx[1], mn[2], mx[2]]
-    };
-    let a = aabb(b1);
-    let b = aabb(b2);
-    a[1] + tol >= b[0] && b[1] + tol >= a[0]
-        && a[3] + tol >= b[2] && b[3] + tol >= a[2]
-        && a[5] + tol >= b[4] && b[5] + tol >= a[4]
-}
 
 // ---------------------------------------------------------------------------
 // Main diagnostic test
@@ -264,8 +67,7 @@ fn subset_diagnostics() {
         .face_matches
         .iter()
         .filter(|jm| {
-            remap.contains_key(&jm.block1.block_index)
-                && remap.contains_key(&jm.block2.block_index)
+            remap.contains_key(&jm.block1.block_index) && remap.contains_key(&jm.block2.block_index)
         })
         .map(|jm| {
             let mut r = jm.clone();
@@ -278,9 +80,13 @@ fn subset_diagnostics() {
 
     // ── Step 3: Load subset mesh ──
     println!("Loading subset mesh from {}...", SUBSET_FILE);
-    let blocks =
-        read_plot3d_binary(SUBSET_FILE, BinaryFormat::Raw, FloatPrecision::F64, Endian::Little)
-            .expect("Failed to read subset mesh");
+    let blocks = read_plot3d_binary(
+        SUBSET_FILE,
+        BinaryFormat::Raw,
+        FloatPrecision::F64,
+        Endian::Little,
+    )
+    .expect("Failed to read subset mesh");
     println!("  Subset blocks: {}", blocks.len());
 
     let gcd = plot3d::utils::compute_min_gcd(&blocks);
@@ -317,9 +123,9 @@ fn subset_diagnostics() {
         .collect();
 
     let mut cat_exact = Vec::new(); // d < 1e-6
-    let mut cat_near = Vec::new();  // 1e-6 <= d < 1e-2
-    let mut cat_far = Vec::new();   // d >= 1e-2
-    let mut cat_oob = 0usize;       // out of bounds
+    let mut cat_near = Vec::new(); // 1e-6 <= d < 1e-2
+    let mut cat_far = Vec::new(); // d >= 1e-2
+    let mut cat_oob = 0usize; // out of bounds
 
     for jm in &missing_json {
         match min_corner_distance(jm, &blocks) {
@@ -337,8 +143,14 @@ fn subset_diagnostics() {
     }
 
     println!("\n=== CLASSIFICATION ===");
-    println!("  Exact (d < 1e-6):   {} -- faces coincide, algorithm bug", cat_exact.len());
-    println!("  Near (1e-6..1e-2):  {} -- tolerance issue", cat_near.len());
+    println!(
+        "  Exact (d < 1e-6):   {} -- faces coincide, algorithm bug",
+        cat_exact.len()
+    );
+    println!(
+        "  Near (1e-6..1e-2):  {} -- tolerance issue",
+        cat_near.len()
+    );
     println!("  Far (d >= 1e-2):    {} -- likely periodic", cat_far.len());
     println!("  Out of bounds:      {}", cat_oob);
 
@@ -405,9 +217,7 @@ fn subset_diagnostics() {
     {
         let exact_block_indices: HashSet<usize> = cat_exact
             .iter()
-            .flat_map(|(jm, _, _)| {
-                vec![jm.block1.block_index, jm.block2.block_index]
-            })
+            .flat_map(|(jm, _, _)| vec![jm.block1.block_index, jm.block2.block_index])
             .collect();
         for &bi in &exact_block_indices {
             if bi < reduced.len() {
@@ -518,10 +328,7 @@ fn subset_diagnostics() {
         "    - But different face ranges:       {}",
         pair_match_diff_ranges
     );
-    println!(
-        "  Block pair has NO computed match:    {}",
-        pair_no_match
-    );
+    println!("  Block pair has NO computed match:    {}", pair_no_match);
     println!(
         "    - AABB fail (reduced):             {}",
         pair_no_match_aabb_fail
@@ -597,10 +404,14 @@ fn subset_diagnostics() {
             _ => "?",
         };
         let partners1 = side1.and_then(|(axis, val)| {
-            matched_sides.get(&(b1, axis, val)).map(|p| (axis, val, p.clone()))
+            matched_sides
+                .get(&(b1, axis, val))
+                .map(|p| (axis, val, p.clone()))
         });
         let partners2 = side2.and_then(|(axis, val)| {
-            matched_sides.get(&(b2, axis, val)).map(|p| (axis, val, p.clone()))
+            matched_sides
+                .get(&(b2, axis, val))
+                .map(|p| (axis, val, p.clone()))
         });
 
         println!(
@@ -672,7 +483,7 @@ fn subset_diagnostics() {
     let mut partial_match_exists = 0usize;
     let mut no_match_at_all = 0usize;
 
-    for (jm, d, _swapped) in cat_exact.iter().take(50) {
+    for (jm, _d, _swapped) in cat_exact.iter().take(50) {
         let b1 = jm.block1.block_index;
         let b2 = jm.block2.block_index;
 
@@ -707,8 +518,7 @@ fn subset_diagnostics() {
         let mut found_partial = false;
         for f1 in &faces1 {
             for f2 in &faces2 {
-                let (pts, _, _) =
-                    get_face_intersection(f1, f2, &reduced[b1], &reduced[b2], 1e-6);
+                let (pts, _, _) = get_face_intersection(f1, f2, &reduced[b1], &reduced[b2], 1e-6);
                 if !pts.is_empty() {
                     found_partial = true;
                     break;
@@ -800,8 +610,20 @@ fn subset_diagnostics() {
             if shown < 5 {
                 println!(
                     "  block{}[{},{},{}->{},{},{}] <-> block{}[{},{},{}->{},{},{}]",
-                    b1, n1.imin, n1.jmin, n1.kmin, n1.imax, n1.jmax, n1.kmax,
-                    b2, n2.imin, n2.jmin, n2.kmin, n2.imax, n2.jmax, n2.kmax,
+                    b1,
+                    n1.imin,
+                    n1.jmin,
+                    n1.kmin,
+                    n1.imax,
+                    n1.jmax,
+                    n1.kmax,
+                    b2,
+                    n2.imin,
+                    n2.jmin,
+                    n2.kmin,
+                    n2.imax,
+                    n2.jmax,
+                    n2.kmax,
                 );
                 println!(
                     "    Computed matches for pair: {} total",
@@ -813,33 +635,45 @@ fn subset_diagnostics() {
                     println!(
                         "    [{}] block{}[{},{},{}->{},{},{}] <-> block{}[{},{},{}->{},{},{}]",
                         midx,
-                        cn1.block_index, cn1.imin, cn1.jmin, cn1.kmin, cn1.imax, cn1.jmax, cn1.kmax,
-                        cn2.block_index, cn2.imin, cn2.jmin, cn2.kmin, cn2.imax, cn2.jmax, cn2.kmax,
+                        cn1.block_index,
+                        cn1.imin,
+                        cn1.jmin,
+                        cn1.kmin,
+                        cn1.imax,
+                        cn1.jmax,
+                        cn1.kmax,
+                        cn2.block_index,
+                        cn2.imin,
+                        cn2.jmin,
+                        cn2.kmin,
+                        cn2.imax,
+                        cn2.jmax,
+                        cn2.kmax,
                     );
                 }
                 shown += 1;
             }
         }
         println!("  Total 'different ranges' cases: 429 (expected)");
-        println!(
-            "  Contains computed sub-face:     {}",
-            total_over_split
-        );
-        println!(
-            "  Pair has multiple matches:      {}",
-            total_covered
-        );
+        println!("  Contains computed sub-face:     {}", total_over_split);
+        println!("  Pair has multiple matches:      {}", total_covered);
     }
 
     // ── Step 8: Far matches (periodic analysis) ──
     println!("\n=== FAR MATCHES (d >= 1e-2) - distance histogram ===");
     let mut buckets = [0usize; 5];
     for (_, d, _) in &cat_far {
-        if *d < 0.1 { buckets[0] += 1; }
-        else if *d < 0.5 { buckets[1] += 1; }
-        else if *d < 1.0 { buckets[2] += 1; }
-        else if *d < 5.0 { buckets[3] += 1; }
-        else { buckets[4] += 1; }
+        if *d < 0.1 {
+            buckets[0] += 1;
+        } else if *d < 0.5 {
+            buckets[1] += 1;
+        } else if *d < 1.0 {
+            buckets[2] += 1;
+        } else if *d < 5.0 {
+            buckets[3] += 1;
+        } else {
+            buckets[4] += 1;
+        }
     }
     println!("  0.01 - 0.1:  {}", buckets[0]);
     println!("  0.1  - 0.5:  {}", buckets[1]);
@@ -852,8 +686,12 @@ fn subset_diagnostics() {
         let b2 = jm.block2.block_index;
         let n1 = NormalizedFaceRecord::from_json_block(&jm.block1);
         let n2 = NormalizedFaceRecord::from_json_block(&jm.block2);
-        if n1.imax < blocks[b1].imax && n1.jmax < blocks[b1].jmax && n1.kmax < blocks[b1].kmax
-            && n2.imax < blocks[b2].imax && n2.jmax < blocks[b2].jmax && n2.kmax < blocks[b2].kmax
+        if n1.imax < blocks[b1].imax
+            && n1.jmax < blocks[b1].jmax
+            && n1.kmax < blocks[b1].kmax
+            && n2.imax < blocks[b2].imax
+            && n2.jmax < blocks[b2].jmax
+            && n2.kmax < blocks[b2].kmax
         {
             let (x1, y1, z1) = blocks[b1].xyz(n1.imin, n1.jmin, n1.kmin);
             let (x2, y2, z2) = blocks[b2].xyz(n2.imin, n2.jmin, n2.kmin);
@@ -869,8 +707,12 @@ fn subset_diagnostics() {
     let mut at_1e4 = 0;
     let mut at_1e3 = 0;
     for (_, d, _) in &cat_near {
-        if *d < 1e-4 { at_1e4 += 1; }
-        if *d < 1e-3 { at_1e3 += 1; }
+        if *d < 1e-4 {
+            at_1e4 += 1;
+        }
+        if *d < 1e-3 {
+            at_1e3 += 1;
+        }
     }
     println!("  Would match at tol=1e-4: {}", at_1e4);
     println!("  Would match at tol=1e-3: {}", at_1e3);
@@ -891,7 +733,9 @@ fn subset_diagnostics() {
     for pair in jp_set.intersection(&cp_set) {
         let jf: HashSet<_> = json_pairs[pair].iter().collect();
         let cf: HashSet<_> = comp_pairs[pair].iter().collect();
-        if jf != cf { diff_faces += 1; }
+        if jf != cf {
+            diff_faces += 1;
+        }
     }
 
     println!("  Block pairs in JSON:     {}", jp_set.len());

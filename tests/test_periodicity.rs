@@ -1,7 +1,5 @@
-use std::vec;
-
 use plot3d::{
-    block, connectivity_fast, create_rotation_matrix, read_plot3d_ascii, read_plot3d_binary,
+    connectivity_fast, create_rotation_matrix, read_plot3d_ascii, read_plot3d_binary,
     rotate_block_with_matrix, rotated_periodicity, translational_periodicity, FaceMatchPrinter,
     FaceRecordTraits, Float,
 };
@@ -80,9 +78,8 @@ fn translational_periodicity_test() {
         translational_periodicity(&blocks, &remaining_faces, None, "y", None, 0.5, 1, 1, 1);
     remaining_faces = rest;
 
-    let (z_periodicity, rest) =
+    let (z_periodicity, _rest) =
         translational_periodicity(&blocks, &remaining_faces, None, "z", None, 0.5, 1, 1, 1);
-    remaining_faces = rest;
     let mut face_matches_all = face_matches;
     face_matches_all.extend(x_periodicity);
     face_matches_all.extend(y_periodicity);

@@ -3,6 +3,42 @@
 //! This module mirrors the behaviour of the original Python tooling and is covered end-to-end by
 //! the integration test in `tests/test_rotational_periodicity.rs`. Generate HTML documentation with
 //! `cargo doc --open` to browse rendered versions of these notes alongside the Rust API surface.
+//!
+//! # Three-Phase Periodicity Algorithm
+//!
+//! The [`rotated_periodicity`] function (via `rotational_periodicity_core`) detects
+//! periodic face pairs across a rotation angle in three phases:
+//!
+//! **Phase 1 — Full-face matching via parallel theta bucketing**
+//!
+//! All outer faces are inserted into a `FacePool` that buckets them by
+//! their angular (theta) coordinate in cylindrical space. For each face,
+//! the rotated counterpart's theta range is computed and candidate faces
+//! in the matching bucket are tested with `full_face_match_transformed`.
+//! When all four rotated corners match a candidate's corners within
+//! tolerance, a [`PeriodicPair`] is recorded. This phase runs in parallel
+//! across all outer faces.
+//!
+//! **Phase 2 — Split-face matching with corner pre-check**
+//!
+//! Remaining unmatched faces are tested for partial overlap. Before the
+//! expensive `get_face_intersection`, a quick corner pre-check confirms
+//! that at least one rotated corner lies near a candidate face. When a
+//! partial match is found, both faces are split along the intersection
+//! boundary. Matched sub-faces produce [`PeriodicPair`] records and
+//! remnants re-enter the pool. This loop runs until convergence — there
+//! is **no iteration limit** (earlier versions had a hardcoded limit of 50
+//! which was insufficient; Phase 2 may need 100+ iterations).
+//!
+//! **Phase 3 — Edge-based matching**
+//!
+//! Any faces still unmatched after Phase 2 are tested using edge geometry.
+//! Face edges are extracted and compared via `count_edge_matches` in the
+//! `FacePool`. This catches degenerate or thin-strip faces that the
+//! area-based intersection misses.
+//!
+//! Use [`verify_periodicity`] to confirm that every matched periodic pair
+//! has coincident nodes after rotation.
 
 use std::collections::HashSet;
 
@@ -12,8 +48,8 @@ use rayon::prelude::*;
 use crate::{
     block::Block,
     block_face_functions::{
-        create_face_from_diagonals, match_faces_to_list, outer_face_records_to_list,
-        reduce_blocks, rotate_block, Face, FaceAxis,
+        create_face_from_diagonals, match_faces_to_list, outer_face_records_to_list, reduce_blocks,
+        rotate_block, Face, FaceAxis,
     },
     connectivity::get_face_intersection,
     face_pool::{count_edge_matches, extract_face_edges, FacePool},
@@ -158,7 +194,11 @@ fn rotational_periodicity_core(
     // ===== PHASE 1: Full-face matching via cylindrical bucketing =====
     {
         let active = pool.active_indices();
-        let pb = make_progress_bar(active.len() as u64, "faces", "Rot. periodicity Phase 1 (corners)");
+        let pb = make_progress_bar(
+            active.len() as u64,
+            "faces",
+            "Rot. periodicity Phase 1 (corners)",
+        );
 
         // Parallel search: each face_a independently finds its best candidate match.
         // The pool is read-only during this phase; matches are deduplicated serially afterwards.
@@ -192,8 +232,8 @@ fn rotational_periodicity_core(
                         if let Some(orientation) =
                             full_face_match_transformed(face_a, face_b, &transform, MATCH_TOL)
                         {
-                            let key_a = face_key(face_a);
-                            let key_b = face_key(face_b);
+                            let key_a = face_a.index_key();
+                            let key_b = face_b.index_key();
                             return Some((
                                 key_a,
                                 key_b,
@@ -256,8 +296,7 @@ fn rotational_periodicity_core(
                     continue;
                 }
                 let face_a = &pool.faces[idx_a];
-                let candidates =
-                    pool.find_rotational_candidates(idx_a, rotation_angle, theta_tol);
+                let candidates = pool.find_rotational_candidates(idx_a, rotation_angle, theta_tol);
 
                 for &idx_b in &candidates {
                     if idx_a == idx_b || pool.is_consumed(idx_b) {
@@ -265,7 +304,7 @@ fn rotational_periodicity_core(
                     }
                     let face_b = &pool.faces[idx_b];
 
-                    let key_pair = ordered_pair(face_key(face_a), face_key(face_b));
+                    let key_pair = ordered_pair(face_a.index_key(), face_b.index_key());
                     if non_matching_p2.contains(&key_pair) {
                         continue;
                     }
@@ -336,7 +375,7 @@ fn rotational_periodicity_core(
                     changed = true;
                 } else {
                     // Candidate had corners but failed intersection — skip it next time
-                    let pair_key = ordered_pair(face_key(&face_a), face_key(&face_b));
+                    let pair_key = ordered_pair(face_a.index_key(), face_b.index_key());
                     non_matching_p2.insert(pair_key);
                     changed = true; // restart to try next candidate
                 }
@@ -394,7 +433,7 @@ fn rotational_periodicity_core(
                     }
                     let face_b = &pool.faces[idx_b];
 
-                    let key_pair = ordered_pair(face_key(face_a), face_key(face_b));
+                    let key_pair = ordered_pair(face_a.index_key(), face_b.index_key());
                     if non_matching_p3.contains(&key_pair) {
                         continue;
                     }
@@ -430,7 +469,8 @@ fn rotational_periodicity_core(
                         }
                         // Identity matrix since edges are already extracted from rotated block
                         let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-                        let match_count = count_edge_matches(edges_a, &edges_b, identity, MATCH_TOL);
+                        let match_count =
+                            count_edge_matches(edges_a, &edges_b, identity, MATCH_TOL);
                         if match_count >= 2 {
                             match_found = Some((idx_a, idx_b, is_forward));
                             break 'phase3_search;
@@ -449,7 +489,11 @@ fn rotational_periodicity_core(
                 let block_idx_a = face_a.block_index().unwrap();
                 let block_idx_b = face_b.block_index().unwrap();
 
-                let rot_matrix = if is_forward { rot_forward } else { rot_backward };
+                let rot_matrix = if is_forward {
+                    rot_forward
+                } else {
+                    rot_backward
+                };
                 let block_a_rot = rotate_block_with_matrix(&blocks[block_idx_a], rot_matrix);
                 let block_b = &blocks[block_idx_b];
 
@@ -463,8 +507,8 @@ fn rotational_periodicity_core(
                     if let Some(orientation) =
                         full_face_match_transformed(&face_a, &face_b, transform, MATCH_TOL)
                     {
-                        let key_a = face_key(&face_a);
-                        let key_b = face_key(&face_b);
+                        let key_a = face_a.index_key();
+                        let key_b = face_b.index_key();
                         let pair_key = ordered_pair(key_a, key_b);
                         if !seen_pair_keys.contains(&pair_key) {
                             seen_pair_keys.insert(pair_key);
@@ -500,7 +544,7 @@ fn rotational_periodicity_core(
     }
 
     // Filter out faces that are in matched_faces
-    let matched_keys: HashSet<FaceKey> = matched_faces_all.iter().map(face_key).collect();
+    let matched_keys: HashSet<FaceKey> = matched_faces_all.iter().map(|f| f.index_key()).collect();
     let mut outer_exports = pool.drain_as_records();
     outer_exports.retain(|r| !matched_keys.contains(&r.index_key()));
 
@@ -573,9 +617,8 @@ pub fn rotated_periodicity(
 /// Create a styled progress bar with consistent formatting.
 fn make_progress_bar(total: u64, unit: &str, message: impl Into<String>) -> ProgressBar {
     let pb = ProgressBar::new(total);
-    let template = format!(
-        "{{msg}} [{{bar:40.cyan/blue}}] {{pos}}/{{len}} {unit} ({{eta}} remaining)"
-    );
+    let template =
+        format!("{{msg}} [{{bar:40.cyan/blue}}] {{pos}}/{{len}} {unit} ({{eta}} remaining)");
     pb.set_style(
         ProgressStyle::with_template(&template)
             .unwrap()
@@ -583,12 +626,6 @@ fn make_progress_bar(total: u64, unit: &str, message: impl Into<String>) -> Prog
     );
     pb.set_message(message.into());
     pb
-}
-
-/// Build a comparable key from face indices and block identifier.
-#[inline]
-fn face_key(face: &Face) -> FaceKey {
-    face.index_key()
 }
 
 /// Order a pair of keys so the smallest always comes first.
@@ -655,7 +692,6 @@ fn is_valid_face(face: &Face, block: &Block) -> bool {
         && face.kmax() < block.kmax
 }
 
-
 /// Attempt a split-face intersection match between two faces after rotation.
 ///
 /// If the intersection succeeds, records the match in `periodic_exports`, consumes the
@@ -680,7 +716,7 @@ fn try_split_match(
     if let Some((pair_faces, match_points, splits)) =
         periodicity_check_with_points(face_a, face_b, block_a_rot, block_b, MATCH_TOL)
     {
-        let pair_key = ordered_pair(face_key(&pair_faces[0]), face_key(&pair_faces[1]));
+        let pair_key = ordered_pair(pair_faces[0].index_key(), pair_faces[1].index_key());
         if seen_pair_keys.contains(&pair_key) {
             return false;
         }
@@ -742,10 +778,10 @@ fn try_split_match(
 /// Sorted, deduplicated list of keys to remove from future consideration.
 fn collect_removal_keys(face_a: &Face, face_b: &Face, pair_faces: &[Face]) -> Vec<FaceKey> {
     let mut keys = Vec::new();
-    keys.push(face_key(face_a));
-    keys.push(face_key(face_b));
+    keys.push(face_a.index_key());
+    keys.push(face_b.index_key());
     for f in pair_faces {
-        keys.push(face_key(f));
+        keys.push(f.index_key());
     }
     keys.sort();
     keys.dedup();
@@ -1077,10 +1113,8 @@ pub fn linear_real_transform(face1: &Face, face2: &Face) -> (Float, [[Float; 3];
         return (0.0, zero_matrix);
     }
 
-    let cos_ang =
-        (n_to[1] * n_from[1] + n_to[2] * n_from[2]) / (denom_to * denom_from);
-    let sin_ang =
-        (n_to[2] * n_from[1] - n_to[1] * n_from[2]) / (denom_to * denom_from);
+    let cos_ang = (n_to[1] * n_from[1] + n_to[2] * n_from[2]) / (denom_to * denom_from);
+    let sin_ang = (n_to[2] * n_from[1] - n_to[1] * n_from[2]) / (denom_to * denom_from);
     let mut ang = cos_ang.clamp(-1.0, 1.0).acos();
     if sin_ang < 0.0 {
         ang = -ang;
@@ -1126,8 +1160,14 @@ pub fn verify_periodicity(
     let rot_neg = create_rotation_matrix(-theta, rotation_axis);
 
     // Pre-rotate all reduced blocks in both directions (parallel)
-    let rotated_pos: Vec<Block> = reduced.par_iter().map(|b| rotate_block(b, rot_pos)).collect();
-    let rotated_neg: Vec<Block> = reduced.par_iter().map(|b| rotate_block(b, rot_neg)).collect();
+    let rotated_pos: Vec<Block> = reduced
+        .par_iter()
+        .map(|b| rotate_block(b, rot_pos))
+        .collect();
+    let rotated_neg: Vec<Block> = reduced
+        .par_iter()
+        .map(|b| rotate_block(b, rot_neg))
+        .collect();
 
     // Scale down face_match indices by GCD
     let mut scaled_matches: Vec<FaceMatch> = face_matches.to_vec();
@@ -1197,8 +1237,10 @@ pub fn verify_periodicity(
             let (x2_l, y2_l, z2_l) = block2.xyz(b2.il, b2.jl, b2.kl);
             let (x2_u, y2_u, z2_u) = block2.xyz(b2.ih, b2.jh, b2.kh);
 
-            let d_lower = ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
-            let d_upper = ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
+            let d_lower =
+                ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
+            let d_upper =
+                ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
 
             if d_lower < best_d_lower {
                 best_d_lower = d_lower;
@@ -1223,8 +1265,12 @@ pub fn verify_periodicity(
                     let (x2_l, y2_l, z2_l) = block2.xyz(il, jl, kl);
                     let (x2_u, y2_u, z2_u) = block2.xyz(iu, ju, ku);
 
-                    let dl = ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
-                    let du = ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
+                    let dl =
+                        ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2))
+                            .sqrt();
+                    let du =
+                        ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2))
+                            .sqrt();
 
                     if dl < best_d_lower {
                         best_d_lower = dl;
@@ -1253,21 +1299,26 @@ pub fn verify_periodicity(
         }
 
         if !found {
-            eprintln!(
-                "verify_periodicity: MISMATCH at face_match index {}",
-                idx
-            );
+            eprintln!("verify_periodicity: MISMATCH at face_match index {}", idx);
             eprintln!(
                 "  block1 (block_index={}): lower=({},{},{}) upper=({},{},{})",
                 face_matches[idx].block1.block_index,
-                face_matches[idx].block1.il, face_matches[idx].block1.jl, face_matches[idx].block1.kl,
-                face_matches[idx].block1.ih, face_matches[idx].block1.jh, face_matches[idx].block1.kh,
+                face_matches[idx].block1.il,
+                face_matches[idx].block1.jl,
+                face_matches[idx].block1.kl,
+                face_matches[idx].block1.ih,
+                face_matches[idx].block1.jh,
+                face_matches[idx].block1.kh,
             );
             eprintln!(
                 "  block2 (block_index={}): lower=({},{},{}) upper=({},{},{})",
                 face_matches[idx].block2.block_index,
-                face_matches[idx].block2.il, face_matches[idx].block2.jl, face_matches[idx].block2.kl,
-                face_matches[idx].block2.ih, face_matches[idx].block2.jh, face_matches[idx].block2.kh,
+                face_matches[idx].block2.il,
+                face_matches[idx].block2.jl,
+                face_matches[idx].block2.kl,
+                face_matches[idx].block2.ih,
+                face_matches[idx].block2.jh,
+                face_matches[idx].block2.kh,
             );
             eprintln!(
                 "  Closest rotated block1 corner dist to block2 lower: {:.6e}",

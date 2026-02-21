@@ -26,9 +26,36 @@ pub fn max_aspect_ratio(block: &Block) -> Float {
     let j1 = [0, 0, jx, 0, jx, 0, jx, jx];
     let k1 = [0, 0, 0, kx, kx, kx, 0, kx];
 
-    let i2 = [1, ix.saturating_sub(1).max(1), 1, 1, 1, ix.saturating_sub(1).max(1), ix.saturating_sub(1).max(1), ix.saturating_sub(1).max(1)];
-    let j2 = [1, 1, jx.saturating_sub(1).max(1), 1, jx.saturating_sub(1).max(1), 1, jx.saturating_sub(1).max(1), jx.saturating_sub(1).max(1)];
-    let k2 = [1, 1, 1, kx.saturating_sub(1).max(1), kx.saturating_sub(1).max(1), kx.saturating_sub(1).max(1), 1, kx.saturating_sub(1).max(1)];
+    let i2 = [
+        1,
+        ix.saturating_sub(1).max(1),
+        1,
+        1,
+        1,
+        ix.saturating_sub(1).max(1),
+        ix.saturating_sub(1).max(1),
+        ix.saturating_sub(1).max(1),
+    ];
+    let j2 = [
+        1,
+        1,
+        jx.saturating_sub(1).max(1),
+        1,
+        jx.saturating_sub(1).max(1),
+        1,
+        jx.saturating_sub(1).max(1),
+        jx.saturating_sub(1).max(1),
+    ];
+    let k2 = [
+        1,
+        1,
+        1,
+        kx.saturating_sub(1).max(1),
+        kx.saturating_sub(1).max(1),
+        kx.saturating_sub(1).max(1),
+        1,
+        kx.saturating_sub(1).max(1),
+    ];
 
     let dist = |a: (Float, Float, Float), b: (Float, Float, Float)| -> Float {
         let dx = a.0 - b.0;

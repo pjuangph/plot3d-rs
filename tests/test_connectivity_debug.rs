@@ -3,13 +3,18 @@
 //! Usage (release build required for large meshes):
 //!   cargo test --release --test test_connectivity_debug -- --nocapture
 
-use std::collections::{HashMap, HashSet};
+mod common;
 
-use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 
 use plot3d::{
     connectivity_fast, full_face_match, get_face_intersection, get_outer_faces, read_plot3d_binary,
-    reduce_blocks, write_plot3d, BinaryFormat, Endian, FaceMatch, FaceRecord, FloatPrecision,
+    reduce_blocks, write_plot3d, BinaryFormat, Endian, FaceMatch, FloatPrecision,
+};
+
+use common::{
+    aabb_overlap, build_computed_keys, build_json_keys, group_by_block_pair, min_corner_distance,
+    GridProConnectivity, JsonFaceMatch, MatchKey, NormalizedFaceRecord,
 };
 
 // ---------------------------------------------------------------------------
@@ -22,149 +27,6 @@ const JSON_FILE: &str =
     "/Users/pjuangph/Documents/GitHub/plot3d_troubleshoot/gridpro_connectivity.json";
 const SUBSET_OUTPUT: &str = "/tmp/connectivity_debug_subset.p3d";
 const SUBSET_INDICES: &str = "/tmp/connectivity_debug_subset_indices.json";
-
-// ---------------------------------------------------------------------------
-// JSON deserialization
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Deserialize)]
-struct JsonBlockRecord {
-    block_index: usize,
-    #[serde(rename = "IMIN")]
-    imin: usize,
-    #[serde(rename = "JMIN")]
-    jmin: usize,
-    #[serde(rename = "KMIN")]
-    kmin: usize,
-    #[serde(rename = "IMAX")]
-    imax: usize,
-    #[serde(rename = "JMAX")]
-    jmax: usize,
-    #[serde(rename = "KMAX")]
-    kmax: usize,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct JsonFaceMatch {
-    block1: JsonBlockRecord,
-    block2: JsonBlockRecord,
-}
-
-#[derive(Debug, Deserialize)]
-struct GridProConnectivity {
-    face_matches: Vec<JsonFaceMatch>,
-}
-
-// ---------------------------------------------------------------------------
-// Normalized face record (orientation-agnostic, imin<=imax etc.)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct NormalizedFaceRecord {
-    block_index: usize,
-    imin: usize,
-    jmin: usize,
-    kmin: usize,
-    imax: usize,
-    jmax: usize,
-    kmax: usize,
-}
-
-impl NormalizedFaceRecord {
-    fn from_json_block(b: &JsonBlockRecord) -> Self {
-        Self {
-            block_index: b.block_index,
-            imin: b.imin.min(b.imax),
-            jmin: b.jmin.min(b.jmax),
-            kmin: b.kmin.min(b.kmax),
-            imax: b.imin.max(b.imax),
-            jmax: b.jmin.max(b.jmax),
-            kmax: b.kmin.max(b.kmax),
-        }
-    }
-
-    fn from_face_record(r: &FaceRecord) -> Self {
-        Self {
-            block_index: r.block_index,
-            imin: r.i_lo(),
-            jmin: r.j_lo(),
-            kmin: r.k_lo(),
-            imax: r.i_hi(),
-            jmax: r.j_hi(),
-            kmax: r.k_hi(),
-        }
-    }
-
-    fn face_tuple(&self) -> (usize, usize, usize, usize, usize, usize) {
-        (self.imin, self.jmin, self.kmin, self.imax, self.jmax, self.kmax)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// MatchKey: canonical unordered pair of faces
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct MatchKey {
-    face_a: NormalizedFaceRecord,
-    face_b: NormalizedFaceRecord,
-}
-
-impl MatchKey {
-    fn new(a: NormalizedFaceRecord, b: NormalizedFaceRecord) -> Self {
-        if a.block_index < b.block_index
-            || (a.block_index == b.block_index && a.face_tuple() <= b.face_tuple())
-        {
-            MatchKey { face_a: a, face_b: b }
-        } else {
-            MatchKey { face_a: b, face_b: a }
-        }
-    }
-
-    fn block_pair(&self) -> (usize, usize) {
-        let lo = self.face_a.block_index.min(self.face_b.block_index);
-        let hi = self.face_a.block_index.max(self.face_b.block_index);
-        (lo, hi)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helper: build key sets
-// ---------------------------------------------------------------------------
-
-fn build_json_keys(json_matches: &[JsonFaceMatch]) -> HashSet<MatchKey> {
-    json_matches
-        .iter()
-        .map(|jm| {
-            let a = NormalizedFaceRecord::from_json_block(&jm.block1);
-            let b = NormalizedFaceRecord::from_json_block(&jm.block2);
-            MatchKey::new(a, b)
-        })
-        .collect()
-}
-
-fn build_computed_keys(computed_matches: &[FaceMatch]) -> HashSet<MatchKey> {
-    computed_matches
-        .iter()
-        .map(|fm| {
-            let a = NormalizedFaceRecord::from_face_record(&fm.block1);
-            let b = NormalizedFaceRecord::from_face_record(&fm.block2);
-            MatchKey::new(a, b)
-        })
-        .collect()
-}
-
-// ---------------------------------------------------------------------------
-// Helper: group by block pair
-// ---------------------------------------------------------------------------
-
-fn group_by_block_pair(keys: &HashSet<MatchKey>) -> HashMap<(usize, usize), Vec<MatchKey>> {
-    let mut map: HashMap<(usize, usize), Vec<MatchKey>> = HashMap::new();
-    for k in keys {
-        map.entry(k.block_pair()).or_default().push(k.clone());
-    }
-    map
-}
 
 // ---------------------------------------------------------------------------
 // Helper: collect mismatch block indices
@@ -254,7 +116,13 @@ fn diagnose_missing_match(
     // Block dimensions
     println!(
         "       block{} dims: {}x{}x{}, block{} dims: {}x{}x{}",
-        b1_idx, block1.imax, block1.jmax, block1.kmax, b2_idx, block2.imax, block2.jmax,
+        b1_idx,
+        block1.imax,
+        block1.jmax,
+        block1.kmax,
+        b2_idx,
+        block2.imax,
+        block2.jmax,
         block2.kmax,
     );
 
@@ -263,7 +131,10 @@ fn diagnose_missing_match(
     let b2_ok = norm2.imax < block2.imax && norm2.jmax < block2.jmax && norm2.kmax < block2.kmax;
 
     if !b1_ok || !b2_ok {
-        println!("       WARNING: indices out of block bounds! b1_ok={}, b2_ok={}", b1_ok, b2_ok);
+        println!(
+            "       WARNING: indices out of block bounds! b1_ok={}, b2_ok={}",
+            b1_ok, b2_ok
+        );
         return;
     }
 
@@ -274,14 +145,14 @@ fn diagnose_missing_match(
     let (x2_hi, y2_hi, z2_hi) = block2.xyz(norm2.imax, norm2.jmax, norm2.kmax);
 
     // Try both corner pairings: direct and swapped
-    let d_lo_lo = ((x1_lo - x2_lo).powi(2) + (y1_lo - y2_lo).powi(2) + (z1_lo - z2_lo).powi(2))
-        .sqrt();
-    let d_hi_hi = ((x1_hi - x2_hi).powi(2) + (y1_hi - y2_hi).powi(2) + (z1_hi - z2_hi).powi(2))
-        .sqrt();
-    let d_lo_hi = ((x1_lo - x2_hi).powi(2) + (y1_lo - y2_hi).powi(2) + (z1_lo - z2_hi).powi(2))
-        .sqrt();
-    let d_hi_lo = ((x1_hi - x2_lo).powi(2) + (y1_hi - y2_lo).powi(2) + (z1_hi - z2_lo).powi(2))
-        .sqrt();
+    let d_lo_lo =
+        ((x1_lo - x2_lo).powi(2) + (y1_lo - y2_lo).powi(2) + (z1_lo - z2_lo).powi(2)).sqrt();
+    let d_hi_hi =
+        ((x1_hi - x2_hi).powi(2) + (y1_hi - y2_hi).powi(2) + (z1_hi - z2_hi).powi(2)).sqrt();
+    let d_lo_hi =
+        ((x1_lo - x2_hi).powi(2) + (y1_lo - y2_hi).powi(2) + (z1_lo - z2_hi).powi(2)).sqrt();
+    let d_hi_lo =
+        ((x1_hi - x2_lo).powi(2) + (y1_hi - y2_lo).powi(2) + (z1_hi - z2_lo).powi(2)).sqrt();
 
     let best_direct = d_lo_lo.max(d_hi_hi);
     let best_swapped = d_lo_hi.max(d_hi_lo);
@@ -305,8 +176,8 @@ fn diagnose_missing_match(
         .collect();
     if !non_divisible.is_empty() {
         let labels = [
-            "b1.imin", "b1.jmin", "b1.kmin", "b1.imax", "b1.jmax", "b1.kmax", "b2.imin",
-            "b2.jmin", "b2.kmin", "b2.imax", "b2.jmax", "b2.kmax",
+            "b1.imin", "b1.jmin", "b1.kmin", "b1.imax", "b1.jmax", "b1.kmax", "b2.imin", "b2.jmin",
+            "b2.kmin", "b2.imax", "b2.jmax", "b2.kmax",
         ];
         print!("       GCD={} NOT divisible:", gcd);
         for (i, &v) in &non_divisible {
@@ -325,7 +196,10 @@ fn diagnose_missing_match(
         .collect();
 
     if pair_matches.is_empty() {
-        println!("       No computed matches for block pair ({}, {})", b1_idx, b2_idx);
+        println!(
+            "       No computed matches for block pair ({}, {})",
+            b1_idx, b2_idx
+        );
     } else {
         println!(
             "       {} computed match(es) for this block pair:",
@@ -369,8 +243,13 @@ fn connectivity_debug() {
 
     // ── Step 2: Read mesh ────────────────────────────────────────────────
     println!("\n=== Step 2: Reading mesh ===");
-    let blocks = read_plot3d_binary(MESH_FILE, BinaryFormat::Raw, FloatPrecision::F64, Endian::Little)
-        .expect("Failed to read mesh file");
+    let blocks = read_plot3d_binary(
+        MESH_FILE,
+        BinaryFormat::Raw,
+        FloatPrecision::F64,
+        Endian::Little,
+    )
+    .expect("Failed to read mesh file");
     println!("  Blocks loaded: {}", blocks.len());
 
     // Print block dimension stats
@@ -433,7 +312,10 @@ fn connectivity_debug() {
     let pairs_both = json_pair_set.intersection(&computed_pair_set).count();
 
     println!("  Unique block pairs in JSON:     {}", json_pair_set.len());
-    println!("  Unique block pairs in computed:  {}", computed_pair_set.len());
+    println!(
+        "  Unique block pairs in computed:  {}",
+        computed_pair_set.len()
+    );
     println!("  Block pairs in both:             {}", pairs_both);
     println!(
         "  Block pairs only in JSON:        {}",
@@ -468,7 +350,13 @@ fn connectivity_debug() {
         );
         for (i, pair) in pairs_only_json.iter().take(30).enumerate() {
             let entries = &json_pairs[pair];
-            println!("  [{}] blocks ({}, {}): {} face match(es)", i, pair.0, pair.1, entries.len());
+            println!(
+                "  [{}] blocks ({}, {}): {} face match(es)",
+                i,
+                pair.0,
+                pair.1,
+                entries.len()
+            );
             for key in entries {
                 println!(
                     "       face_a[{},{},{}->{},{},{}] <-> face_b[{},{},{}->{},{},{}]",
@@ -497,14 +385,18 @@ fn connectivity_debug() {
         );
         for (i, pair) in pairs_only_computed.iter().take(30).enumerate() {
             let entries = &computed_pairs[pair];
-            println!("  [{}] blocks ({}, {}): {} face match(es)", i, pair.0, pair.1, entries.len());
+            println!(
+                "  [{}] blocks ({}, {}): {} face match(es)",
+                i,
+                pair.0,
+                pair.1,
+                entries.len()
+            );
         }
     }
 
     // ── Step 7: Detailed diagnostics for missing matches ─────────────────
-    println!(
-        "\n=== Step 7: Detailed diagnostics for missing matches (first 20) ==="
-    );
+    println!("\n=== Step 7: Detailed diagnostics for missing matches (first 20) ===");
     let missing_set: HashSet<_> = missing.iter().cloned().collect();
     let mut diagnosed = 0usize;
     for jm in &json_data.face_matches {
@@ -566,11 +458,7 @@ fn connectivity_debug() {
             Endian::Little,
         )
         .expect("Failed to write subset");
-        println!(
-            "  Wrote {} blocks to {}",
-            subset.len(),
-            SUBSET_OUTPUT
-        );
+        println!("  Wrote {} blocks to {}", subset.len(), SUBSET_OUTPUT);
 
         // Save the original block indices for the subset diagnostic test
         let indices_json = serde_json::to_string(&mismatch_indices).unwrap();
@@ -650,17 +538,17 @@ fn connectivity_debug() {
     // ── Summary ──────────────────────────────────────────────────────────
     println!("\n=== FINAL SUMMARY ===");
     println!("  Total blocks:                {}", blocks.len());
-    println!("  JSON face_matches:           {}", json_data.face_matches.len());
+    println!(
+        "  JSON face_matches:           {}",
+        json_data.face_matches.len()
+    );
     println!("  JSON unique keys:            {}", json_keys.len());
     println!("  Computed face_matches:       {}", computed_matches.len());
     println!("  Computed unique keys:        {}", computed_keys.len());
     println!("  Exact matches:               {}", common_count);
     println!("  Missing from computed:       {}", missing.len());
     println!("  Extra in computed:           {}", extra.len());
-    println!(
-        "  Block pairs only in JSON:    {}",
-        pairs_only_json.len()
-    );
+    println!("  Block pairs only in JSON:    {}", pairs_only_json.len());
     println!(
         "  Block pairs only in computed: {}",
         pairs_only_computed.len()
@@ -676,69 +564,6 @@ fn connectivity_debug() {
 // Focused diagnostic: classify ALL missing matches by failure type
 // ---------------------------------------------------------------------------
 
-/// Compute the minimum corner distance between two JSON face records,
-/// trying both direct and swapped orientations.
-/// Returns (min_distance, is_swapped).
-fn min_corner_distance(
-    jm: &JsonFaceMatch,
-    blocks: &[plot3d::Block],
-) -> Option<(f64, bool)> {
-    let b1_idx = jm.block1.block_index;
-    let b2_idx = jm.block2.block_index;
-    if b1_idx >= blocks.len() || b2_idx >= blocks.len() {
-        return None;
-    }
-    let block1 = &blocks[b1_idx];
-    let block2 = &blocks[b2_idx];
-
-    let n1 = NormalizedFaceRecord::from_json_block(&jm.block1);
-    let n2 = NormalizedFaceRecord::from_json_block(&jm.block2);
-
-    if n1.imax >= block1.imax || n1.jmax >= block1.jmax || n1.kmax >= block1.kmax {
-        return None;
-    }
-    if n2.imax >= block2.imax || n2.jmax >= block2.jmax || n2.kmax >= block2.kmax {
-        return None;
-    }
-
-    let (x1_lo, y1_lo, z1_lo) = block1.xyz(n1.imin, n1.jmin, n1.kmin);
-    let (x1_hi, y1_hi, z1_hi) = block1.xyz(n1.imax, n1.jmax, n1.kmax);
-    let (x2_lo, y2_lo, z2_lo) = block2.xyz(n2.imin, n2.jmin, n2.kmin);
-    let (x2_hi, y2_hi, z2_hi) = block2.xyz(n2.imax, n2.jmax, n2.kmax);
-
-    let d_direct = ((x1_lo - x2_lo).powi(2) + (y1_lo - y2_lo).powi(2) + (z1_lo - z2_lo).powi(2)).sqrt()
-        .max(((x1_hi - x2_hi).powi(2) + (y1_hi - y2_hi).powi(2) + (z1_hi - z2_hi).powi(2)).sqrt());
-    let d_swapped = ((x1_lo - x2_hi).powi(2) + (y1_lo - y2_hi).powi(2) + (z1_lo - z2_hi).powi(2)).sqrt()
-        .max(((x1_hi - x2_lo).powi(2) + (y1_hi - y2_lo).powi(2) + (z1_hi - z2_lo).powi(2)).sqrt());
-
-    if d_direct <= d_swapped {
-        Some((d_direct, false))
-    } else {
-        Some((d_swapped, true))
-    }
-}
-
-/// Check if two blocks have overlapping AABBs within tolerance.
-fn aabb_overlap(b1: &plot3d::Block, b2: &plot3d::Block, tol: f64) -> bool {
-    let aabb = |b: &plot3d::Block| -> [f64; 6] {
-        let mut xmin = f64::INFINITY;
-        let mut xmax = f64::NEG_INFINITY;
-        let mut ymin = f64::INFINITY;
-        let mut ymax = f64::NEG_INFINITY;
-        let mut zmin = f64::INFINITY;
-        let mut zmax = f64::NEG_INFINITY;
-        for &x in &b.x { xmin = xmin.min(x); xmax = xmax.max(x); }
-        for &y in &b.y { ymin = ymin.min(y); ymax = ymax.max(y); }
-        for &z in &b.z { zmin = zmin.min(z); zmax = zmax.max(z); }
-        [xmin, xmax, ymin, ymax, zmin, zmax]
-    };
-    let a = aabb(b1);
-    let b = aabb(b2);
-    a[1] + tol >= b[0] && b[1] + tol >= a[0]
-        && a[3] + tol >= b[2] && b[3] + tol >= a[2]
-        && a[5] + tol >= b[4] && b[5] + tol >= a[4]
-}
-
 #[test]
 fn classify_missing_matches() {
     println!("\n=== CLASSIFY MISSING MATCHES ===\n");
@@ -751,8 +576,13 @@ fn classify_missing_matches() {
     println!("  JSON face_matches: {}", json_data.face_matches.len());
 
     println!("Loading mesh...");
-    let blocks = read_plot3d_binary(MESH_FILE, BinaryFormat::Raw, FloatPrecision::F64, Endian::Little)
-        .expect("Failed to read mesh file");
+    let blocks = read_plot3d_binary(
+        MESH_FILE,
+        BinaryFormat::Raw,
+        FloatPrecision::F64,
+        Endian::Little,
+    )
+    .expect("Failed to read mesh file");
     println!("  Blocks loaded: {}", blocks.len());
 
     let gcd = plot3d::utils::compute_min_gcd(&blocks);
@@ -771,22 +601,26 @@ fn classify_missing_matches() {
 
     // Step 4: Classify each missing match
     // Collect the original JSON entries for missing matches
-    let missing_json: Vec<&JsonFaceMatch> = json_data.face_matches.iter().filter(|jm| {
-        let a = NormalizedFaceRecord::from_json_block(&jm.block1);
-        let b = NormalizedFaceRecord::from_json_block(&jm.block2);
-        let key = MatchKey::new(a, b);
-        missing.contains(&key)
-    }).collect();
+    let missing_json: Vec<&JsonFaceMatch> = json_data
+        .face_matches
+        .iter()
+        .filter(|jm| {
+            let a = NormalizedFaceRecord::from_json_block(&jm.block1);
+            let b = NormalizedFaceRecord::from_json_block(&jm.block2);
+            let key = MatchKey::new(a, b);
+            missing.contains(&key)
+        })
+        .collect();
     println!("  Missing JSON entries: {}", missing_json.len());
 
     // Reduce blocks for direct face matching tests
     let reduced = reduce_blocks(&blocks, gcd);
 
     // Classification buckets
-    let mut cat_exact_match = Vec::new();         // corners at distance < 1e-6
-    let mut cat_near_match = Vec::new();          // corners at distance 1e-6 to 1e-2
-    let mut cat_far = Vec::new();                 // corners at distance > 1e-2
-    let mut cat_out_of_bounds = Vec::new();       // indices out of block bounds
+    let mut cat_exact_match = Vec::new(); // corners at distance < 1e-6
+    let mut cat_near_match = Vec::new(); // corners at distance 1e-6 to 1e-2
+    let mut cat_far = Vec::new(); // corners at distance > 1e-2
+    let mut cat_out_of_bounds = Vec::new(); // indices out of block bounds
 
     for jm in &missing_json {
         match min_corner_distance(jm, &blocks) {
@@ -806,10 +640,22 @@ fn classify_missing_matches() {
     }
 
     println!("\n=== CLASSIFICATION SUMMARY ===");
-    println!("  Exact match (d < 1e-6):        {} -- faces coincide, algorithm should find them", cat_exact_match.len());
-    println!("  Near match (1e-6 < d < 1e-2):  {} -- tolerance issue or slight misalignment", cat_near_match.len());
-    println!("  Far (d > 1e-2):                {} -- likely periodic or non-adjacent", cat_far.len());
-    println!("  Out of bounds:                 {}", cat_out_of_bounds.len());
+    println!(
+        "  Exact match (d < 1e-6):        {} -- faces coincide, algorithm should find them",
+        cat_exact_match.len()
+    );
+    println!(
+        "  Near match (1e-6 < d < 1e-2):  {} -- tolerance issue or slight misalignment",
+        cat_near_match.len()
+    );
+    println!(
+        "  Far (d > 1e-2):                {} -- likely periodic or non-adjacent",
+        cat_far.len()
+    );
+    println!(
+        "  Out of bounds:                 {}",
+        cat_out_of_bounds.len()
+    );
 
     // ── Detailed analysis of exact-match failures ──
     println!("\n=== EXACT-MATCH FAILURES (d < 1e-6) - first 50 ===");
@@ -827,7 +673,10 @@ fn classify_missing_matches() {
         if !overlap {
             aabb_fail += 1;
             if idx < 10 {
-                println!("  [{}] block{}<->block{}: AABB FAIL (d={:.2e})", idx, b1_idx, b2_idx, d);
+                println!(
+                    "  [{}] block{}<->block{}: AABB FAIL (d={:.2e})",
+                    idx, b1_idx, b2_idx, d
+                );
             }
             continue;
         }
@@ -845,7 +694,9 @@ fn classify_missing_matches() {
                     break;
                 }
             }
-            if found { break; }
+            if found {
+                break;
+            }
         }
 
         if found {
@@ -866,9 +717,12 @@ fn classify_missing_matches() {
                 // Check if this block pair IS in computed matches (with different face indices)
                 let has_some_match = computed_matches.iter().any(|fm| {
                     (fm.block1.block_index == b1_idx && fm.block2.block_index == b2_idx)
-                    || (fm.block1.block_index == b2_idx && fm.block2.block_index == b1_idx)
+                        || (fm.block1.block_index == b2_idx && fm.block2.block_index == b1_idx)
                 });
-                println!("       Block pair has other computed matches: {}", has_some_match);
+                println!(
+                    "       Block pair has other computed matches: {}",
+                    has_some_match
+                );
             }
         } else {
             // No face match even in isolation -- the faces don't actually match as full faces
@@ -876,9 +730,8 @@ fn classify_missing_matches() {
             let mut partial_found = false;
             for f1 in &faces1 {
                 for f2 in &faces2 {
-                    let (pts, _, _) = get_face_intersection(
-                        f1, f2, &reduced[b1_idx], &reduced[b2_idx], 1e-6,
-                    );
+                    let (pts, _, _) =
+                        get_face_intersection(f1, f2, &reduced[b1_idx], &reduced[b2_idx], 1e-6);
                     if !pts.is_empty() {
                         partial_found = true;
                         if idx < 10 {
@@ -890,7 +743,9 @@ fn classify_missing_matches() {
                         break;
                     }
                 }
-                if partial_found { break; }
+                if partial_found {
+                    break;
+                }
             }
             if !partial_found {
                 aabb_pass_no_face_match += 1;
@@ -906,11 +761,24 @@ fn classify_missing_matches() {
                         d
                     );
                     // Print face details
-                    println!("       Block{} has {} outer faces, block{} has {} outer faces",
-                        b1_idx, faces1.len(), b2_idx, faces2.len());
-                    println!("       Block{} dims: {}x{}x{} (reduced), block{} dims: {}x{}x{} (reduced)",
-                        b1_idx, reduced[b1_idx].imax, reduced[b1_idx].jmax, reduced[b1_idx].kmax,
-                        b2_idx, reduced[b2_idx].imax, reduced[b2_idx].jmax, reduced[b2_idx].kmax);
+                    println!(
+                        "       Block{} has {} outer faces, block{} has {} outer faces",
+                        b1_idx,
+                        faces1.len(),
+                        b2_idx,
+                        faces2.len()
+                    );
+                    println!(
+                        "       Block{} dims: {}x{}x{} (reduced), block{} dims: {}x{}x{} (reduced)",
+                        b1_idx,
+                        reduced[b1_idx].imax,
+                        reduced[b1_idx].jmax,
+                        reduced[b1_idx].kmax,
+                        b2_idx,
+                        reduced[b2_idx].imax,
+                        reduced[b2_idx].jmax,
+                        reduced[b2_idx].kmax
+                    );
                 }
             }
         }
@@ -919,7 +787,10 @@ fn classify_missing_matches() {
     let exact_total = cat_exact_match.len();
     // Extrapolate for all exact matches
     let sampled = exact_total.min(50);
-    println!("\n  Exact-match failure breakdown (from {} sampled of {}):", sampled, exact_total);
+    println!(
+        "\n  Exact-match failure breakdown (from {} sampled of {}):",
+        sampled, exact_total
+    );
     println!("    AABB fail:                {}", aabb_fail);
     println!("    Face match exists (lost): {}", face_match_found);
     println!("    No face match at all:     {}", aabb_pass_no_face_match);
@@ -929,11 +800,17 @@ fn classify_missing_matches() {
     // Compute distance histogram
     let mut dist_buckets = [0usize; 5]; // <0.1, <0.5, <1.0, <5.0, >=5.0
     for (_, d) in &cat_far {
-        if *d < 0.1 { dist_buckets[0] += 1; }
-        else if *d < 0.5 { dist_buckets[1] += 1; }
-        else if *d < 1.0 { dist_buckets[2] += 1; }
-        else if *d < 5.0 { dist_buckets[3] += 1; }
-        else { dist_buckets[4] += 1; }
+        if *d < 0.1 {
+            dist_buckets[0] += 1;
+        } else if *d < 0.5 {
+            dist_buckets[1] += 1;
+        } else if *d < 1.0 {
+            dist_buckets[2] += 1;
+        } else if *d < 5.0 {
+            dist_buckets[3] += 1;
+        } else {
+            dist_buckets[4] += 1;
+        }
     }
     println!("  Distance distribution:");
     println!("    0.01 - 0.1:   {}", dist_buckets[0]);
@@ -950,9 +827,14 @@ fn classify_missing_matches() {
         let n1 = NormalizedFaceRecord::from_json_block(&jm.block1);
         let n2 = NormalizedFaceRecord::from_json_block(&jm.block2);
 
-        if b1_idx < blocks.len() && b2_idx < blocks.len()
-            && n1.imax < blocks[b1_idx].imax && n1.jmax < blocks[b1_idx].jmax && n1.kmax < blocks[b1_idx].kmax
-            && n2.imax < blocks[b2_idx].imax && n2.jmax < blocks[b2_idx].jmax && n2.kmax < blocks[b2_idx].kmax
+        if b1_idx < blocks.len()
+            && b2_idx < blocks.len()
+            && n1.imax < blocks[b1_idx].imax
+            && n1.jmax < blocks[b1_idx].jmax
+            && n1.kmax < blocks[b1_idx].kmax
+            && n2.imax < blocks[b2_idx].imax
+            && n2.jmax < blocks[b2_idx].jmax
+            && n2.kmax < blocks[b2_idx].kmax
         {
             let (x1, y1, z1) = blocks[b1_idx].xyz(n1.imin, n1.jmin, n1.kmin);
             let (x2, y2, z2) = blocks[b2_idx].xyz(n2.imin, n2.jmin, n2.kmin);
@@ -969,9 +851,15 @@ fn classify_missing_matches() {
     let mut would_match_1e3 = 0usize;
     let mut would_match_1e2 = 0usize;
     for (_, d) in &cat_near_match {
-        if *d < 1e-4 { would_match_1e4 += 1; }
-        if *d < 1e-3 { would_match_1e3 += 1; }
-        if *d < 1e-2 { would_match_1e2 += 1; }
+        if *d < 1e-4 {
+            would_match_1e4 += 1;
+        }
+        if *d < 1e-3 {
+            would_match_1e3 += 1;
+        }
+        if *d < 1e-2 {
+            would_match_1e2 += 1;
+        }
     }
     println!("  Would match with tol=1e-4: {}", would_match_1e4);
     println!("  Would match with tol=1e-3: {}", would_match_1e3);
@@ -999,9 +887,14 @@ fn classify_missing_matches() {
                 if json_extra > 0 && comp_extra > 0 {
                     split_diff_count += 1;
                     if shown < 5 {
-                        println!("  ({},{}): JSON has {} unique, computed has {} unique, {} in common",
-                            pair.0, pair.1, json_extra, comp_extra,
-                            json_set.intersection(&comp_set).count());
+                        println!(
+                            "  ({},{}): JSON has {} unique, computed has {} unique, {} in common",
+                            pair.0,
+                            pair.1,
+                            json_extra,
+                            comp_extra,
+                            json_set.intersection(&comp_set).count()
+                        );
                         shown += 1;
                     }
                 } else if json_extra > 0 {
@@ -1012,16 +905,34 @@ fn classify_missing_matches() {
             }
         }
     }
-    println!("  Different subdivision (both have unique): {}", split_diff_count);
-    println!("  JSON has extra faces for pair:            {}", json_has_more_count);
-    println!("  Computed has extra faces for pair:        {}", computed_has_more_count);
+    println!(
+        "  Different subdivision (both have unique): {}",
+        split_diff_count
+    );
+    println!(
+        "  JSON has extra faces for pair:            {}",
+        json_has_more_count
+    );
+    println!(
+        "  Computed has extra faces for pair:        {}",
+        computed_has_more_count
+    );
 
     // ── Final summary ──
     println!("\n=== OVERALL ROOT CAUSE BREAKDOWN ===");
     println!("  Total missing:     {}", missing.len());
-    println!("  Exact (d<1e-6):    {} -- algorithm bug (faces coincide but not found)", cat_exact_match.len());
-    println!("  Near (1e-6..1e-2): {} -- tolerance issue", cat_near_match.len());
-    println!("  Far (d>1e-2):      {} -- likely periodic or non-standard", cat_far.len());
+    println!(
+        "  Exact (d<1e-6):    {} -- algorithm bug (faces coincide but not found)",
+        cat_exact_match.len()
+    );
+    println!(
+        "  Near (1e-6..1e-2): {} -- tolerance issue",
+        cat_near_match.len()
+    );
+    println!(
+        "  Far (d>1e-2):      {} -- likely periodic or non-standard",
+        cat_far.len()
+    );
     println!("  Out of bounds:     {}", cat_out_of_bounds.len());
     println!();
 }
@@ -1038,9 +949,13 @@ fn debug_target_blocks() {
 
     // ── Step 1: Read mesh ──
     println!("Reading mesh...");
-    let blocks =
-        read_plot3d_binary(MESH_FILE, BinaryFormat::Raw, FloatPrecision::F64, Endian::Little)
-            .expect("Failed to read mesh file");
+    let blocks = read_plot3d_binary(
+        MESH_FILE,
+        BinaryFormat::Raw,
+        FloatPrecision::F64,
+        Endian::Little,
+    )
+    .expect("Failed to read mesh file");
     println!("  {} blocks loaded\n", blocks.len());
 
     let gcd = plot3d::utils::compute_min_gcd(&blocks);
@@ -1050,7 +965,11 @@ fn debug_target_blocks() {
     // ── Step 2: Run connectivity ──
     println!("Running connectivity_fast...");
     let (computed_matches, outer_faces) = connectivity_fast(&blocks);
-    println!("  {} face matches, {} outer faces\n", computed_matches.len(), outer_faces.len());
+    println!(
+        "  {} face matches, {} outer faces\n",
+        computed_matches.len(),
+        outer_faces.len()
+    );
 
     // ── Step 3: Per-block diagnostics ──
     for &bi in TARGET_BLOCKS {
@@ -1059,7 +978,11 @@ fn debug_target_blocks() {
         println!("{}", "=".repeat(60));
 
         if bi >= blocks.len() {
-            println!("  ERROR: block index {} out of range (nblocks={})", bi, blocks.len());
+            println!(
+                "  ERROR: block index {} out of range (nblocks={})",
+                bi,
+                blocks.len()
+            );
             continue;
         }
 
@@ -1067,8 +990,14 @@ fn debug_target_blocks() {
         let rblock = &reduced[bi];
 
         // 3a: Block dimensions
-        println!("  Dimensions (raw):     {}x{}x{}", block.imax, block.jmax, block.kmax);
-        println!("  Dimensions (reduced): {}x{}x{}", rblock.imax, rblock.jmax, rblock.kmax);
+        println!(
+            "  Dimensions (raw):     {}x{}x{}",
+            block.imax, block.jmax, block.kmax
+        );
+        println!(
+            "  Dimensions (reduced): {}x{}x{}",
+            rblock.imax, rblock.jmax, rblock.kmax
+        );
         let npoints = block.imax * block.jmax * block.kmax;
         println!("  Total points: {}", npoints);
 
@@ -1076,11 +1005,22 @@ fn debug_target_blocks() {
         let (mut xmin, mut xmax) = (f64::INFINITY, f64::NEG_INFINITY);
         let (mut ymin, mut ymax) = (f64::INFINITY, f64::NEG_INFINITY);
         let (mut zmin, mut zmax) = (f64::INFINITY, f64::NEG_INFINITY);
-        for &x in &block.x { xmin = xmin.min(x); xmax = xmax.max(x); }
-        for &y in &block.y { ymin = ymin.min(y); ymax = ymax.max(y); }
-        for &z in &block.z { zmin = zmin.min(z); zmax = zmax.max(z); }
-        println!("  AABB: x=[{:.6},{:.6}] y=[{:.6},{:.6}] z=[{:.6},{:.6}]",
-            xmin, xmax, ymin, ymax, zmin, zmax);
+        for &x in &block.x {
+            xmin = xmin.min(x);
+            xmax = xmax.max(x);
+        }
+        for &y in &block.y {
+            ymin = ymin.min(y);
+            ymax = ymax.max(y);
+        }
+        for &z in &block.z {
+            zmin = zmin.min(z);
+            zmax = zmax.max(z);
+        }
+        println!(
+            "  AABB: x=[{:.6},{:.6}] y=[{:.6},{:.6}] z=[{:.6},{:.6}]",
+            xmin, xmax, ymin, ymax, zmin, zmax
+        );
 
         // 3c: Outer faces (raw block)
         let (raw_faces, raw_self_matches) = get_outer_faces(block);
@@ -1101,8 +1041,18 @@ fn debug_target_blocks() {
             println!(
                 "    SelfMatch[{}]: [{},{},{}->{},{},{}] <-> [{},{},{}->{},{},{}]",
                 idx,
-                fa.imin(), fa.jmin(), fa.kmin(), fa.imax(), fa.jmax(), fa.kmax(),
-                fb.imin(), fb.jmin(), fb.kmin(), fb.imax(), fb.jmax(), fb.kmax(),
+                fa.imin(),
+                fa.jmin(),
+                fa.kmin(),
+                fa.imax(),
+                fa.jmax(),
+                fa.kmax(),
+                fb.imin(),
+                fb.jmin(),
+                fb.kmin(),
+                fb.imax(),
+                fb.jmax(),
+                fb.kmax(),
             );
         }
 
@@ -1125,30 +1075,59 @@ fn debug_target_blocks() {
             println!(
                 "    SelfMatch[{}]: [{},{},{}->{},{},{}] <-> [{},{},{}->{},{},{}]",
                 idx,
-                fa.imin(), fa.jmin(), fa.kmin(), fa.imax(), fa.jmax(), fa.kmax(),
-                fb.imin(), fb.jmin(), fb.kmin(), fb.imax(), fb.jmax(), fb.kmax(),
+                fa.imin(),
+                fa.jmin(),
+                fa.kmin(),
+                fa.imax(),
+                fa.jmax(),
+                fa.kmax(),
+                fb.imin(),
+                fb.jmin(),
+                fb.kmin(),
+                fb.imax(),
+                fb.jmax(),
+                fb.kmax(),
             );
         }
 
         // 3e: All connectivity matches involving this block
-        let block_matches: Vec<_> = computed_matches.iter().filter(|fm| {
-            fm.block1.block_index == bi || fm.block2.block_index == bi
-        }).collect();
-        println!("\n  Connectivity matches involving block {}: {}", bi, block_matches.len());
+        let block_matches: Vec<_> = computed_matches
+            .iter()
+            .filter(|fm| fm.block1.block_index == bi || fm.block2.block_index == bi)
+            .collect();
+        println!(
+            "\n  Connectivity matches involving block {}: {}",
+            bi,
+            block_matches.len()
+        );
         for (idx, fm) in block_matches.iter().enumerate() {
             println!(
                 "    Match[{}]: block{}[{},{},{}->{},{},{}] <-> block{}[{},{},{}->{},{},{}]",
                 idx,
-                fm.block1.block_index, fm.block1.il, fm.block1.jl, fm.block1.kl,
-                fm.block1.ih, fm.block1.jh, fm.block1.kh,
-                fm.block2.block_index, fm.block2.il, fm.block2.jl, fm.block2.kl,
-                fm.block2.ih, fm.block2.jh, fm.block2.kh,
+                fm.block1.block_index,
+                fm.block1.il,
+                fm.block1.jl,
+                fm.block1.kl,
+                fm.block1.ih,
+                fm.block1.jh,
+                fm.block1.kh,
+                fm.block2.block_index,
+                fm.block2.il,
+                fm.block2.jl,
+                fm.block2.kl,
+                fm.block2.ih,
+                fm.block2.jh,
+                fm.block2.kh,
             );
         }
 
         // 3f: Non-connected faces for this block
         let block_outer: Vec<_> = outer_faces.iter().filter(|f| f.block_index == bi).collect();
-        println!("\n  Non-connected faces for block {}: {}", bi, block_outer.len());
+        println!(
+            "\n  Non-connected faces for block {}: {}",
+            bi,
+            block_outer.len()
+        );
         for (idx, f) in block_outer.iter().enumerate() {
             let (cx0, cy0, cz0) = block.xyz(f.i_lo(), f.j_lo(), f.k_lo());
             let (cx1, cy1, cz1) = block.xyz(f.i_hi(), f.j_hi(), f.k_hi());
@@ -1163,12 +1142,17 @@ fn debug_target_blocks() {
         // 3g: AABB overlap — find which blocks overlap with this block
         let mut overlapping_blocks = Vec::new();
         for (j, other) in reduced.iter().enumerate() {
-            if j == bi { continue; }
+            if j == bi {
+                continue;
+            }
             if aabb_overlap(rblock, other, 1e-6) {
                 overlapping_blocks.push(j);
             }
         }
-        println!("\n  Blocks with AABB overlap (reduced): {}", overlapping_blocks.len());
+        println!(
+            "\n  Blocks with AABB overlap (reduced): {}",
+            overlapping_blocks.len()
+        );
         if overlapping_blocks.len() <= 20 {
             println!("    {:?}", overlapping_blocks);
         } else {
@@ -1201,9 +1185,8 @@ fn debug_target_blocks() {
                 // Try partial (node-by-node) intersection
                 for (fi, f1) in faces_bi.iter().enumerate() {
                     for (fj, f2) in faces_oj.iter().enumerate() {
-                        let (pts, _, _) = get_face_intersection(
-                            f1, f2, &reduced[bi], &reduced[oj], 1e-6,
-                        );
+                        let (pts, _, _) =
+                            get_face_intersection(f1, f2, &reduced[bi], &reduced[oj], 1e-6);
                         if !pts.is_empty() {
                             println!(
                                 "    PARTIAL MATCH: block{}:face{} <-> block{}:face{} ({} matching points)",
@@ -1219,16 +1202,28 @@ fn debug_target_blocks() {
                 // Try self-match manually with tighter analysis
                 println!("\n    Checking face-to-face distances within block {}:", bi);
                 for (fi, f1) in faces_bi.iter().enumerate() {
-                    for fj in (fi+1)..faces_bi.len() {
+                    for fj in (fi + 1)..faces_bi.len() {
                         let f2 = &faces_bi[fj];
                         let c1_lo = rblock.xyz(f1.imin(), f1.jmin(), f1.kmin());
                         let c1_hi = rblock.xyz(f1.imax(), f1.jmax(), f1.kmax());
                         let c2_lo = rblock.xyz(f2.imin(), f2.jmin(), f2.kmin());
                         let c2_hi = rblock.xyz(f2.imax(), f2.jmax(), f2.kmax());
-                        let d_lo = ((c1_lo.0-c2_lo.0).powi(2) + (c1_lo.1-c2_lo.1).powi(2) + (c1_lo.2-c2_lo.2).powi(2)).sqrt();
-                        let d_hi = ((c1_hi.0-c2_hi.0).powi(2) + (c1_hi.1-c2_hi.1).powi(2) + (c1_hi.2-c2_hi.2).powi(2)).sqrt();
-                        let d_swap_lo = ((c1_lo.0-c2_hi.0).powi(2) + (c1_lo.1-c2_hi.1).powi(2) + (c1_lo.2-c2_hi.2).powi(2)).sqrt();
-                        let d_swap_hi = ((c1_hi.0-c2_lo.0).powi(2) + (c1_hi.1-c2_lo.1).powi(2) + (c1_hi.2-c2_lo.2).powi(2)).sqrt();
+                        let d_lo = ((c1_lo.0 - c2_lo.0).powi(2)
+                            + (c1_lo.1 - c2_lo.1).powi(2)
+                            + (c1_lo.2 - c2_lo.2).powi(2))
+                        .sqrt();
+                        let d_hi = ((c1_hi.0 - c2_hi.0).powi(2)
+                            + (c1_hi.1 - c2_hi.1).powi(2)
+                            + (c1_hi.2 - c2_hi.2).powi(2))
+                        .sqrt();
+                        let d_swap_lo = ((c1_lo.0 - c2_hi.0).powi(2)
+                            + (c1_lo.1 - c2_hi.1).powi(2)
+                            + (c1_lo.2 - c2_hi.2).powi(2))
+                        .sqrt();
+                        let d_swap_hi = ((c1_hi.0 - c2_lo.0).powi(2)
+                            + (c1_hi.1 - c2_lo.1).powi(2)
+                            + (c1_hi.2 - c2_lo.2).powi(2))
+                        .sqrt();
                         let best = d_lo.max(d_hi).min(d_swap_lo.max(d_swap_hi));
                         if best < 1e-2 {
                             println!(
@@ -1280,10 +1275,22 @@ fn debug_target_blocks() {
                         // Quick corner distance check first
                         let c2_lo = reduced[oj].xyz(f2.imin(), f2.jmin(), f2.kmin());
                         let c2_hi = reduced[oj].xyz(f2.imax(), f2.jmax(), f2.kmax());
-                        let d_lo = ((fx0-c2_lo.0).powi(2) + (fy0-c2_lo.1).powi(2) + (fz0-c2_lo.2).powi(2)).sqrt();
-                        let d_hi = ((fx1-c2_hi.0).powi(2) + (fy1-c2_hi.1).powi(2) + (fz1-c2_hi.2).powi(2)).sqrt();
-                        let d_swap_lo = ((fx0-c2_hi.0).powi(2) + (fy0-c2_hi.1).powi(2) + (fz0-c2_hi.2).powi(2)).sqrt();
-                        let d_swap_hi = ((fx1-c2_lo.0).powi(2) + (fy1-c2_lo.1).powi(2) + (fz1-c2_lo.2).powi(2)).sqrt();
+                        let d_lo = ((fx0 - c2_lo.0).powi(2)
+                            + (fy0 - c2_lo.1).powi(2)
+                            + (fz0 - c2_lo.2).powi(2))
+                        .sqrt();
+                        let d_hi = ((fx1 - c2_hi.0).powi(2)
+                            + (fy1 - c2_hi.1).powi(2)
+                            + (fz1 - c2_hi.2).powi(2))
+                        .sqrt();
+                        let d_swap_lo = ((fx0 - c2_hi.0).powi(2)
+                            + (fy0 - c2_hi.1).powi(2)
+                            + (fz0 - c2_hi.2).powi(2))
+                        .sqrt();
+                        let d_swap_hi = ((fx1 - c2_lo.0).powi(2)
+                            + (fy1 - c2_lo.1).powi(2)
+                            + (fz1 - c2_lo.2).powi(2))
+                        .sqrt();
                         let best_corner = d_lo.max(d_hi).min(d_swap_lo.max(d_swap_hi));
 
                         if best_corner < 0.01 {
@@ -1299,9 +1306,8 @@ fn debug_target_blocks() {
                                 found_any = true;
                             }
                             // Try partial intersection
-                            let (pts, _, _) = get_face_intersection(
-                                &target_face, f2, rblock, &reduced[oj], 1e-6,
-                            );
+                            let (pts, _, _) =
+                                get_face_intersection(&target_face, f2, rblock, &reduced[oj], 1e-6);
                             if !pts.is_empty() {
                                 // Map the matched points back to original indices
                                 let i1_min = pts.iter().map(|p| p.i1).min().unwrap() * gcd;
@@ -1328,7 +1334,10 @@ fn debug_target_blocks() {
                     }
                 }
                 if !found_any {
-                    println!("      No match found (checked {} overlapping blocks)", overlapping_blocks.len());
+                    println!(
+                        "      No match found (checked {} overlapping blocks)",
+                        overlapping_blocks.len()
+                    );
                 }
             }
         }
@@ -1354,12 +1363,20 @@ fn debug_target_blocks() {
         'x',
         true,
     );
-    println!("  {} periodic pairs, {} remaining outer", periodic_faces.len(), remaining_outer.len());
+    println!(
+        "  {} periodic pairs, {} remaining outer",
+        periodic_faces.len(),
+        remaining_outer.len()
+    );
 
     println!("\nVerifying periodicity...");
     let (verified, mismatched) =
         plot3d::verify_periodicity(&blocks, &periodic_faces, rotation_angle_rad, 'x', 1e-4);
-    println!("  {} verified, {} mismatched", verified.len(), mismatched.len());
+    println!(
+        "  {} verified, {} mismatched",
+        verified.len(),
+        mismatched.len()
+    );
 
     // ── Step 4b: Node-level matching for non-connected faces ──
     // Use reduced blocks for speed. For each non-connected face, sample corner
@@ -1373,12 +1390,18 @@ fn debug_target_blocks() {
         if block_outer.is_empty() {
             continue;
         }
-        println!("\n--- Block {} ({} non-connected faces) ---", bi, block_outer.len());
+        println!(
+            "\n--- Block {} ({} non-connected faces) ---",
+            bi,
+            block_outer.len()
+        );
 
         let rblock = &reduced[bi];
 
         // Find AABB-overlapping blocks (reduced)
-        let overlapping: Vec<usize> = reduced.iter().enumerate()
+        let overlapping: Vec<usize> = reduced
+            .iter()
+            .enumerate()
             .filter(|(j, other)| *j != bi && aabb_overlap(rblock, other, 1e-6))
             .map(|(j, _)| j)
             .collect();
@@ -1393,8 +1416,19 @@ fn debug_target_blocks() {
 
             println!(
                 "  Outer[{}]: [{},{},{}->{},{},{}] (reduced from [{},{},{}->{},{},{}])",
-                oidx, i_lo, j_lo, k_lo, i_hi, j_hi, k_hi,
-                of.i_lo(), of.j_lo(), of.k_lo(), of.i_hi(), of.j_hi(), of.k_hi(),
+                oidx,
+                i_lo,
+                j_lo,
+                k_lo,
+                i_hi,
+                j_hi,
+                k_hi,
+                of.i_lo(),
+                of.j_lo(),
+                of.k_lo(),
+                of.i_hi(),
+                of.j_hi(),
+                of.k_hi(),
             );
 
             // Check all 4 corners of the face
@@ -1420,7 +1454,6 @@ fn debug_target_blocks() {
                     let nk = other.kmax - 1;
 
                     // Check 6 boundary faces of the other block
-                    let mut found = false;
                     'face_check: for face_spec in &[
                         (0usize..=0, 0usize..=nj, 0usize..=nk),
                         (ni..=ni, 0..=nj, 0..=nk),
@@ -1433,9 +1466,9 @@ fn debug_target_blocks() {
                             for fj in face_spec.1.clone() {
                                 for fk in face_spec.2.clone() {
                                     let (ox, oy, oz) = other.xyz(fi, fj, fk);
-                                    let d2 = (cx-ox).powi(2) + (cy-oy).powi(2) + (cz-oz).powi(2);
+                                    let d2 =
+                                        (cx - ox).powi(2) + (cy - oy).powi(2) + (cz - oz).powi(2);
                                     if d2 < tol * tol {
-                                        found = true;
                                         matching_blocks.push((oj, fi, fj, fk));
                                         break 'face_check;
                                     }
@@ -1447,7 +1480,12 @@ fn debug_target_blocks() {
                 if !matching_blocks.is_empty() {
                     println!(
                         "    Corner({},{},{}) = ({:.6},{:.6},{:.6}) -> matches: {:?}",
-                        ci, cj, ck, cx, cy, cz,
+                        ci,
+                        cj,
+                        ck,
+                        cx,
+                        cy,
+                        cz,
                         matching_blocks.iter().take(5).collect::<Vec<_>>()
                     );
                 }
@@ -1464,10 +1502,17 @@ fn debug_target_blocks() {
     // For Block 1352: test against block 1437
     // For Block 4611: test against block 980, 4793, 4844
     let test_pairs: Vec<(usize, usize)> = vec![
-        (2603, 5003), (3201, 5003), (3472, 5003), (3284, 5003),
-        (3228, 4997), (1722, 4997),
-        (24, 1352), (1437, 1352),
-        (980, 4611), (4793, 4611), (4844, 4611),
+        (2603, 5003),
+        (3201, 5003),
+        (3472, 5003),
+        (3284, 5003),
+        (3228, 4997),
+        (1722, 4997),
+        (24, 1352),
+        (1437, 1352),
+        (980, 4611),
+        (4793, 4611),
+        (4844, 4611),
     ];
 
     for (bi, bj) in &test_pairs {
@@ -1487,18 +1532,33 @@ fn debug_target_blocks() {
             f.set_block_index(bj);
         }
 
-        println!("\n  Testing blocks {} ({}x{}x{}) vs {} ({}x{}x{}):",
-            bi, reduced[bi].imax, reduced[bi].jmax, reduced[bi].kmax,
-            bj, reduced[bj].imax, reduced[bj].jmax, reduced[bj].kmax);
-        println!("    Block {} has {} faces, Block {} has {} faces",
-            bi, faces_i.len(), bj, faces_j.len());
+        println!(
+            "\n  Testing blocks {} ({}x{}x{}) vs {} ({}x{}x{}):",
+            bi,
+            reduced[bi].imax,
+            reduced[bi].jmax,
+            reduced[bi].kmax,
+            bj,
+            reduced[bj].imax,
+            reduced[bj].jmax,
+            reduced[bj].kmax
+        );
+        println!(
+            "    Block {} has {} faces, Block {} has {} faces",
+            bi,
+            faces_i.len(),
+            bj,
+            faces_j.len()
+        );
 
         // Try find_matching_blocks directly
         let mut faces_i_clone = faces_i.clone();
         let mut faces_j_clone = faces_j.clone();
         let matches = plot3d::connectivity::find_matching_blocks(
-            &reduced[bi], &reduced[bj],
-            &mut faces_i_clone, &mut faces_j_clone,
+            &reduced[bi],
+            &reduced[bj],
+            &mut faces_i_clone,
+            &mut faces_j_clone,
             1e-6,
         );
         println!("    find_matching_blocks: {} matches found", matches.len());
@@ -1517,28 +1577,59 @@ fn debug_target_blocks() {
             let k2_max = pts.iter().map(|p| p.k2).max().unwrap() * gcd;
             println!(
                 "      [{}] {} pts: block{}[{},{},{}->{},{},{}] <-> block{}[{},{},{}->{},{},{}]",
-                idx, pts.len(),
-                bi, i1_min, j1_min, k1_min, i1_max, j1_max, k1_max,
-                bj, i2_min, j2_min, k2_min, i2_max, j2_max, k2_max,
+                idx,
+                pts.len(),
+                bi,
+                i1_min,
+                j1_min,
+                k1_min,
+                i1_max,
+                j1_max,
+                k1_max,
+                bj,
+                i2_min,
+                j2_min,
+                k2_min,
+                i2_max,
+                j2_max,
+                k2_max,
             );
         }
-        println!("    Remaining: block{} has {} faces, block{} has {} faces",
-            bi, faces_i_clone.len(), bj, faces_j_clone.len());
+        println!(
+            "    Remaining: block{} has {} faces, block{} has {} faces",
+            bi,
+            faces_i_clone.len(),
+            bj,
+            faces_j_clone.len()
+        );
 
         // Also check existing connectivity matches between these blocks
-        let existing: Vec<_> = computed_matches.iter().filter(|fm| {
-            (fm.block1.block_index == bi && fm.block2.block_index == bj)
-            || (fm.block1.block_index == bj && fm.block2.block_index == bi)
-        }).collect();
+        let existing: Vec<_> = computed_matches
+            .iter()
+            .filter(|fm| {
+                (fm.block1.block_index == bi && fm.block2.block_index == bj)
+                    || (fm.block1.block_index == bj && fm.block2.block_index == bi)
+            })
+            .collect();
         println!("    Existing connectivity matches: {}", existing.len());
         for (idx, fm) in existing.iter().enumerate() {
             println!(
                 "      [{}] block{}[{},{},{}->{},{},{}] <-> block{}[{},{},{}->{},{},{}]",
                 idx,
-                fm.block1.block_index, fm.block1.il, fm.block1.jl, fm.block1.kl,
-                fm.block1.ih, fm.block1.jh, fm.block1.kh,
-                fm.block2.block_index, fm.block2.il, fm.block2.jl, fm.block2.kl,
-                fm.block2.ih, fm.block2.jh, fm.block2.kh,
+                fm.block1.block_index,
+                fm.block1.il,
+                fm.block1.jl,
+                fm.block1.kl,
+                fm.block1.ih,
+                fm.block1.jh,
+                fm.block1.kh,
+                fm.block2.block_index,
+                fm.block2.il,
+                fm.block2.jl,
+                fm.block2.kl,
+                fm.block2.ih,
+                fm.block2.jh,
+                fm.block2.kh,
             );
         }
     }
@@ -1546,22 +1637,36 @@ fn debug_target_blocks() {
     for &bi in TARGET_BLOCKS {
         println!("\n--- Block {} after periodicity ---", bi);
 
-        let periodic_for_block: Vec<_> = periodic_faces.iter().filter(|fm| {
-            fm.block1.block_index == bi || fm.block2.block_index == bi
-        }).collect();
+        let periodic_for_block: Vec<_> = periodic_faces
+            .iter()
+            .filter(|fm| fm.block1.block_index == bi || fm.block2.block_index == bi)
+            .collect();
         println!("  Periodic matches: {}", periodic_for_block.len());
         for (idx, fm) in periodic_for_block.iter().enumerate() {
             println!(
                 "    Periodic[{}]: block{}[{},{},{}->{},{},{}] <-> block{}[{},{},{}->{},{},{}]",
                 idx,
-                fm.block1.block_index, fm.block1.il, fm.block1.jl, fm.block1.kl,
-                fm.block1.ih, fm.block1.jh, fm.block1.kh,
-                fm.block2.block_index, fm.block2.il, fm.block2.jl, fm.block2.kl,
-                fm.block2.ih, fm.block2.jh, fm.block2.kh,
+                fm.block1.block_index,
+                fm.block1.il,
+                fm.block1.jl,
+                fm.block1.kl,
+                fm.block1.ih,
+                fm.block1.jh,
+                fm.block1.kh,
+                fm.block2.block_index,
+                fm.block2.il,
+                fm.block2.jl,
+                fm.block2.kl,
+                fm.block2.ih,
+                fm.block2.jh,
+                fm.block2.kh,
             );
         }
 
-        let remaining_for_block: Vec<_> = remaining_outer.iter().filter(|f| f.block_index == bi).collect();
+        let remaining_for_block: Vec<_> = remaining_outer
+            .iter()
+            .filter(|f| f.block_index == bi)
+            .collect();
         println!("  Remaining non-connected: {}", remaining_for_block.len());
         for (idx, f) in remaining_for_block.iter().enumerate() {
             let (cx0, cy0, cz0) = blocks[bi].xyz(f.i_lo(), f.j_lo(), f.k_lo());
@@ -1575,12 +1680,17 @@ fn debug_target_blocks() {
         }
 
         // Summary of face accounting
-        let conn_count = computed_matches.iter().filter(|fm| {
-            fm.block1.block_index == bi || fm.block2.block_index == bi
-        }).count();
-        println!("  SUMMARY: {} connectivity + {} periodic + {} remaining = {} total accounted",
-            conn_count, periodic_for_block.len(), remaining_for_block.len(),
-            conn_count + periodic_for_block.len() + remaining_for_block.len());
+        let conn_count = computed_matches
+            .iter()
+            .filter(|fm| fm.block1.block_index == bi || fm.block2.block_index == bi)
+            .count();
+        println!(
+            "  SUMMARY: {} connectivity + {} periodic + {} remaining = {} total accounted",
+            conn_count,
+            periodic_for_block.len(),
+            remaining_for_block.len(),
+            conn_count + periodic_for_block.len() + remaining_for_block.len()
+        );
     }
 
     println!("\n=== DONE ===");

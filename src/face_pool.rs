@@ -5,7 +5,8 @@ use std::collections::HashSet;
 
 use crate::{
     block::Block,
-    block_face_functions::{to_radius, to_theta, Face, FaceAxis},
+    block_face_functions::{Face, FaceAxis},
+    cylindrical::{to_radius, to_theta},
     face_record::{FaceKey, FaceRecord},
     utils::{apply_rotation, distance3},
     Float, PI,
@@ -229,16 +230,14 @@ impl FacePool {
                 if info.axial_max
                     < axial_range.0 - 0.1 * (axial_range.1 - axial_range.0).abs().max(1e-12)
                     || info.axial_min
-                        > axial_range.1
-                            + 0.1 * (axial_range.1 - axial_range.0).abs().max(1e-12)
+                        > axial_range.1 + 0.1 * (axial_range.1 - axial_range.0).abs().max(1e-12)
                 {
                     continue;
                 }
                 if info.radial_max
                     < radial_range.0 - 0.1 * (radial_range.1 - radial_range.0).abs().max(1e-12)
                     || info.radial_min
-                        > radial_range.1
-                            + 0.1 * (radial_range.1 - radial_range.0).abs().max(1e-12)
+                        > radial_range.1 + 0.1 * (radial_range.1 - radial_range.0).abs().max(1e-12)
                 {
                     continue;
                 }
@@ -269,16 +268,14 @@ impl FacePool {
                 if info.axial_max
                     < axial_range.0 - 0.1 * (axial_range.1 - axial_range.0).abs().max(1e-12)
                     || info.axial_min
-                        > axial_range.1
-                            + 0.1 * (axial_range.1 - axial_range.0).abs().max(1e-12)
+                        > axial_range.1 + 0.1 * (axial_range.1 - axial_range.0).abs().max(1e-12)
                 {
                     continue;
                 }
                 if info.radial_max
                     < radial_range.0 - 0.1 * (radial_range.1 - radial_range.0).abs().max(1e-12)
                     || info.radial_min
-                        > radial_range.1
-                            + 0.1 * (radial_range.1 - radial_range.0).abs().max(1e-12)
+                        > radial_range.1 + 0.1 * (radial_range.1 - radial_range.0).abs().max(1e-12)
                 {
                     continue;
                 }
@@ -302,8 +299,7 @@ impl FacePool {
         let target_rev = info.theta_centroid - rotation_angle;
         let axial_range = (info.axial_min, info.axial_max);
         let radial_range = (info.radial_min, info.radial_max);
-        let mut candidates =
-            self.find_candidates(target_fwd, axial_range, radial_range, theta_tol);
+        let mut candidates = self.find_candidates(target_fwd, axial_range, radial_range, theta_tol);
         candidates.extend(self.find_candidates(target_rev, axial_range, radial_range, theta_tol));
         candidates.sort_unstable();
         candidates.dedup();
