@@ -13,7 +13,7 @@ path = "src/lib.rs"
 byteorder = "1.5"
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-metis = { version = "0.2", optional = true }
+metis-rs = { version = "0.1", optional = true }
 
 # for tests (download)
 reqwest = { version = "0.12", features = ["blocking"] }
@@ -23,7 +23,7 @@ rayon = "1.11.0"
 [features]
 default = []
 f32 = []
-metis-partition = ["metis"]
+metis-partition = ["metis-rs"]
 
 [dev-dependencies]
 tempfile = "3.10"

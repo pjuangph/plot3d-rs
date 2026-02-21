@@ -30,9 +30,9 @@ pub struct BlockGraph {
 /// CSR (Compressed Sparse Row) representation of a block graph.
 #[derive(Clone, Debug)]
 pub struct CsrGraph {
-    pub xadj: Vec<i32>,
-    pub adjncy: Vec<i32>,
-    pub eweights: Vec<i32>,
+    pub xadj: Vec<usize>,
+    pub adjncy: Vec<usize>,
+    pub eweights: Vec<i64>,
 }
 
 /// Build a weighted graph from face-match data.
@@ -105,16 +105,16 @@ pub fn build_weighted_graph_from_face_matches(
 
 /// Convert a [`BlockGraph`] to CSR arrays suitable for METIS.
 pub fn csr_from_block_graph(graph: &BlockGraph) -> CsrGraph {
-    let mut xadj: Vec<i32> = vec![0];
-    let mut adjncy: Vec<i32> = Vec::new();
-    let mut eweights: Vec<i32> = Vec::new();
+    let mut xadj: Vec<usize> = vec![0];
+    let mut adjncy: Vec<usize> = Vec::new();
+    let mut eweights: Vec<i64> = Vec::new();
 
-    let mut count: i32 = 0;
+    let mut count: usize = 0;
     for u in 0..graph.adj_list.len() {
         for &v in &graph.adj_list[u] {
-            adjncy.push(v as i32);
+            adjncy.push(v);
             let w = graph.edge_weights[u].get(&v).copied().unwrap_or(1);
-            eweights.push(w as i32);
+            eweights.push(w);
             count += 1;
         }
         xadj.push(count);
@@ -151,32 +151,18 @@ pub fn partition_from_face_matches(
     );
     let csr = csr_from_block_graph(&graph);
 
-    let vwgt: Option<Vec<metis::Idx>> = if favor_blocksize {
-        Some(block_sizes.iter().map(|&s| s as metis::Idx).collect())
-    } else {
-        None
-    };
+    // Build metis-rs Graph
+    let mut g = metis_rs::Graph::new(n_blocks, csr.xadj, csr.adjncy)
+        .with_adjwgt(csr.eweights);
 
-    let mut part = vec![0 as metis::Idx; n_blocks];
-
-    // Build METIS graph and partition
-    let ncon: metis::Idx = 1;
-    let nparts_idx = nparts as metis::Idx;
-
-    let result = metis::Graph::new(ncon, nparts_idx, &csr.xadj, &csr.adjncy);
-    match result {
-        Ok(mut g) => {
-            if let Some(ref vw) = vwgt {
-                g = g.set_vwgt(vw);
-            }
-            g = g.set_adjwgt(&csr.eweights);
-            g.part_kway(&mut part)
-                .map_err(|e| format!("METIS partitioning failed: {:?}", e))?;
-        }
-        Err(e) => return Err(format!("Failed to create METIS graph: {:?}", e)),
+    if favor_blocksize {
+        let vwgt: Vec<i64> = block_sizes.iter().map(|&s| s as i64).collect();
+        g = g.with_vwgt(vwgt);
     }
 
-    Ok((part, graph))
+    let (_edge_cut, part) = metis_rs::partition(&g, nparts);
+
+    Ok((part.iter().map(|&p| p as i32).collect(), graph))
 }
 
 /// Write ddcmp.dat and ddcmp_info.txt files for domain decomposition.

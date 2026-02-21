@@ -45,8 +45,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac9fe6cdbb24b6ade63616c0a0688e45bb56732262c158df3c0c4bea4ca47cb7"
 dependencies = [
  "find-msvc-tools",
- "jobserver",
- "libc",
  "shlex",
 ]
 
@@ -571,16 +569,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a5f13b858c8d314ee3e8f639011f7ccefe71f97f96e50151fb991f267928e2c"
 
 [[package]]
-name = "jobserver"
-version = "0.1.34"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9afb3de4395d6b3e67a780b6de64b51c978ecf11cb9a462c66be7d4ca9039d33"
-dependencies = [
- "getrandom 0.3.4",
- "libc",
-]
-
-[[package]]
 name = "js-sys"
 version = "0.3.81"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -621,22 +609,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
 
 [[package]]
-name = "metis"
-version = "0.2.2"
+name = "metis-rs"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3653658399c092e0912b25c591e9dc89bae5c1db377b85c52011991f8b628ceb"
-dependencies = [
- "metis-sys",
-]
-
-[[package]]
-name = "metis-sys"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "769ee6be814b21c52afcc631f07051f578487d642f3e89a45f2a086fd94fffa9"
-dependencies = [
- "cc",
-]
+checksum = "dfe65544c5a5c7c205f58e03279ccbc37e1d0d827fbb4868c548f98ea4012686"
 
 [[package]]
 name = "mime"
@@ -752,7 +728,7 @@ version = "0.1.5"
 dependencies = [
  "byteorder",
  "indicatif",
- "metis",
+ "metis-rs",
  "rayon",
  "reqwest",
  "serde",
