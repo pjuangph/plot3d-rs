@@ -661,64 +661,78 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
     let mut matches_to_remove: HashSet<FaceKey> = consumed_keys;
 
     // ===== PHASE 2: Partial face matching (slow, node-by-node) =====
-    let pb = ProgressBar::new(combos.len() as u64);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "{msg} [{bar:40.cyan/blue}] {pos}/{len} pairs ({eta} remaining)",
-        )
-        .unwrap()
-        .progress_chars("=>-"),
-    );
-    pb.set_message("Connectivity (partial matching)");
+    // Iterate until convergence: after splitting faces for one block pair,
+    // the remnants may match faces from other blocks that were previously
+    // consumed. Repeat until no new matches are found.
+    let mut phase2_round = 0;
+    let mut phase2_changed = true;
+    while phase2_changed {
+        phase2_changed = false;
+        phase2_round += 1;
 
-    for (i, j) in combos {
-        pb.inc(1);
-        // candidate_neighbor_pairs guarantees i < j
-        let (left, right) = block_outer_faces.split_at_mut(j);
-        let (left, right) = (&mut left[i], &mut right[0]);
+        let pb = ProgressBar::new(combos.len() as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{msg} [{bar:40.cyan/blue}] {pos}/{len} pairs ({eta} remaining)",
+            )
+            .unwrap()
+            .progress_chars("=>-"),
+        );
+        pb.set_message(format!("Connectivity (partial matching, round {})", phase2_round));
 
-        // Skip if either block has no remaining unmatched faces
-        if left.is_empty() || right.is_empty() {
-            continue;
+        for &(i, j) in &combos {
+            pb.inc(1);
+            // candidate_neighbor_pairs guarantees i < j
+            let (left, right) = block_outer_faces.split_at_mut(j);
+            let (left, right) = (&mut left[i], &mut right[0]);
+
+            // Skip if either block has no remaining unmatched faces
+            if left.is_empty() || right.is_empty() {
+                continue;
+            }
+
+            let mut match_points =
+                find_matching_blocks(&blocks[i], &blocks[j], left, right, DEFAULT_TOL);
+            for points in match_points.drain(..) {
+                phase2_changed = true;
+                let mut face1 = create_face_from_diagonals(
+                    &blocks[i],
+                    points.iter().map(|p| p.i1).min().unwrap(),
+                    points.iter().map(|p| p.j1).min().unwrap(),
+                    points.iter().map(|p| p.k1).min().unwrap(),
+                    points.iter().map(|p| p.i1).max().unwrap(),
+                    points.iter().map(|p| p.j1).max().unwrap(),
+                    points.iter().map(|p| p.k1).max().unwrap(),
+                );
+                face1.set_block_index(i);
+                let mut face2 = create_face_from_diagonals(
+                    &blocks[j],
+                    points.iter().map(|p| p.i2).min().unwrap(),
+                    points.iter().map(|p| p.j2).min().unwrap(),
+                    points.iter().map(|p| p.k2).min().unwrap(),
+                    points.iter().map(|p| p.i2).max().unwrap(),
+                    points.iter().map(|p| p.j2).max().unwrap(),
+                    points.iter().map(|p| p.k2).max().unwrap(),
+                );
+                face2.set_block_index(j);
+                matches_to_remove.insert(face1.index_key());
+                matches_to_remove.insert(face2.index_key());
+
+                let corner1 = FaceRecord::from_match_points(i, &points, true).unwrap();
+                let corner2 = FaceRecord::from_match_points(j, &points, false).unwrap();
+                matches.push(FaceMatch {
+                    block1: corner1,
+                    block2: corner2,
+                    points,
+                    orientation: None,
+                });
+            }
         }
-
-        let mut match_points =
-            find_matching_blocks(&blocks[i], &blocks[j], left, right, DEFAULT_TOL);
-        for points in match_points.drain(..) {
-            let mut face1 = create_face_from_diagonals(
-                &blocks[i],
-                points.iter().map(|p| p.i1).min().unwrap(),
-                points.iter().map(|p| p.j1).min().unwrap(),
-                points.iter().map(|p| p.k1).min().unwrap(),
-                points.iter().map(|p| p.i1).max().unwrap(),
-                points.iter().map(|p| p.j1).max().unwrap(),
-                points.iter().map(|p| p.k1).max().unwrap(),
-            );
-            face1.set_block_index(i);
-            let mut face2 = create_face_from_diagonals(
-                &blocks[j],
-                points.iter().map(|p| p.i2).min().unwrap(),
-                points.iter().map(|p| p.j2).min().unwrap(),
-                points.iter().map(|p| p.k2).min().unwrap(),
-                points.iter().map(|p| p.i2).max().unwrap(),
-                points.iter().map(|p| p.j2).max().unwrap(),
-                points.iter().map(|p| p.k2).max().unwrap(),
-            );
-            face2.set_block_index(j);
-            matches_to_remove.insert(face1.index_key());
-            matches_to_remove.insert(face2.index_key());
-
-            let corner1 = FaceRecord::from_match_points(i, &points, true).unwrap();
-            let corner2 = FaceRecord::from_match_points(j, &points, false).unwrap();
-            matches.push(FaceMatch {
-                block1: corner1,
-                block2: corner2,
-                points,
-                orientation: None,
-            });
-        }
+        pb.finish_with_message(format!(
+            "Connectivity round {} done (changed={})",
+            phase2_round, phase2_changed
+        ));
     }
-    pb.finish_with_message("Connectivity done");
 
     let mut outer_faces = Vec::new();
     for faces in &block_outer_faces {
@@ -831,6 +845,145 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
 
     // Remove self-matched faces from outer faces
     outer_faces.retain(|face| !self_match_keys.contains(&face.index_key()));
+
+    // ===== PHASE 3: Fresh-face validation for remaining outer faces =====
+    // Some outer faces remain unmatched because the matching block's face pool
+    // was consumed by an earlier combo in Phases 1–2.  Re-check each remaining
+    // outer face against *fresh* (un-consumed) outer faces of overlapping blocks.
+    {
+        let mut neighbors: Vec<Vec<usize>> = vec![Vec::new(); blocks.len()];
+        for &(i, j) in &combos {
+            neighbors[i].push(j);
+            neighbors[j].push(i);
+        }
+
+        // Precompute fresh outer faces and their AABBs for every block.
+        // We compute the AABB from ALL face nodes (not just 2 diagonal corners)
+        // because large curved faces can have interior extents far beyond their
+        // corner coordinates.
+        let fresh_all: Vec<Vec<Face>> = blocks
+            .iter()
+            .map(|block| {
+                let (faces, _) = get_outer_faces(block);
+                faces
+            })
+            .collect();
+
+        // Precompute [xmin, xmax, ymin, ymax, zmin, zmax] for each fresh face.
+        let fresh_aabbs: Vec<Vec<[Float; 6]>> = blocks
+            .iter()
+            .zip(fresh_all.iter())
+            .map(|(block, faces)| {
+                faces
+                    .iter()
+                    .map(|f| {
+                        let nodes = face_nodes(f, block);
+                        let mut aabb = [
+                            Float::INFINITY,
+                            Float::NEG_INFINITY,
+                            Float::INFINITY,
+                            Float::NEG_INFINITY,
+                            Float::INFINITY,
+                            Float::NEG_INFINITY,
+                        ];
+                        for n in &nodes {
+                            aabb[0] = aabb[0].min(n.coord[0]);
+                            aabb[1] = aabb[1].max(n.coord[0]);
+                            aabb[2] = aabb[2].min(n.coord[1]);
+                            aabb[3] = aabb[3].max(n.coord[1]);
+                            aabb[4] = aabb[4].min(n.coord[2]);
+                            aabb[5] = aabb[5].max(n.coord[2]);
+                        }
+                        aabb
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let pb = ProgressBar::new(outer_faces.len() as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{msg} [{bar:40.cyan/blue}] {pos}/{len} ({eta} remaining)",
+            )
+            .unwrap()
+            .progress_chars("=>-"),
+        );
+        pb.set_message("Connectivity Phase 3 (fresh-face validation)");
+
+        let mut phase3_keys: HashSet<FaceKey> = HashSet::new();
+
+        for face in outer_faces.iter() {
+            pb.inc(1);
+            if phase3_keys.contains(&face.index_key()) {
+                continue;
+            }
+            let bi = match face.block_index() {
+                Some(v) => v,
+                None => continue,
+            };
+
+            // Compute proper AABB of this face from all its nodes
+            let face_nodes_list = face_nodes(face, &blocks[bi]);
+            let mut fxn = Float::INFINITY;
+            let mut fxx = Float::NEG_INFINITY;
+            let mut fyn = Float::INFINITY;
+            let mut fyx = Float::NEG_INFINITY;
+            let mut fzn = Float::INFINITY;
+            let mut fzx = Float::NEG_INFINITY;
+            for n in &face_nodes_list {
+                fxn = fxn.min(n.coord[0]);
+                fxx = fxx.max(n.coord[0]);
+                fyn = fyn.min(n.coord[1]);
+                fyx = fyx.max(n.coord[1]);
+                fzn = fzn.min(n.coord[2]);
+                fzx = fzx.max(n.coord[2]);
+            }
+
+            for &bj in &neighbors[bi] {
+                for (fi, ff) in fresh_all[bj].iter().enumerate() {
+                    // AABB pre-check using precomputed all-node AABBs
+                    let gaabb = &fresh_aabbs[bj][fi];
+                    let tol_pre = 0.01;
+                    if fxx + tol_pre < gaabb[0]
+                        || gaabb[1] + tol_pre < fxn
+                        || fyx + tol_pre < gaabb[2]
+                        || gaabb[3] + tol_pre < fyn
+                        || fzx + tol_pre < gaabb[4]
+                        || gaabb[5] + tol_pre < fzn
+                    {
+                        continue;
+                    }
+
+                    let (pts, _, _) = get_face_intersection(
+                        face, ff, &blocks[bi], &blocks[bj], DEFAULT_TOL,
+                    );
+                    if pts.is_empty() {
+                        continue;
+                    }
+                    if let (Some(c1), Some(c2)) = (
+                        FaceRecord::from_match_points(bi, &pts, true),
+                        FaceRecord::from_match_points(bj, &pts, false),
+                    ) {
+                        matches.push(FaceMatch {
+                            block1: c1,
+                            block2: c2,
+                            points: pts,
+                            orientation: None,
+                        });
+                    }
+                    phase3_keys.insert(face.index_key());
+                    // Don't break — continue checking other neighbors' faces
+                    // for split-face matches where multiple blocks cover parts
+                    // of the same remaining face.
+                }
+            }
+        }
+
+        let n3 = phase3_keys.len();
+        pb.finish_with_message(format!("Phase 3 done ({n3} new matches)"));
+
+        outer_faces.retain(|f| !phase3_keys.contains(&f.index_key()));
+    }
 
     let mut formatted = Vec::new();
     let mut id_counter = 1;
