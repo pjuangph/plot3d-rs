@@ -98,6 +98,7 @@ fn write_raw(
     Ok(())
 }
 
+#[allow(clippy::unnecessary_cast, clippy::iter_cloned_collect)]
 fn write_fortran(
     mut w: &mut impl Write,
     blocks: &[Block],
@@ -140,17 +141,17 @@ fn write_fortran(
             }
             FloatPrecision::F64 => {
                 let xb = utils::Endian::write_f64_slice(
-                    &b.x,
+                    &b.x.iter().map(|v| *v as f64).collect::<Vec<f64>>(),
                     endian,
                 );
                 write_fortran_record(&mut w, &xb, endian)?;
                 let yb = utils::Endian::write_f64_slice(
-                    &b.y,
+                    &b.y.iter().map(|v| *v as f64).collect::<Vec<f64>>(),
                     endian,
                 );
                 write_fortran_record(&mut w, &yb, endian)?;
                 let zb = utils::Endian::write_f64_slice(
-                    &b.z,
+                    &b.z.iter().map(|v| *v as f64).collect::<Vec<f64>>(),
                     endian,
                 );
                 write_fortran_record(&mut w, &zb, endian)?;
@@ -161,6 +162,7 @@ fn write_fortran(
     Ok(())
 }
 
+#[allow(clippy::unnecessary_cast)]
 fn write_vec_num(
     w: &mut impl Write,
     v: &[Float],
@@ -181,12 +183,12 @@ fn write_vec_num(
         }
         (FloatPrecision::F64, Endian::Little) => {
             for &f in v {
-                w.write_f64::<LittleEndian>(f)?;
+                w.write_f64::<LittleEndian>(f as f64)?;
             }
         }
         (FloatPrecision::F64, Endian::Big) => {
             for &f in v {
-                w.write_f64::<BigEndian>(f)?;
+                w.write_f64::<BigEndian>(f as f64)?;
             }
         }
     }
