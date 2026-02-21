@@ -1,9 +1,7 @@
-use std::vec;
-
 use plot3d::{
-    block, connectivity_fast, create_rotation_matrix, read_plot3d_ascii, read_plot3d_binary,
+    connectivity_fast, create_rotation_matrix, read_plot3d_ascii, read_plot3d_binary,
     rotate_block_with_matrix, rotated_periodicity, translational_periodicity, FaceMatchPrinter,
-    FaceRecordTraits,
+    FaceRecordTraits, Float,
 };
 
 #[test]
@@ -18,14 +16,14 @@ fn rotational_periodicity_test() {
     let blocks = read_plot3d_ascii(ascii_path).unwrap();
 
     let number_of_blades = 55;
-    let rotation_angle = 360.0 / number_of_blades as f64;
+    let rotation_angle = 360.0 / number_of_blades as Float;
     let copies: usize = 3;
 
     let mut rotated_blocks = Vec::with_capacity(blocks.len() * copies);
     rotated_blocks.extend(blocks.iter().cloned());
 
     for copy_idx in 1..copies {
-        let angle_rad = (rotation_angle * copy_idx as f64).to_radians();
+        let angle_rad = (rotation_angle * copy_idx as Float).to_radians();
         let rotation_matrix = create_rotation_matrix(angle_rad, 'x');
         for block in &blocks {
             rotated_blocks.push(rotate_block_with_matrix(block, rotation_matrix));
@@ -80,9 +78,8 @@ fn translational_periodicity_test() {
         translational_periodicity(&blocks, &remaining_faces, None, "y", None, 0.5, 1, 1, 1);
     remaining_faces = rest;
 
-    let (z_periodicity, rest) =
+    let (z_periodicity, _rest) =
         translational_periodicity(&blocks, &remaining_faces, None, "z", None, 0.5, 1, 1, 1);
-    remaining_faces = rest;
     let mut face_matches_all = face_matches;
     face_matches_all.extend(x_periodicity);
     face_matches_all.extend(y_periodicity);

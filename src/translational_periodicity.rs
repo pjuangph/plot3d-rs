@@ -1,4 +1,11 @@
-//! Translational periodicity utilities that mirror the original Python implementation.
+//! Translational periodicity detection for structured multi-block grids.
+//!
+//! Identifies periodic face pairs along a translational axis (x, y, or z).
+//! The algorithm uses [`find_bounding_faces`] to collect faces on the min/max
+//! extremes of the specified axis, then matches them using
+//! `full_face_match_transformed` with a translation offset.
+//!
+//! [`find_bounding_faces`]: crate::block_analysis::find_bounding_faces
 //!
 //! While there is not yet a dedicated Rust integration test, the `tests/test_rotational_periodicity.rs`
 //! fixture demonstrates the expected data flow for the periodicity modules and should be referenced
@@ -7,11 +14,15 @@
 
 use std::collections::HashSet;
 
+use indicatif::{ProgressBar, ProgressStyle};
+
 use crate::{
     block::Block,
-    block_face_functions::{find_bounding_faces, outer_face_records_to_list, Face},
-    connectivity::{FaceMatch, FaceRecord},
-    utils::gcd_three,
+    block_analysis::find_bounding_faces,
+    block_face_functions::{full_face_match_transformed, outer_face_records_to_list, Face},
+    face_record::{FaceKey, FaceMatch, FaceRecord},
+    utils::compute_min_gcd,
+    Float,
 };
 
 /// Detect translational periodicity along an axis.
@@ -21,13 +32,14 @@ use crate::{
 /// End-to-end validation is planned to follow the pattern established in
 /// `tests/test_rotational_periodicity.rs`. Until then, exercising this function in a binary or
 /// ad-hoc script is recommended to mirror the original Python examples.
+#[allow(clippy::too_many_arguments)]
 pub fn translational_periodicity(
     blocks: &[Block],
     outer_faces: &[FaceRecord],
-    delta: Option<f64>,
+    delta: Option<Float>,
     translational_direction: &str,
-    node_tol_xyz: Option<f64>,
-    min_shared_frac: f64,
+    node_tol_xyz: Option<Float>,
+    min_shared_frac: Float,
     min_shared_abs: usize,
     stride_u: usize,
     stride_v: usize,
@@ -42,63 +54,74 @@ pub fn translational_periodicity(
     let (lower_faces_records, upper_faces_records, _, _) =
         find_bounding_faces(blocks, outer_faces, &axis, "both", 1e-6, 1e-6);
 
-    let mut gcd_array = Vec::new();
-    for block in blocks {
-        gcd_array.push(gcd_three(block.imax - 1, block.jmax - 1, block.kmax - 1));
-    }
-    let gcd_to_use = gcd_array.into_iter().min().unwrap_or(1).max(1);
+    let gcd_to_use = compute_min_gcd(blocks);
 
     let blocks_reduced = crate::block_face_functions::reduce_blocks(blocks, gcd_to_use);
-    let lower_faces = outer_face_records_to_list(&blocks_reduced, &lower_faces_records, 1);
-    let upper_faces = outer_face_records_to_list(&blocks_reduced, &upper_faces_records, 1);
+    let lower_faces = outer_face_records_to_list(&blocks_reduced, &lower_faces_records, gcd_to_use);
+    let upper_faces = outer_face_records_to_list(&blocks_reduced, &upper_faces_records, gcd_to_use);
 
     let delta_axis = match axis.as_str() {
         "x" => {
             let min_x = blocks_reduced
                 .iter()
-                .map(|b| b.x_slice().iter().cloned().fold(f64::INFINITY, f64::min))
-                .fold(f64::INFINITY, f64::min);
+                .map(|b| {
+                    b.x_slice()
+                        .iter()
+                        .cloned()
+                        .fold(Float::INFINITY, Float::min)
+                })
+                .fold(Float::INFINITY, Float::min);
             let max_x = blocks_reduced
                 .iter()
                 .map(|b| {
                     b.x_slice()
                         .iter()
                         .cloned()
-                        .fold(f64::NEG_INFINITY, f64::max)
+                        .fold(Float::NEG_INFINITY, Float::max)
                 })
-                .fold(f64::NEG_INFINITY, f64::max);
+                .fold(Float::NEG_INFINITY, Float::max);
             delta.unwrap_or(max_x - min_x)
         }
         "y" => {
             let min_y = blocks_reduced
                 .iter()
-                .map(|b| b.y_slice().iter().cloned().fold(f64::INFINITY, f64::min))
-                .fold(f64::INFINITY, f64::min);
+                .map(|b| {
+                    b.y_slice()
+                        .iter()
+                        .cloned()
+                        .fold(Float::INFINITY, Float::min)
+                })
+                .fold(Float::INFINITY, Float::min);
             let max_y = blocks_reduced
                 .iter()
                 .map(|b| {
                     b.y_slice()
                         .iter()
                         .cloned()
-                        .fold(f64::NEG_INFINITY, f64::max)
+                        .fold(Float::NEG_INFINITY, Float::max)
                 })
-                .fold(f64::NEG_INFINITY, f64::max);
+                .fold(Float::NEG_INFINITY, Float::max);
             delta.unwrap_or(max_y - min_y)
         }
         _ => {
             let min_z = blocks_reduced
                 .iter()
-                .map(|b| b.z_slice().iter().cloned().fold(f64::INFINITY, f64::min))
-                .fold(f64::INFINITY, f64::min);
+                .map(|b| {
+                    b.z_slice()
+                        .iter()
+                        .cloned()
+                        .fold(Float::INFINITY, Float::min)
+                })
+                .fold(Float::INFINITY, Float::min);
             let max_z = blocks_reduced
                 .iter()
                 .map(|b| {
                     b.z_slice()
                         .iter()
                         .cloned()
-                        .fold(f64::NEG_INFINITY, f64::max)
+                        .fold(Float::NEG_INFINITY, Float::max)
                 })
-                .fold(f64::NEG_INFINITY, f64::max);
+                .fold(Float::NEG_INFINITY, Float::max);
             delta.unwrap_or(max_z - min_z)
         }
     };
@@ -115,12 +138,111 @@ pub fn translational_periodicity(
     let mut periodic_matches = Vec::new();
 
     let lower_pool = dedup_faces(lower_faces);
-    let mut upper_pool = dedup_faces(upper_faces);
+    let upper_pool = dedup_faces(upper_faces);
 
-    for face_l in lower_pool.clone() {
-        let candidate = upper_pool.iter().enumerate().find_map(|(idx, f)| {
+    // ── Phase 1: Fast full-face matching via 4-corner comparison ──
+    let corner_tol = node_tol_xyz.unwrap_or(1e-6);
+    let axis_char = axis.chars().next().unwrap();
+    let mut consumed_lower = HashSet::<FaceKey>::new();
+    let mut consumed_upper = HashSet::<FaceKey>::new();
+
+    let pb1 = ProgressBar::new(lower_pool.len() as u64);
+    pb1.set_style(
+        ProgressStyle::with_template(
+            "{msg} [{bar:40.cyan/blue}] {pos}/{len} faces ({eta} remaining)",
+        )
+        .unwrap()
+        .progress_chars("=>-"),
+    );
+    pb1.set_message("Translational Phase 1 (corners)");
+
+    for face_l in &lower_pool {
+        pb1.inc(1);
+        if consumed_lower.contains(&face_l.index_key()) {
+            continue;
+        }
+        // Build forward translation transform: shift face_l by +delta along axis
+        let matched = upper_pool.iter().find_map(|face_u| {
+            if consumed_upper.contains(&face_u.index_key()) {
+                return None;
+            }
+            // Try lower shifted up vs upper original
+            let orient = full_face_match_transformed(
+                face_l,
+                face_u,
+                |mut p| {
+                    match axis_char {
+                        'x' => p[0] += delta_axis,
+                        'y' => p[1] += delta_axis,
+                        _ => p[2] += delta_axis,
+                    }
+                    p
+                },
+                corner_tol,
+            );
+            if let Some(orient) = orient {
+                return Some((face_u.clone(), orient));
+            }
+            // Try lower original vs upper shifted down
+            let orient = full_face_match_transformed(
+                face_u,
+                face_l,
+                |mut p| {
+                    match axis_char {
+                        'x' => p[0] -= delta_axis,
+                        'y' => p[1] -= delta_axis,
+                        _ => p[2] -= delta_axis,
+                    }
+                    p
+                },
+                corner_tol,
+            );
+            if let Some(orient) = orient {
+                return Some((face_u.clone(), orient));
+            }
+            None
+        });
+        if let Some((face_u, orient)) = matched {
+            consumed_lower.insert(face_l.index_key());
+            consumed_upper.insert(face_u.index_key());
+            periodic_matches.push(FaceMatch {
+                block1: FaceRecord::from_face(face_l),
+                block2: FaceRecord::from_face(&face_u),
+                points: Vec::new(),
+                orientation: Some(orient),
+            });
+        }
+    }
+    pb1.finish_with_message("Translational Phase 1 done");
+
+    // Build remainder pools for Phase 2
+    let lower_remainder: Vec<Face> = lower_pool
+        .iter()
+        .filter(|f| !consumed_lower.contains(&f.index_key()))
+        .cloned()
+        .collect();
+    let mut upper_remainder: Vec<Face> = upper_pool
+        .iter()
+        .filter(|f| !consumed_upper.contains(&f.index_key()))
+        .cloned()
+        .collect();
+
+    // ── Phase 2: Slow node-by-node matching on remainder ──
+    let pb2 = ProgressBar::new(lower_remainder.len() as u64);
+    pb2.set_style(
+        ProgressStyle::with_template(
+            "{msg} [{bar:40.cyan/blue}] {pos}/{len} faces ({eta} remaining)",
+        )
+        .unwrap()
+        .progress_chars("=>-"),
+    );
+    pb2.set_message("Translational Phase 2 (nodes)");
+
+    for face_l in &lower_remainder {
+        pb2.inc(1);
+        let candidate = upper_remainder.iter().enumerate().find_map(|(idx, f)| {
             faces_translational_match(
-                &face_l,
+                face_l,
                 f,
                 &blocks_reduced,
                 &blocks_up,
@@ -136,24 +258,30 @@ pub fn translational_periodicity(
             .map(|mode| (idx, mode))
         });
         if let Some((pos, _mode)) = candidate {
-            let face_u = upper_pool.remove(pos);
+            let face_u = upper_remainder.remove(pos);
             periodic_matches.push(FaceMatch {
-                block1: FaceRecord::from_face(&face_l),
+                block1: FaceRecord::from_face(face_l),
                 block2: FaceRecord::from_face(&face_u),
                 points: Vec::new(),
+                orientation: None,
             });
         }
     }
+    pb2.finish_with_message("Translational Phase 2 done");
+
+    // Free shifted block copies now that matching is complete
+    drop(blocks_up);
+    drop(blocks_dn);
 
     let mut periodic_keys = HashSet::new();
     for rec in &periodic_matches {
-        periodic_keys.insert(face_record_key(&rec.block1));
-        periodic_keys.insert(face_record_key(&rec.block2));
+        periodic_keys.insert(rec.block1.index_key());
+        periodic_keys.insert(rec.block2.index_key());
     }
 
     let mut remaining = Vec::new();
     for record in outer_faces {
-        if !periodic_keys.contains(&face_record_key(record)) {
+        if !periodic_keys.contains(&record.index_key()) {
             remaining.push(record.clone());
         }
     }
@@ -172,6 +300,7 @@ pub fn translational_periodicity(
 }
 
 /// Assess one lower/upper face combo and return the match mode when successful.
+#[allow(clippy::too_many_arguments)]
 fn faces_translational_match(
     face_l: &Face,
     face_u: &Face,
@@ -179,9 +308,9 @@ fn faces_translational_match(
     blocks_up: &[Block],
     blocks_dn: &[Block],
     axis: &str,
-    delta_axis: f64,
-    node_tol_xyz: Option<f64>,
-    min_shared_frac: f64,
+    delta_axis: Float,
+    node_tol_xyz: Option<Float>,
+    min_shared_frac: Float,
     min_shared_abs: usize,
     stride_u: usize,
     stride_v: usize,
@@ -269,9 +398,9 @@ fn pair_tolerance(
     face_a: &Face,
     face_b: &Face,
     blocks: &[Block],
-    override_tol: Option<f64>,
+    override_tol: Option<Float>,
     axis: &str,
-) -> f64 {
+) -> Float {
     if let Some(tol) = override_tol {
         return tol;
     }
@@ -281,7 +410,7 @@ fn pair_tolerance(
 }
 
 /// Compute a median edge length for the face in the non-periodic directions.
-fn median_inplane_spacing(face: &Face, block: &Block, axis: &str) -> f64 {
+fn median_inplane_spacing(face: &Face, block: &Block, axis: &str) -> Float {
     let points = face.grid_points(block, 1, 1);
     if points.len() <= 1 {
         return 1.0;
@@ -302,15 +431,16 @@ fn median_inplane_spacing(face: &Face, block: &Block, axis: &str) -> f64 {
 }
 
 /// Perform a quick planar projection test to reject clearly mismatched faces.
+#[allow(clippy::too_many_arguments)]
 fn orthogonal_precheck(
     face_a: &Face,
     face_b: &Face,
     block_a: &Block,
     block_b: &Block,
-    delta: f64,
-    tol: f64,
+    delta: Float,
+    tol: Float,
     axis: &str,
-    min_shared_frac: f64,
+    min_shared_frac: Float,
     min_shared_abs: usize,
 ) -> bool {
     let mut pts_a = face_a.grid_points(block_a, 1, 1);
@@ -338,11 +468,11 @@ fn orthogonal_precheck(
 
     let shared = key_a.intersection(&key_b).count();
     shared >= min_shared_abs
-        && (shared as f64) >= min_shared_frac * (key_a.len().min(key_b.len()) as f64)
+        && (shared as Float) >= min_shared_frac * (key_a.len().min(key_b.len()) as Float)
 }
 
 /// Project 3D points onto the plane orthogonal to `axis`.
-fn project_plane(points: &[[f64; 3]], axis: &str) -> Vec<[f64; 2]> {
+fn project_plane(points: &[[Float; 3]], axis: &str) -> Vec<[Float; 2]> {
     points
         .iter()
         .map(|p| match axis {
@@ -356,34 +486,6 @@ fn project_plane(points: &[[f64; 3]], axis: &str) -> Vec<[f64; 2]> {
 /// Remove duplicate faces while preserving the first occurrence.
 fn dedup_faces(mut faces: Vec<Face>) -> Vec<Face> {
     let mut seen = HashSet::new();
-    faces.retain(|f| seen.insert(face_key(f)));
+    faces.retain(|f| seen.insert(f.index_key()));
     faces
-}
-
-type FaceKey = (usize, usize, usize, usize, usize, usize, usize);
-
-/// Build a unique key for an exportable face record.
-fn face_record_key(record: &FaceRecord) -> FaceKey {
-    (
-        record.block_index,
-        record.imin,
-        record.jmin,
-        record.kmin,
-        record.imax,
-        record.jmax,
-        record.kmax,
-    )
-}
-
-/// Build a unique key directly from a `Face`.
-fn face_key(face: &Face) -> FaceKey {
-    (
-        face.block_index().unwrap_or(usize::MAX),
-        face.imin(),
-        face.jmin(),
-        face.kmin(),
-        face.imax(),
-        face.jmax(),
-        face.kmax(),
-    )
 }

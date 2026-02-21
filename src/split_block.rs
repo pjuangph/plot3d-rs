@@ -2,6 +2,7 @@
 
 use crate::block::Block;
 use crate::utils::gcd_three;
+use crate::Float;
 
 /// Direction along which to split a block.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -15,7 +16,7 @@ pub enum SplitDirection {
 ///
 /// Examines the first-cell edge lengths at each corner and returns the
 /// maximum ratio of the two largest edges to the smallest.
-pub fn max_aspect_ratio(block: &Block) -> f64 {
+pub fn max_aspect_ratio(block: &Block) -> Float {
     let ix = block.imax - 1;
     let jx = block.jmax - 1;
     let kx = block.kmax - 1;
@@ -25,18 +26,45 @@ pub fn max_aspect_ratio(block: &Block) -> f64 {
     let j1 = [0, 0, jx, 0, jx, 0, jx, jx];
     let k1 = [0, 0, 0, kx, kx, kx, 0, kx];
 
-    let i2 = [1, ix.saturating_sub(1).max(1), 1, 1, 1, ix.saturating_sub(1).max(1), ix.saturating_sub(1).max(1), ix.saturating_sub(1).max(1)];
-    let j2 = [1, 1, jx.saturating_sub(1).max(1), 1, jx.saturating_sub(1).max(1), 1, jx.saturating_sub(1).max(1), jx.saturating_sub(1).max(1)];
-    let k2 = [1, 1, 1, kx.saturating_sub(1).max(1), kx.saturating_sub(1).max(1), kx.saturating_sub(1).max(1), 1, kx.saturating_sub(1).max(1)];
+    let i2 = [
+        1,
+        ix.saturating_sub(1).max(1),
+        1,
+        1,
+        1,
+        ix.saturating_sub(1).max(1),
+        ix.saturating_sub(1).max(1),
+        ix.saturating_sub(1).max(1),
+    ];
+    let j2 = [
+        1,
+        1,
+        jx.saturating_sub(1).max(1),
+        1,
+        jx.saturating_sub(1).max(1),
+        1,
+        jx.saturating_sub(1).max(1),
+        jx.saturating_sub(1).max(1),
+    ];
+    let k2 = [
+        1,
+        1,
+        1,
+        kx.saturating_sub(1).max(1),
+        kx.saturating_sub(1).max(1),
+        kx.saturating_sub(1).max(1),
+        1,
+        kx.saturating_sub(1).max(1),
+    ];
 
-    let dist = |a: (f64, f64, f64), b: (f64, f64, f64)| -> f64 {
+    let dist = |a: (Float, Float, Float), b: (Float, Float, Float)| -> Float {
         let dx = a.0 - b.0;
         let dy = a.1 - b.1;
         let dz = a.2 - b.2;
         (dx * dx + dy * dy + dz * dz).sqrt()
     };
 
-    let mut max_ar = 0.0f64;
+    let mut max_ar: Float = 0.0;
     for n in 0..8 {
         let base = block.xyz(i1[n], j1[n], k1[n]);
         let di = dist(block.xyz(i2[n], j1[n], k1[n]), base);
@@ -77,8 +105,8 @@ fn step_search(
         let remainder_cells = total_cells % (step_size * denominator);
         let remainder_dim = remainder_cells / denominator;
 
-        if step_size % gcd == 0
-            && (remainder_dim == 0 || (remainder_dim > 0 && (remainder_dim - 1) % gcd == 0))
+        if step_size.is_multiple_of(gcd)
+            && (remainder_dim == 0 || (remainder_dim > 0 && (remainder_dim - 1).is_multiple_of(gcd)))
         {
             return Some(step_size);
         }

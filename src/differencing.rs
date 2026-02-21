@@ -1,10 +1,11 @@
 //! Forward and backward differencing for structured grid edges.
 
 use crate::block::Block;
+use crate::Float;
 
 /// Backward and forward difference pair: `(backward, forward)`.
 /// Each is a displacement vector `[dx, dy, dz]`.
-pub type DiffPair = ([f64; 3], [f64; 3]);
+pub type DiffPair = ([Float; 3], [Float; 3]);
 
 /// Differencing data at a single node on a 2D face.
 #[derive(Clone, Debug)]
@@ -36,9 +37,9 @@ pub struct BlockDiff {
 /// `x`, `y`, `z` are flat arrays of length `pmax * qmax`, stored row-major
 /// (p varies fastest within each row of q).
 pub fn find_face_edges(
-    x: &[f64],
-    y: &[f64],
-    z: &[f64],
+    x: &[Float],
+    y: &[Float],
+    z: &[Float],
     pmax: usize,
     qmax: usize,
 ) -> Vec<FaceDiff> {

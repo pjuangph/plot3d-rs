@@ -1,12 +1,17 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashSet;
 
 use crate::{
     block::Block,
-    connectivity::{FaceMatch, FaceRecord},
-    utils::gcd_three,
+    face_record::{FaceKey, FaceMatch, FaceRecord},
+    geometry::{
+        clip_sutherland_hodgman, distance, dominant_projection_axis, poly_area_2d,
+        project_drop_axis, quad_normal_from_verts, quantize_point, to_array, vertex_aabb,
+    },
+    utils::{cross3, dot3, sub3, vec_norm3},
+    Float,
 };
 
-const DEFAULT_TOL: f64 = 1e-8;
+const DEFAULT_TOL: Float = 1e-8;
 
 /// Enumeration describing which index remains constant over a structured face.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -22,11 +27,32 @@ pub enum FaceAxis {
 /// Quadrilateral face definition that mimics the Python implementation.
 #[derive(Clone, Debug)]
 pub struct Face {
-    vertices: Vec<[f64; 3]>,
+    vertices: Vec<[Float; 3]>,
     indices: Vec<[usize; 3]>,
-    centroid: [f64; 3],
+    centroid: [Float; 3],
     block_index: Option<usize>,
     id: Option<usize>,
+}
+
+/// Find the linear index of the vertex whose structured indices match `(i, j, k)`.
+fn corner_index(face: &Face, i: usize, j: usize, k: usize) -> usize {
+    face.indices
+        .iter()
+        .enumerate()
+        .find_map(|(idx, ijk)| {
+            if ijk[0] == i && ijk[1] == j && ijk[2] == k {
+                Some(idx)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0)
+}
+
+impl Default for Face {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Face {
@@ -45,10 +71,10 @@ impl Face {
     ///
     /// * `x`, `y`, `z` - Cartesian coordinates.
     /// * `i`, `j`, `k` - Structured-grid indices.
-    pub fn add_vertex(&mut self, x: f64, y: f64, z: f64, i: usize, j: usize, k: usize) {
+    pub fn add_vertex(&mut self, x: Float, y: Float, z: Float, i: usize, j: usize, k: usize) {
         self.vertices.push([x, y, z]);
         self.indices.push([i, j, k]);
-        let n = self.vertices.len() as f64;
+        let n = self.vertices.len() as Float;
         let mut cx = 0.0;
         let mut cy = 0.0;
         let mut cz = 0.0;
@@ -76,7 +102,7 @@ impl Face {
     }
 
     /// Retrieve the centroid.
-    pub fn centroid(&self) -> [f64; 3] {
+    pub fn centroid(&self) -> [Float; 3] {
         self.centroid
     }
 
@@ -153,6 +179,17 @@ impl Face {
         }
     }
 
+    /// Integer constant-type matching the Python convention:
+    /// `0` = I-constant, `1` = J-constant, `2` = K-constant, `-1` = none.
+    pub fn const_type(&self) -> i8 {
+        match self.const_axis() {
+            Some(FaceAxis::I) => 0,
+            Some(FaceAxis::J) => 1,
+            Some(FaceAxis::K) => 2,
+            None => -1,
+        }
+    }
+
     /// True when the face collapses to an edge.
     pub fn is_edge(&self) -> bool {
         let eq = [
@@ -173,22 +210,86 @@ impl Face {
             && self.kmax() == other.kmax()
     }
 
-    /// Length of the face diagonal between the extreme corner nodes.
-    pub fn diagonal_length(&self) -> f64 {
-        fn corner_index(face: &Face, imin: usize, jmin: usize, kmin: usize) -> usize {
-            face.indices
-                .iter()
-                .enumerate()
-                .find_map(|(idx, ijk)| {
-                    if ijk[0] == imin && ijk[1] == jmin && ijk[2] == kmin {
-                        Some(idx)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0)
-        }
+    /// Read-only access to the stored vertex coordinates.
+    pub fn vertices(&self) -> &[[Float; 3]] {
+        &self.vertices
+    }
 
+    /// Return the spatial coordinates of the two diagonal corners.
+    ///
+    /// The "lower" corner is the vertex at `(IMIN, JMIN, KMIN)` and the
+    /// "upper" corner is at `(IMAX, JMAX, KMAX)`.
+    ///
+    /// Returns `None` when the face has no vertices.
+    pub fn get_corners(&self) -> Option<([Float; 3], [Float; 3])> {
+        if self.vertices.is_empty() {
+            return None;
+        }
+        let min_idx = corner_index(self, self.imin(), self.jmin(), self.kmin());
+        let max_idx = corner_index(self, self.imax(), self.jmax(), self.kmax());
+        Some((self.vertices[min_idx], self.vertices[max_idx]))
+    }
+
+    /// Return all four corner vertices in canonical parametric order.
+    ///
+    /// The ordering matches `create_face_from_diagonals()`:
+    ///   - I-constant: `[(i, jmin, kmin), (i, jmin, kmax), (i, jmax, kmin), (i, jmax, kmax)]`
+    ///   - J-constant: `[(imin, j, kmin), (imin, j, kmax), (imax, j, kmin), (imax, j, kmax)]`
+    ///   - K-constant: `[(imin, jmin, k), (imin, jmax, k), (imax, jmin, k), (imax, jmax, k)]`
+    ///
+    /// Returns `None` if the face has fewer than 4 vertices or no constant axis.
+    pub fn get_all_corners(&self) -> Option<[[Float; 3]; 4]> {
+        if self.vertices.len() < 4 {
+            return None;
+        }
+        let axis = self.const_axis()?;
+        let (imin, imax) = (self.imin(), self.imax());
+        let (jmin, jmax) = (self.jmin(), self.jmax());
+        let (kmin, kmax) = (self.kmin(), self.kmax());
+
+        let find = |ti: usize, tj: usize, tk: usize| -> Option<[Float; 3]> {
+            self.indices.iter().enumerate().find_map(|(idx, ijk)| {
+                if ijk[0] == ti && ijk[1] == tj && ijk[2] == tk {
+                    Some(self.vertices[idx])
+                } else {
+                    None
+                }
+            })
+        };
+
+        match axis {
+            FaceAxis::I => {
+                let ic = imin; // I is constant
+                Some([
+                    find(ic, jmin, kmin)?,
+                    find(ic, jmin, kmax)?,
+                    find(ic, jmax, kmin)?,
+                    find(ic, jmax, kmax)?,
+                ])
+            }
+            FaceAxis::J => {
+                let jc = jmin; // J is constant
+                Some([
+                    find(imin, jc, kmin)?,
+                    find(imin, jc, kmax)?,
+                    find(imax, jc, kmin)?,
+                    find(imax, jc, kmax)?,
+                ])
+            }
+            FaceAxis::K => {
+                let kc = kmin; // K is constant
+                Some([
+                    find(imin, jmin, kc)?,
+                    find(imin, jmax, kc)?,
+                    find(imax, jmin, kc)?,
+                    find(imax, jmax, kc)?,
+                ])
+            }
+        }
+    }
+
+    /// Length of the face diagonal between the extreme corner nodes.
+    pub fn diagonal_length(&self) -> Float {
         let min_idx = corner_index(self, self.imin(), self.jmin(), self.kmin());
         let max_idx = corner_index(self, self.imax(), self.jmax(), self.kmax());
         let p0 = self.vertices[min_idx];
@@ -196,8 +297,126 @@ impl Face {
         distance(p0, p1)
     }
 
+    /// Median edge spacing of the face grid using the block's coordinates.
+    ///
+    /// Walks adjacent grid nodes along both parametric directions and returns
+    /// the median of all edge lengths. Falls back to `1.0` for degenerate faces.
+    pub fn median_edge_spacing(&self, block: &Block) -> Float {
+        let axis = match self.const_axis() {
+            Some(a) => a,
+            None => return 1.0,
+        };
+        let mut spacings = Vec::new();
+        match axis {
+            FaceAxis::I => {
+                let ic = self.imin();
+                for j in self.jmin()..self.jmax() {
+                    for k in self.kmin()..=self.kmax() {
+                        if j < self.jmax()
+                            && ic < block.imax
+                            && j + 1 < block.jmax
+                            && k < block.kmax
+                        {
+                            let (x0, y0, z0) = block.xyz(ic, j, k);
+                            let (x1, y1, z1) = block.xyz(ic, j + 1, k);
+                            spacings.push(
+                                ((x1 - x0).powi(2) + (y1 - y0).powi(2) + (z1 - z0).powi(2)).sqrt(),
+                            );
+                        }
+                    }
+                }
+                for k in self.kmin()..self.kmax() {
+                    for j in self.jmin()..=self.jmax() {
+                        if k < self.kmax()
+                            && ic < block.imax
+                            && j < block.jmax
+                            && k + 1 < block.kmax
+                        {
+                            let (x0, y0, z0) = block.xyz(ic, j, k);
+                            let (x1, y1, z1) = block.xyz(ic, j, k + 1);
+                            spacings.push(
+                                ((x1 - x0).powi(2) + (y1 - y0).powi(2) + (z1 - z0).powi(2)).sqrt(),
+                            );
+                        }
+                    }
+                }
+            }
+            FaceAxis::J => {
+                let jc = self.jmin();
+                for i in self.imin()..self.imax() {
+                    for k in self.kmin()..=self.kmax() {
+                        if i < self.imax()
+                            && i + 1 < block.imax
+                            && jc < block.jmax
+                            && k < block.kmax
+                        {
+                            let (x0, y0, z0) = block.xyz(i, jc, k);
+                            let (x1, y1, z1) = block.xyz(i + 1, jc, k);
+                            spacings.push(
+                                ((x1 - x0).powi(2) + (y1 - y0).powi(2) + (z1 - z0).powi(2)).sqrt(),
+                            );
+                        }
+                    }
+                }
+                for k in self.kmin()..self.kmax() {
+                    for i in self.imin()..=self.imax() {
+                        if k < self.kmax()
+                            && i < block.imax
+                            && jc < block.jmax
+                            && k + 1 < block.kmax
+                        {
+                            let (x0, y0, z0) = block.xyz(i, jc, k);
+                            let (x1, y1, z1) = block.xyz(i, jc, k + 1);
+                            spacings.push(
+                                ((x1 - x0).powi(2) + (y1 - y0).powi(2) + (z1 - z0).powi(2)).sqrt(),
+                            );
+                        }
+                    }
+                }
+            }
+            FaceAxis::K => {
+                let kc = self.kmin();
+                for i in self.imin()..self.imax() {
+                    for j in self.jmin()..=self.jmax() {
+                        if i < self.imax()
+                            && i + 1 < block.imax
+                            && j < block.jmax
+                            && kc < block.kmax
+                        {
+                            let (x0, y0, z0) = block.xyz(i, j, kc);
+                            let (x1, y1, z1) = block.xyz(i + 1, j, kc);
+                            spacings.push(
+                                ((x1 - x0).powi(2) + (y1 - y0).powi(2) + (z1 - z0).powi(2)).sqrt(),
+                            );
+                        }
+                    }
+                }
+                for j in self.jmin()..self.jmax() {
+                    for i in self.imin()..=self.imax() {
+                        if j < self.jmax()
+                            && i < block.imax
+                            && j + 1 < block.jmax
+                            && kc < block.kmax
+                        {
+                            let (x0, y0, z0) = block.xyz(i, j, kc);
+                            let (x1, y1, z1) = block.xyz(i, j + 1, kc);
+                            spacings.push(
+                                ((x1 - x0).powi(2) + (y1 - y0).powi(2) + (z1 - z0).powi(2)).sqrt(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if spacings.is_empty() {
+            return 1.0;
+        }
+        spacings.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        spacings[spacings.len() / 2]
+    }
+
     /// Compare vertex positions with a tolerance.
-    pub fn vertices_equals(&self, other: &Face, tol: f64) -> bool {
+    pub fn vertices_equals(&self, other: &Face, tol: Float) -> bool {
         if self.vertices.len() != other.vertices.len() {
             return false;
         }
@@ -226,7 +445,7 @@ impl Face {
     ///
     /// * `block` - Parent block.
     /// * `stride_u`, `stride_v` - Sampling strides in parametric space.
-    pub fn grid_points(&self, block: &Block, stride_u: usize, stride_v: usize) -> Vec<[f64; 3]> {
+    pub fn grid_points(&self, block: &Block, stride_u: usize, stride_v: usize) -> Vec<[Float; 3]> {
         let Some(axis) = self.const_axis() else {
             return self.vertices.clone();
         };
@@ -270,13 +489,14 @@ impl Face {
     /// * `min_shared_frac` - Minimum fraction of shared nodes.
     /// * `min_shared_abs` - Minimum absolute number of shared nodes.
     /// * `stride_u`, `stride_v` - Sampling stride along the face grid.
+    #[allow(clippy::too_many_arguments)]
     pub fn touches_by_nodes(
         &self,
         other: &Face,
         block_self: &Block,
         block_other: &Block,
-        tol_xyz: f64,
-        min_shared_frac: f64,
+        tol_xyz: Float,
+        min_shared_frac: Float,
         min_shared_abs: usize,
         stride_u: usize,
         stride_v: usize,
@@ -301,25 +521,27 @@ impl Face {
             return false;
         }
 
-        let denom = pts_self.len().min(pts_other.len()) as f64;
-        (shared as f64) / denom >= min_shared_frac
+        let denom = pts_self.len().min(pts_other.len()) as Float;
+        (shared as Float) / denom >= min_shared_frac
     }
 
     /// Export a [`FaceRecord`] representation mirroring the Python dictionary API.
     pub fn to_record(&self) -> FaceRecord {
         FaceRecord {
             block_index: self.block_index.unwrap_or(usize::MAX),
-            imin: self.imin(),
-            jmin: self.jmin(),
-            kmin: self.kmin(),
-            imax: self.imax(),
-            jmax: self.jmax(),
-            kmax: self.kmax(),
+            il: self.imin(),
+            jl: self.jmin(),
+            kl: self.kmin(),
+            ih: self.imax(),
+            jh: self.jmax(),
+            kh: self.kmax(),
             id: self.id,
+            u_physical: None,
+            v_physical: None,
         }
     }
 
-    pub fn index_key(&self) -> (usize, usize, usize, usize, usize, usize, usize) {
+    pub fn index_key(&self) -> FaceKey {
         (
             self.block_index.unwrap_or(usize::MAX),
             self.imin(),
@@ -370,7 +592,7 @@ impl Face {
 
     /// Compute the (unnormalized) geometric normal using three corner points
     /// from the parent block, based on which axis is constant.
-    pub fn normal(&self, block: &Block) -> [f64; 3] {
+    pub fn normal(&self, block: &Block) -> [Float; 3] {
         let axis = match self.const_axis() {
             Some(a) => a,
             None => return [0.0, 0.0, 0.0],
@@ -403,11 +625,11 @@ impl Face {
             }
         };
 
-        cross(sub(p2, p1), sub(p3, p1))
+        cross3(sub3(p2, p1), sub3(p3, p1))
     }
 
     /// Shift all stored vertices by `(dx, dy, dz)` in place.
-    pub fn shift(&mut self, dx: f64, dy: f64, dz: f64) {
+    pub fn shift(&mut self, dx: Float, dy: Float, dz: Float) {
         for v in &mut self.vertices {
             v[0] += dx;
             v[1] += dy;
@@ -450,15 +672,38 @@ impl Face {
     /// Returns `intersection_area / min(area_self, area_other)`.
     /// Returns 0.0 if normals are not (anti-)parallel within `tol_angle_deg`
     /// or if the faces are not coplanar within `tol_plane_dist`.
-    pub fn overlap_fraction(&self, other: &Face, tol_angle_deg: f64, tol_plane_dist: f64) -> f64 {
+    pub fn overlap_fraction(
+        &self,
+        other: &Face,
+        tol_angle_deg: Float,
+        tol_plane_dist: Float,
+    ) -> Float {
         if self.vertices.len() < 3 || other.vertices.len() < 3 {
+            return 0.0;
+        }
+
+        // AABB prefilter: quick rejection if bounding boxes don't overlap
+        let (s_min, s_max) = vertex_aabb(&self.vertices);
+        let (o_min, o_max) = vertex_aabb(&other.vertices);
+        let diag = self
+            .diagonal_length()
+            .max(other.diagonal_length())
+            .max(1e-12);
+        let aabb_tol = tol_plane_dist * diag;
+        if s_max[0] + aabb_tol < o_min[0]
+            || o_max[0] + aabb_tol < s_min[0]
+            || s_max[1] + aabb_tol < o_min[1]
+            || o_max[1] + aabb_tol < s_min[1]
+            || s_max[2] + aabb_tol < o_min[2]
+            || o_max[2] + aabb_tol < s_min[2]
+        {
             return 0.0;
         }
 
         let n1 = quad_normal_from_verts(&self.vertices);
         let n2 = quad_normal_from_verts(&other.vertices);
-        let len1 = vec_norm(n1);
-        let len2 = vec_norm(n2);
+        let len1 = vec_norm3(n1);
+        let len2 = vec_norm3(n2);
         if len1 < 1e-15 || len2 < 1e-15 {
             return 0.0;
         }
@@ -474,10 +719,13 @@ impl Face {
         let p0 = self.vertices[0];
         let n_hat = [n1[0] / len1, n1[1] / len1, n1[2] / len1];
         // Adaptive tolerance: scale by face diagonal if needed
-        let diag = self.diagonal_length().max(other.diagonal_length()).max(1e-12);
+        let diag = self
+            .diagonal_length()
+            .max(other.diagonal_length())
+            .max(1e-12);
         let plane_tol = tol_plane_dist * diag;
         for v in &other.vertices {
-            let d = dot3(sub(*v, p0), n_hat).abs();
+            let d = dot3(sub3(*v, p0), n_hat).abs();
             if d > plane_tol {
                 return 0.0;
             }
@@ -507,9 +755,9 @@ impl Face {
     pub fn touches(
         &self,
         other: &Face,
-        tol_angle_deg: f64,
-        tol_plane_dist: f64,
-        min_overlap_frac: f64,
+        tol_angle_deg: Float,
+        tol_plane_dist: Float,
+        min_overlap_frac: Float,
     ) -> bool {
         self.overlap_fraction(other, tol_angle_deg, tol_plane_dist) >= min_overlap_frac
     }
@@ -522,10 +770,10 @@ impl Face {
         other: &Face,
         block_self: &Block,
         block_other: &Block,
-        tol_xyz: f64,
+        tol_xyz: Float,
         stride_u: usize,
         stride_v: usize,
-    ) -> f64 {
+    ) -> Float {
         let pts_self = self.grid_points(block_self, stride_u, stride_v);
         let pts_other = other.grid_points(block_other, stride_u, stride_v);
         if pts_self.is_empty() || pts_other.is_empty() {
@@ -542,11 +790,11 @@ impl Face {
             .collect();
 
         let shared = q_self.intersection(&q_other).count();
-        let denom = pts_self.len().min(pts_other.len()) as f64;
+        let denom = pts_self.len().min(pts_other.len()) as Float;
         if denom == 0.0 {
             return 0.0;
         }
-        (shared as f64) / denom
+        (shared as Float) / denom
     }
 }
 
@@ -557,11 +805,11 @@ pub struct StructuredFace {
     /// Face dimensions `(nu, nv)`.
     pub dims: (usize, usize),
     /// Flattened coordinates stored row-major in `u`.
-    pub coords: Vec<[f64; 3]>,
+    pub coords: Vec<[Float; 3]>,
 }
 
 impl StructuredFace {
-    fn idx(&self, u: usize, v: usize) -> [f64; 3] {
+    fn idx(&self, u: usize, v: usize) -> [Float; 3] {
         self.coords[v * self.dims.0 + u]
     }
 }
@@ -607,7 +855,7 @@ impl BlockFaceKind {
         }
     }
 
-    fn sample(self, block: &Block, u: usize, v: usize) -> [f64; 3] {
+    fn sample(self, block: &Block, u: usize, v: usize) -> [Float; 3] {
         match self {
             Self::IMin => to_array(block.xyz(0, u, v)),
             Self::IMax => to_array(block.xyz(block.imax - 1, u, v)),
@@ -630,155 +878,9 @@ impl BlockFaceKind {
     }
 }
 
-/// Compute the Euclidean distance between two points.
-fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
-    let dx = a[0] - b[0];
-    let dy = a[1] - b[1];
-    let dz = a[2] - b[2];
-    (dx * dx + dy * dy + dz * dz).sqrt()
-}
-
-fn quantize_point(p: [f64; 3], tol: f64) -> (i64, i64, i64) {
-    let s = if tol > 0.0 { tol } else { DEFAULT_TOL };
-    (
-        (p[0] / s).round() as i64,
-        (p[1] / s).round() as i64,
-        (p[2] / s).round() as i64,
-    )
-}
-
-/// Convert a tuple `(x, y, z)` into an array `[f64; 3]`.
-fn to_array(p: (f64, f64, f64)) -> [f64; 3] {
-    [p.0, p.1, p.2]
-}
-
-/// Dot product of two 3-vectors.
-fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-/// Euclidean norm of a 3-vector.
-fn vec_norm(a: [f64; 3]) -> f64 {
-    dot3(a, a).sqrt()
-}
-
-/// Average unit normal of a quad given as vertex positions.
-/// Splits into two triangles and averages.
-fn quad_normal_from_verts(verts: &[[f64; 3]]) -> [f64; 3] {
-    if verts.len() < 3 {
-        return [0.0, 0.0, 1.0];
-    }
-    let n1 = cross(sub(verts[1], verts[0]), sub(verts[2], verts[0]));
-    if verts.len() < 4 {
-        return n1;
-    }
-    let n2 = cross(sub(verts[2], verts[0]), sub(verts[3], verts[0]));
-    let avg = [
-        (n1[0] + n2[0]) * 0.5,
-        (n1[1] + n2[1]) * 0.5,
-        (n1[2] + n2[2]) * 0.5,
-    ];
-    let len = vec_norm(avg);
-    if len < 1e-30 {
-        return [0.0, 0.0, 1.0];
-    }
-    [avg[0] / len, avg[1] / len, avg[2] / len]
-}
-
-/// Return the axis index (0, 1, or 2) with the largest absolute normal component.
-fn dominant_projection_axis(n: [f64; 3]) -> usize {
-    let ax = n[0].abs();
-    let ay = n[1].abs();
-    let az = n[2].abs();
-    if ax >= ay && ax >= az {
-        0
-    } else if ay >= az {
-        1
-    } else {
-        2
-    }
-}
-
-/// Project 3D points to 2D by dropping one axis.
-fn project_drop_axis(pts: &[[f64; 3]], drop: usize) -> Vec<[f64; 2]> {
-    let (a, b) = match drop {
-        0 => (1, 2),
-        1 => (0, 2),
-        _ => (0, 1),
-    };
-    pts.iter().map(|p| [p[a], p[b]]).collect()
-}
-
-/// Signed area of a 2D polygon via the shoelace formula.
-fn poly_area_2d(poly: &[[f64; 2]]) -> f64 {
-    let n = poly.len();
-    if n < 3 {
-        return 0.0;
-    }
-    let mut area = 0.0;
-    for i in 0..n {
-        let j = (i + 1) % n;
-        area += poly[i][0] * poly[j][1] - poly[j][0] * poly[i][1];
-    }
-    area * 0.5
-}
-
-/// Sutherland-Hodgman convex polygon clipping.
-///
-/// Clips `subject` against each edge of `clipper`. Both are 2D polygons.
-fn clip_sutherland_hodgman(subject: &[[f64; 2]], clipper: &[[f64; 2]]) -> Vec<[f64; 2]> {
-    if subject.is_empty() || clipper.is_empty() {
-        return Vec::new();
-    }
-
-    let mut output = subject.to_vec();
-
-    let cn = clipper.len();
-    for i in 0..cn {
-        if output.is_empty() {
-            return output;
-        }
-        let edge_start = clipper[i];
-        let edge_end = clipper[(i + 1) % cn];
-        let input = output;
-        output = Vec::new();
-
-        let inside = |p: [f64; 2]| -> bool {
-            // Cross product of edge direction with vector to point
-            (edge_end[0] - edge_start[0]) * (p[1] - edge_start[1])
-                - (edge_end[1] - edge_start[1]) * (p[0] - edge_start[0])
-                >= 0.0
-        };
-
-        let intersect = |p1: [f64; 2], p2: [f64; 2]| -> [f64; 2] {
-            let d1x = p2[0] - p1[0];
-            let d1y = p2[1] - p1[1];
-            let d2x = edge_end[0] - edge_start[0];
-            let d2y = edge_end[1] - edge_start[1];
-            let denom = d1x * d2y - d1y * d2x;
-            if denom.abs() < 1e-30 {
-                return p1;
-            }
-            let t = ((edge_start[0] - p1[0]) * d2y - (edge_start[1] - p1[1]) * d2x) / denom;
-            [p1[0] + t * d1x, p1[1] + t * d1y]
-        };
-
-        let n_in = input.len();
-        for j in 0..n_in {
-            let current = input[j];
-            let prev = input[(j + n_in - 1) % n_in];
-            if inside(current) {
-                if !inside(prev) {
-                    output.push(intersect(prev, current));
-                }
-                output.push(current);
-            } else if inside(prev) {
-                output.push(intersect(prev, current));
-            }
-        }
-    }
-    output
-}
+// Geometry functions (distance, quantize_point, to_array, quad_normal_from_verts,
+// vertex_aabb, dominant_projection_axis, project_drop_axis, poly_area_2d,
+// clip_sutherland_hodgman) are in crate::geometry.
 
 /// Deduplicate index pairs (order-agnostic).
 ///
@@ -814,14 +916,14 @@ pub fn unique_pairs(pairs: &[(usize, usize)]) -> Vec<(usize, usize)> {
 pub fn faces_match(
     face1: &StructuredFace,
     face2: &StructuredFace,
-    tol: f64,
+    tol: Float,
 ) -> (bool, Option<(bool, bool)>) {
     if face1.dims != face2.dims {
         return (false, None);
     }
     let (ni, nj) = face1.dims;
 
-    let corners = |f: &StructuredFace, flip_ud: bool, flip_lr: bool| -> [[f64; 3]; 4] {
+    let corners = |f: &StructuredFace, flip_ud: bool, flip_lr: bool| -> [[Float; 3]; 4] {
         let map = |u: usize, v: usize| {
             let uu = if flip_ud { ni - 1 - u } else { u };
             let vv = if flip_lr { nj - 1 - v } else { v };
@@ -847,6 +949,93 @@ pub fn faces_match(
     (false, None)
 }
 
+/// Attempt a full (1:1) face match by comparing the 4 corner vertices.
+///
+/// Tries all 8 valid orientations (4 flip combinations + swap) of face_b's
+/// corners against face_a's canonical corner ordering.  A match means all 4
+/// corners are within `tol` of each other.
+///
+/// # Returns
+/// `Some(Orientation)` describing how face_b's indices map to face_a's,
+/// or `None` if no valid corner mapping exists within tolerance.
+pub fn full_face_match(
+    face_a: &Face,
+    face_b: &Face,
+    tol: Float,
+) -> Option<crate::face_record::Orientation> {
+    let corners_a = face_a.get_all_corners()?;
+    let corners_b = face_b.get_all_corners()?;
+    try_corner_permutations(&corners_a, &corners_b, tol)
+}
+
+/// Like [`full_face_match`] but applies a coordinate transformation to
+/// face_a's corners before comparing.
+///
+/// `transform` maps `[Float; 3] -> [Float; 3]`, typically a rotation or
+/// translation.
+pub fn full_face_match_transformed<F>(
+    face_a: &Face,
+    face_b: &Face,
+    transform: F,
+    tol: Float,
+) -> Option<crate::face_record::Orientation>
+where
+    F: Fn([Float; 3]) -> [Float; 3],
+{
+    let raw = face_a.get_all_corners()?;
+    let corners_a = [
+        transform(raw[0]),
+        transform(raw[1]),
+        transform(raw[2]),
+        transform(raw[3]),
+    ];
+    let corners_b = face_b.get_all_corners()?;
+    try_corner_permutations(&corners_a, &corners_b, tol)
+}
+
+/// Core logic: try all 8 orientation permutations of `cb` against `ca`.
+///
+/// The canonical corner ordering is:
+///   `[0] = (u_min, v_min)`
+///   `[1] = (u_min, v_max)`
+///   `[2] = (u_max, v_min)`
+///   `[3] = (u_max, v_max)`
+fn try_corner_permutations(
+    ca: &[[Float; 3]; 4],
+    cb: &[[Float; 3]; 4],
+    tol: Float,
+) -> Option<crate::face_record::Orientation> {
+    use crate::face_record::Orientation;
+
+    // Each entry: (index permutation of cb, u_reversed, v_reversed, swapped)
+    const PERMS: [([usize; 4], bool, bool, bool); 8] = [
+        ([0, 1, 2, 3], false, false, false), // identity
+        ([2, 3, 0, 1], true, false, false),  // u_reversed
+        ([1, 0, 3, 2], false, true, false),  // v_reversed
+        ([3, 2, 1, 0], true, true, false),   // both reversed
+        ([0, 2, 1, 3], false, false, true),  // swapped
+        ([2, 0, 3, 1], true, false, true),   // swapped + u_reversed
+        ([1, 3, 0, 2], false, true, true),   // swapped + v_reversed
+        ([3, 1, 2, 0], true, true, true),    // swapped + both
+    ];
+
+    for &(ref perm, u_rev, v_rev, swapped) in &PERMS {
+        let all_match = perm
+            .iter()
+            .enumerate()
+            .all(|(i, &j)| distance(ca[i], cb[j]) <= tol);
+        if all_match {
+            return Some(Orientation {
+                u_reversed: u_rev,
+                v_reversed: v_rev,
+                swapped,
+            });
+        }
+    }
+
+    None
+}
+
 /// Determine whether any faces on two blocks match.
 ///
 /// # Arguments
@@ -859,7 +1048,7 @@ pub fn faces_match(
 pub fn find_matching_faces(
     block1: &Block,
     block2: &Block,
-    tol: f64,
+    tol: Float,
 ) -> Option<(&'static str, &'static str, (bool, bool))> {
     for f1 in BlockFaceKind::all() {
         let face1 = f1.structured_face(block1);
@@ -1024,15 +1213,21 @@ pub fn outer_face_records_to_list(
         }
         let block = &blocks[block_idx];
         let scale = gcd.max(1);
-        let mut face = create_face_from_diagonals(
-            block,
-            record.imin / scale,
-            record.jmin / scale,
-            record.kmin / scale,
-            record.imax / scale,
-            record.jmax / scale,
-            record.kmax / scale,
+        let (si, sj, sk) = (
+            record.i_lo() / scale,
+            record.j_lo() / scale,
+            record.k_lo() / scale,
         );
+        let (ei, ej, ek) = (
+            record.i_hi() / scale,
+            record.j_hi() / scale,
+            record.k_hi() / scale,
+        );
+        // Skip records whose scaled indices exceed the reduced block dimensions
+        if ei >= block.imax || ej >= block.jmax || ek >= block.kmax {
+            continue;
+        }
+        let mut face = create_face_from_diagonals(block, si, sj, sk, ei, ej, ek);
         face.set_block_index(block_idx);
         if let Some(id) = record.id {
             face.set_id(id);
@@ -1054,10 +1249,10 @@ pub fn outer_face_records_to_list(
 pub fn match_faces_to_list(blocks: &[Block], matched_faces: &[FaceMatch], gcd: usize) -> Vec<Face> {
     let mut out = Vec::new();
     for record in matched_faces {
-        let f1 = outer_face_records_to_list(blocks, &[record.block1.clone()], gcd)
+        let f1 = outer_face_records_to_list(blocks, std::slice::from_ref(&record.block1), gcd)
             .into_iter()
             .next();
-        let f2 = outer_face_records_to_list(blocks, &[record.block2.clone()], gcd)
+        let f2 = outer_face_records_to_list(blocks, std::slice::from_ref(&record.block2), gcd)
             .into_iter()
             .next();
         if let Some(face) = f1 {
@@ -1080,6 +1275,7 @@ pub fn match_faces_to_list(blocks: &[Block], matched_faces: &[FaceMatch], gcd: u
 ///
 /// # Returns
 /// Collection of child faces excluding edges and the centre face itself.
+#[allow(clippy::too_many_arguments)]
 pub fn split_face(
     face_to_split: &Face,
     block: &Block,
@@ -1229,7 +1425,7 @@ pub fn split_face(
 ///
 /// # Returns
 /// Index of the nearest face or `None` when the list is empty.
-pub fn find_face_nearest_point(faces: &[Face], point: [f64; 3]) -> Option<usize> {
+pub fn find_face_nearest_point(faces: &[Face], point: [Float; 3]) -> Option<usize> {
     faces
         .iter()
         .enumerate()
@@ -1308,7 +1504,7 @@ pub fn reduce_blocks(blocks: &[Block], factor: usize) -> Vec<Block> {
 ///
 /// # Returns
 /// Rotated block with identical dimensions.
-pub fn rotate_block(block: &Block, rotation: [[f64; 3]; 3]) -> Block {
+pub fn rotate_block(block: &Block, rotation: [[Float; 3]; 3]) -> Block {
     let mut x = Vec::with_capacity(block.npoints());
     let mut y = Vec::with_capacity(block.npoints());
     let mut z = Vec::with_capacity(block.npoints());
@@ -1322,672 +1518,13 @@ pub fn rotate_block(block: &Block, rotation: [[f64; 3]; 3]) -> Block {
             }
         }
     }
-    return Block::new(block.imax, block.jmax, block.kmax, x, y, z);
-}
-
-/// Compute the global bounds across all blocks.
-///
-/// # Arguments
-/// * `blocks` - Collection of blocks to inspect.
-///
-/// # Returns
-/// `(x_bounds, y_bounds, z_bounds)` or `None` when the list is empty.
-pub fn get_outer_bounds(blocks: &[Block]) -> Option<((f64, f64), (f64, f64), (f64, f64))> {
-    if blocks.is_empty() {
-        return None;
-    }
-    let mut xmin = f64::INFINITY;
-    let mut xmax = f64::NEG_INFINITY;
-    let mut ymin = f64::INFINITY;
-    let mut ymax = f64::NEG_INFINITY;
-    let mut zmin = f64::INFINITY;
-    let mut zmax = f64::NEG_INFINITY;
-    for block in blocks {
-        for &val in block.x_slice() {
-            xmin = xmin.min(val);
-            xmax = xmax.max(val);
-        }
-        for &val in block.y_slice() {
-            ymin = ymin.min(val);
-            ymax = ymax.max(val);
-        }
-        for &val in block.z_slice() {
-            zmin = zmin.min(val);
-            zmax = zmax.max(val);
-        }
-    }
-    Some(((xmin, xmax), (ymin, ymax), (zmin, zmax)))
-}
-
-/// Options for the block connectivity calculation.
-#[derive(Copy, Clone, Debug)]
-pub struct BlockConnectionOptions {
-    pub node_tol_xyz: f64,
-    pub min_shared_frac: f64,
-    pub min_shared_abs: usize,
-    pub stride_u: usize,
-    pub stride_v: usize,
-    pub use_area_fallback: bool,
-    pub area_min_overlap_frac: f64,
-}
-
-impl Default for BlockConnectionOptions {
-    fn default() -> Self {
-        Self {
-            node_tol_xyz: 1e-7,
-            min_shared_frac: 0.02,
-            min_shared_abs: 4,
-            stride_u: 1,
-            stride_v: 1,
-            use_area_fallback: false,
-            area_min_overlap_frac: 0.01,
-        }
-    }
-}
-
-/// Connectivity matrices describing which faces touch between blocks.
-///
-/// # Arguments
-/// * `blocks` - Original block list.
-/// * `outer_faces` - Optional pre-computed outer faces (face records).
-/// * `tol` - Compatibility parameter maintained for parity with Python (unused).
-/// * `options` - Node matching thresholds and sampling strides.
-///
-/// # Returns
-/// Four symmetric adjacency matrices for overall connectivity and each axis-specific match.
-pub fn block_connection_matrix(
-    blocks: &[Block],
-    outer_faces: &[FaceRecord],
-    tol: f64,
-    options: BlockConnectionOptions,
-) -> (Vec<Vec<i8>>, Vec<Vec<i8>>, Vec<Vec<i8>>, Vec<Vec<i8>>) {
-    let gcd = blocks
-        .iter()
-        .map(|b| {
-            gcd_three(
-                b.imax.saturating_sub(1),
-                b.jmax.saturating_sub(1),
-                b.kmax.saturating_sub(1),
-            )
-        })
-        .filter(|&g| g > 0)
-        .min()
-        .unwrap_or(1);
-    let reduced = reduce_blocks(blocks, gcd);
-
-    let mut faces_by_block: Vec<Vec<Face>> = vec![Vec::new(); blocks.len()];
-    if outer_faces.is_empty() {
-        for (idx, block) in reduced.iter().enumerate() {
-            let (faces, _) = get_outer_faces(block);
-            faces_by_block[idx] = faces
-                .into_iter()
-                .map(|mut f| {
-                    f.set_block_index(idx);
-                    f
-                })
-                .collect();
-        }
-    } else {
-        for face in outer_face_records_to_list(&reduced, outer_faces, gcd) {
-            if let Some(idx) = face.block_index() {
-                if idx < faces_by_block.len() {
-                    faces_by_block[idx].push(face);
-                }
-            }
-        }
-    }
-
-    let n = blocks.len();
-    let mut connectivity = vec![vec![0i8; n]; n];
-    let mut conn_i = vec![vec![0i8; n]; n];
-    let mut conn_j = vec![vec![0i8; n]; n];
-    let mut conn_k = vec![vec![0i8; n]; n];
-    for i in 0..n {
-        connectivity[i][i] = 1;
-        conn_i[i][i] = 1;
-        conn_j[i][i] = 1;
-        conn_k[i][i] = 1;
-    }
-
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let mut connected = false;
-            for face_i in &faces_by_block[i] {
-                for face_j in &faces_by_block[j] {
-                    if face_i.touches_by_nodes(
-                        face_j,
-                        &reduced[i],
-                        &reduced[j],
-                        options.node_tol_xyz,
-                        options.min_shared_frac,
-                        options.min_shared_abs,
-                        options.stride_u,
-                        options.stride_v,
-                    ) {
-                        connectivity[i][j] = 1;
-                        connectivity[j][i] = 1;
-                        if face_i.const_axis() == Some(FaceAxis::I)
-                            && face_j.const_axis() == Some(FaceAxis::I)
-                        {
-                            conn_i[i][j] = 1;
-                            conn_i[j][i] = 1;
-                        }
-                        if face_i.const_axis() == Some(FaceAxis::J)
-                            && face_j.const_axis() == Some(FaceAxis::J)
-                        {
-                            conn_j[i][j] = 1;
-                            conn_j[j][i] = 1;
-                        }
-                        if face_i.const_axis() == Some(FaceAxis::K)
-                            && face_j.const_axis() == Some(FaceAxis::K)
-                        {
-                            conn_k[i][j] = 1;
-                            conn_k[j][i] = 1;
-                        }
-                        connected = true;
-                        break;
-                    }
-                }
-                if connected {
-                    break;
-                }
-            }
-            if !connected {
-                connectivity[i][j] = -1;
-                connectivity[j][i] = -1;
-            }
-        }
-    }
-
-    if tol.is_finite() {
-        let _ = tol; // placeholder for parity with Python signature
-    }
-
-    (connectivity, conn_i, conn_j, conn_k)
-}
-
-/// Standardise block orientation so that indices increase with coordinate values.
-///
-/// # Arguments
-/// * `block` - Block whose axes may require flipping.
-///
-/// # Returns
-/// New block with consistent orientation.
-pub fn standardize_block_orientation(block: &Block) -> Block {
-    let mut x = block.x.clone();
-    let mut y = block.y.clone();
-    let mut z = block.z.clone();
-    let dims = (block.imax, block.jmax, block.kmax);
-
-    let center_i = block.imax / 2;
-    let center_j = block.jmax / 2;
-    let center_k = block.kmax / 2;
-
-    if block.imax > 1 {
-        let delta =
-            block.x_at(block.imax - 1, center_j, center_k) - block.x_at(0, center_j, center_k);
-        if delta < 0.0 {
-            flip_block_axis(&mut x, &mut y, &mut z, dims, 0);
-        }
-    }
-    if block.jmax > 1 {
-        let delta =
-            block.y_at(center_i, block.jmax - 1, center_k) - block.y_at(center_i, 0, center_k);
-        if delta < 0.0 {
-            flip_block_axis(&mut x, &mut y, &mut z, dims, 1);
-        }
-    }
-    if block.kmax > 1 {
-        let delta =
-            block.z_at(center_i, center_j, block.kmax - 1) - block.z_at(center_i, center_j, 0);
-        if delta < 0.0 {
-            flip_block_axis(&mut x, &mut y, &mut z, dims, 2);
-        }
-    }
-
     Block::new(block.imax, block.jmax, block.kmax, x, y, z)
 }
 
-fn flip_block_axis(
-    x: &mut [f64],
-    y: &mut [f64],
-    z: &mut [f64],
-    dims: (usize, usize, usize),
-    axis: usize,
-) {
-    let (imax, jmax, kmax) = dims;
-    match axis {
-        0 => {
-            for k in 0..kmax {
-                for j in 0..jmax {
-                    for i in 0..imax / 2 {
-                        let idx1 = (k * jmax + j) * imax + i;
-                        let idx2 = (k * jmax + j) * imax + (imax - 1 - i);
-                        x.swap(idx1, idx2);
-                        y.swap(idx1, idx2);
-                        z.swap(idx1, idx2);
-                    }
-                }
-            }
-        }
-        1 => {
-            for k in 0..kmax {
-                for j in 0..jmax / 2 {
-                    for i in 0..imax {
-                        let idx1 = (k * jmax + j) * imax + i;
-                        let idx2 = (k * jmax + (jmax - 1 - j)) * imax + i;
-                        x.swap(idx1, idx2);
-                        y.swap(idx1, idx2);
-                        z.swap(idx1, idx2);
-                    }
-                }
-            }
-        }
-        2 => {
-            for k in 0..kmax / 2 {
-                for j in 0..jmax {
-                    for i in 0..imax {
-                        let idx1 = (k * jmax + j) * imax + i;
-                        let idx2 = ((kmax - 1 - k) * jmax + j) * imax + i;
-                        x.swap(idx1, idx2);
-                        y.swap(idx1, idx2);
-                        z.swap(idx1, idx2);
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-}
+// Block-level analysis functions (get_outer_bounds, block_connection_matrix,
+// standardize_block_orientation, check_collinearity, calculate_outward_normals,
+// find_bounding_faces, find_closest_block, common_neighbor,
+// build_connectivity_graph) are in crate::block_analysis.
 
-/// Simple collinearity test using the cross product.
-///
-/// # Arguments
-/// * `v1` - First vector.
-/// * `v2` - Second vector.
-///
-/// # Returns
-/// `true` when the vectors are collinear.
-pub fn check_collinearity(v1: [f64; 3], v2: [f64; 3]) -> bool {
-    let cross = [
-        v1[1] * v2[2] - v1[2] * v2[1],
-        v1[2] * v2[0] - v1[0] * v2[2],
-        v1[0] * v2[1] - v1[1] * v2[0],
-    ];
-    cross.iter().all(|c| c.abs() <= f64::EPSILON)
-}
-
-/// Compute outward normals for the six faces of a block.
-///
-/// # Arguments
-/// * `block` - Block whose outward normals are required.
-///
-/// # Returns
-/// Tuple containing normals for `(Imin, Jmin, Kmin, Imax, Jmax, Kmax)`.
-pub fn calculate_outward_normals(
-    block: &Block,
-) -> ([f64; 3], [f64; 3], [f64; 3], [f64; 3], [f64; 3], [f64; 3]) {
-    let i0 = to_array(block.xyz(0, 0, 0));
-    let ij = to_array(block.xyz(0, block.jmax - 1, 0));
-    let ik = to_array(block.xyz(0, 0, block.kmax - 1));
-    let ni_min = cross(sub(ij, i0), sub(ik, i0));
-
-    let i1 = to_array(block.xyz(block.imax - 1, 0, 0));
-    let i1j = to_array(block.xyz(block.imax - 1, block.jmax - 1, 0));
-    let i1k = to_array(block.xyz(block.imax - 1, 0, block.kmax - 1));
-    let ni_max = cross(sub(i1j, i1), sub(i1k, i1));
-
-    let j0 = to_array(block.xyz(0, 0, 0));
-    let ji = to_array(block.xyz(block.imax - 1, 0, 0));
-    let jk = to_array(block.xyz(0, 0, block.kmax - 1));
-    let nj_min = cross(sub(ji, j0), sub(jk, j0));
-
-    let j1 = to_array(block.xyz(0, block.jmax - 1, 0));
-    let j1i = to_array(block.xyz(block.imax - 1, block.jmax - 1, 0));
-    let j1k = to_array(block.xyz(0, block.jmax - 1, block.kmax - 1));
-    let nj_max = cross(sub(j1i, j1), sub(j1k, j1));
-
-    let k0 = to_array(block.xyz(0, 0, 0));
-    let ki = to_array(block.xyz(block.imax - 1, 0, 0));
-    let kj = to_array(block.xyz(0, block.jmax - 1, 0));
-    let nk_min = cross(sub(ki, k0), sub(kj, k0));
-
-    let k1 = to_array(block.xyz(0, 0, block.kmax - 1));
-    let k1i = to_array(block.xyz(block.imax - 1, 0, block.kmax - 1));
-    let k1j = to_array(block.xyz(0, block.jmax - 1, block.kmax - 1));
-    let nk_max = cross(sub(k1i, k1), sub(k1j, k1));
-
-    (ni_min, nj_min, nk_min, ni_max, nj_max, nk_max)
-}
-
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-/// Identify outer faces on the extreme of the requested axis using BFS.
-///
-/// # Arguments
-/// * `blocks` - All blocks in the system.
-/// * `outer_faces_dicts` - Optional pre-computed outer faces in dictionary form.
-/// * `direction` - Axis name (`"x"`, `"y"`, or `"z"`).
-/// * `side` - Requested side (`"min"`, `"max"`, or `"both"`).
-/// * `tol_rel` - Relative tolerance for plane selection.
-/// * `node_tol_xyz` - Node matching tolerance for BFS linking.
-///
-/// # Returns
-/// Tuple containing serialized faces and raw face objects for the lower and upper planes.
-pub fn find_bounding_faces(
-    blocks: &[Block],
-    outer_faces_records: &[FaceRecord],
-    direction: &str,
-    side: &str,
-    tol_rel: f64,
-    node_tol_xyz: f64,
-) -> (Vec<FaceRecord>, Vec<FaceRecord>, Vec<Face>, Vec<Face>) {
-    if blocks.is_empty() {
-        return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    }
-    let axis = match direction {
-        "x" => FaceAxis::I,
-        "y" => FaceAxis::J,
-        _ => FaceAxis::K,
-    };
-    let want_min = side == "min" || side == "both";
-    let want_max = side == "max" || side == "both";
-
-    let gcd = blocks
-        .iter()
-        .map(|b| gcd_three(b.imax - 1, b.jmax - 1, b.kmax - 1))
-        .filter(|&g| g > 0)
-        .min()
-        .unwrap_or(1);
-    let reduced = reduce_blocks(blocks, gcd);
-
-    let outer_faces = if outer_faces_records.is_empty() {
-        reduced
-            .iter()
-            .enumerate()
-            .flat_map(|(idx, block)| {
-                let (faces, _) = get_outer_faces(block);
-                faces.into_iter().map(move |mut f| {
-                    f.set_block_index(idx);
-                    f
-                })
-            })
-            .collect::<Vec<_>>()
-    } else {
-        outer_face_records_to_list(&reduced, outer_faces_records, gcd)
-    };
-
-    let axis_range = global_axis_bounds(&reduced, axis).unwrap_or((0.0, 0.0));
-    let tol_abs = tol_rel * (axis_range.0.abs() + axis_range.1.abs()).max(1.0);
-
-    let mut lower = Vec::new();
-    let mut upper = Vec::new();
-
-    if want_min {
-        lower = collect_boundary_faces(&outer_faces, &reduced, axis, true, tol_abs, node_tol_xyz);
-    }
-    if want_max {
-        upper = collect_boundary_faces(&outer_faces, &reduced, axis, false, tol_abs, node_tol_xyz);
-    }
-
-    let lower_export = lower.iter().map(Face::to_record).collect();
-    let upper_export = upper.iter().map(Face::to_record).collect();
-    (lower_export, upper_export, lower, upper)
-}
-
-fn global_axis_bounds(blocks: &[Block], axis: FaceAxis) -> Option<(f64, f64)> {
-    let mut min_val = f64::INFINITY;
-    let mut max_val = f64::NEG_INFINITY;
-    for block in blocks {
-        match axis {
-            FaceAxis::I => {
-                for &x in block.x_slice() {
-                    min_val = min_val.min(x);
-                    max_val = max_val.max(x);
-                }
-            }
-            FaceAxis::J => {
-                for &y in block.y_slice() {
-                    min_val = min_val.min(y);
-                    max_val = max_val.max(y);
-                }
-            }
-            FaceAxis::K => {
-                for &z in block.z_slice() {
-                    min_val = min_val.min(z);
-                    max_val = max_val.max(z);
-                }
-            }
-        }
-    }
-    if min_val.is_finite() && max_val.is_finite() {
-        Some((min_val, max_val))
-    } else {
-        None
-    }
-}
-
-fn collect_boundary_faces(
-    faces: &[Face],
-    blocks: &[Block],
-    axis: FaceAxis,
-    is_min: bool,
-    tol_abs: f64,
-    node_tol_xyz: f64,
-) -> Vec<Face> {
-    if faces.is_empty() {
-        return Vec::new();
-    }
-
-    let mut plane_value = if is_min {
-        f64::INFINITY
-    } else {
-        f64::NEG_INFINITY
-    };
-    for face in faces {
-        for v in &face.vertices {
-            let val = match axis {
-                FaceAxis::I => v[0],
-                FaceAxis::J => v[1],
-                FaceAxis::K => v[2],
-            };
-            if is_min {
-                plane_value = plane_value.min(val);
-            } else {
-                plane_value = plane_value.max(val);
-            }
-        }
-    }
-    if !plane_value.is_finite() {
-        return Vec::new();
-    }
-
-    let mut plane_faces = Vec::new();
-    for face in faces {
-        let mut fmin = f64::INFINITY;
-        let mut fmax = f64::NEG_INFINITY;
-        for v in &face.vertices {
-            let val = match axis {
-                FaceAxis::I => v[0],
-                FaceAxis::J => v[1],
-                FaceAxis::K => v[2],
-            };
-            fmin = fmin.min(val);
-            fmax = fmax.max(val);
-        }
-        let touches_plane = if is_min {
-            (fmin - plane_value).abs() <= tol_abs
-        } else {
-            (fmax - plane_value).abs() <= tol_abs
-        };
-        let not_past = if is_min {
-            (fmax - plane_value) <= tol_abs
-        } else {
-            (plane_value - fmin) <= tol_abs
-        };
-        if touches_plane && not_past {
-            plane_faces.push(face.clone());
-        }
-    }
-
-    let mut visited: HashSet<(usize, usize, usize, usize, usize, usize, usize)> = HashSet::new();
-    let mut result = Vec::new();
-    for seed in &plane_faces {
-        let mut queue = VecDeque::new();
-        queue.push_back(seed.clone());
-        while let Some(face) = queue.pop_front() {
-            let key = face.index_key();
-            if !visited.insert(key) {
-                continue;
-            }
-            result.push(face.clone());
-            for candidate in &plane_faces {
-                let cand_key = candidate.index_key();
-                if visited.contains(&cand_key) {
-                    continue;
-                }
-                let Some(a_idx) = face.block_index() else {
-                    continue;
-                };
-                let Some(b_idx) = candidate.block_index() else {
-                    continue;
-                };
-                if a_idx >= blocks.len() || b_idx >= blocks.len() {
-                    continue;
-                }
-                if face.touches_by_nodes(
-                    candidate,
-                    &blocks[a_idx],
-                    &blocks[b_idx],
-                    node_tol_xyz,
-                    0.02,
-                    2,
-                    1,
-                    1,
-                ) {
-                    queue.push_back(candidate.clone());
-                }
-            }
-        }
-    }
-    result
-}
-
-/// Find the block whose centroid is closest to an extrapolated target.
-///
-/// # Arguments
-/// * `blocks` - Candidate blocks.
-/// * `centroid` - Reference centroid for the entire assembly.
-/// * `direction` - Axis name controlling the search direction.
-/// * `minvalue` - When `true`, search toward the minimum extreme; otherwise the maximum.
-///
-/// # Returns
-/// The selected block index and the target coordinates used for the comparison.
-pub fn find_closest_block(
-    blocks: &[Block],
-    centroid: [f64; 3],
-    direction: &str,
-    minvalue: bool,
-) -> Option<(usize, f64, f64, f64)> {
-    let Some((xbounds, ybounds, zbounds)) = get_outer_bounds(blocks) else {
-        return None;
-    };
-    let (target_x, target_y, target_z) = match direction {
-        "x" => {
-            let dx = xbounds.1 - xbounds.0;
-            let x = if minvalue {
-                xbounds.0 - 0.5 * dx
-            } else {
-                xbounds.1 + 0.5 * dx
-            };
-            (x, centroid[1], centroid[2])
-        }
-        "y" => {
-            let dy = ybounds.1 - ybounds.0;
-            let y = if minvalue {
-                ybounds.0 - 0.5 * dy
-            } else {
-                ybounds.1 + 0.5 * dy
-            };
-            (centroid[0], y, centroid[2])
-        }
-        _ => {
-            let dz = zbounds.1 - zbounds.0;
-            let z = if minvalue {
-                zbounds.0 - 0.5 * dz
-            } else {
-                zbounds.1 + 0.5 * dz
-            };
-            (centroid[0], centroid[1], z)
-        }
-    };
-    let mut best_idx = None;
-    let mut best_dist = f64::INFINITY;
-    for (idx, block) in blocks.iter().enumerate() {
-        let cx = block.x_slice().iter().sum::<f64>() / block.x_slice().len() as f64;
-        let cy = block.y_slice().iter().sum::<f64>() / block.y_slice().len() as f64;
-        let cz = block.z_slice().iter().sum::<f64>() / block.z_slice().len() as f64;
-        let dist = distance([cx, cy, cz], [target_x, target_y, target_z]);
-        if dist < best_dist {
-            best_dist = dist;
-            best_idx = Some(idx);
-        }
-    }
-    best_idx.map(|idx| (idx, target_x, target_y, target_z))
-}
-
-/// Graph helper: find a neighbour connected to both `a` and `b`.
-///
-/// # Arguments
-/// * `graph` - Adjacency map.
-/// * `a` - First node.
-/// * `b` - Second node.
-/// * `exclude` - Nodes that must not be returned.
-///
-/// # Returns
-/// `Some(node)` when a mutual neighbour exists.
-pub fn common_neighbor(
-    graph: &HashMap<usize, HashSet<usize>>,
-    a: usize,
-    b: usize,
-    exclude: &HashSet<usize>,
-) -> Option<usize> {
-    graph
-        .get(&a)?
-        .iter()
-        .find(|&&n| {
-            n != b && !exclude.contains(&n) && graph.get(&n).map_or(false, |s| s.contains(&b))
-        })
-        .copied()
-}
-
-/// Convert face matches into an adjacency map.
-///
-/// # Arguments
-/// * `connectivities` - Matched face descriptions (block1/block2 pairings).
-///
-/// # Returns
-/// Undirected adjacency map between block indices.
-pub fn build_connectivity_graph(connectivities: &[FaceMatch]) -> HashMap<usize, HashSet<usize>> {
-    let mut graph: HashMap<usize, HashSet<usize>> = HashMap::new();
-    for pair in connectivities {
-        let block1 = pair.block1.block_index;
-        let block2 = pair.block2.block_index;
-        if block1 == usize::MAX || block2 == usize::MAX {
-            continue;
-        }
-        graph.entry(block1).or_default().insert(block2);
-        graph.entry(block2).or_default().insert(block1);
-    }
-    graph
-}
+// Cylindrical coordinate helpers (to_theta, to_radius, find_angular_bounding_faces)
+// are in crate::cylindrical.

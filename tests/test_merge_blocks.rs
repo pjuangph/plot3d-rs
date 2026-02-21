@@ -3,7 +3,7 @@ use std::path::Path;
 use plot3d::write::{BinaryFormat as WriteBinaryFormat, FloatPrecision as WriteFloatPrecision};
 use plot3d::{
     block_face_functions, combine_nxnxn_cubes_mixed_pairs, connectivity_fast, read_plot3d_ascii,
-    read_plot3d_binary, write_plot3d, BinaryFormat as ReadBinaryFormat, Block, Endian,
+    read_plot3d_binary, write_plot3d, BinaryFormat as ReadBinaryFormat, Block, Endian, Float,
     FloatPrecision as ReadFloatPrecision,
 };
 
@@ -89,7 +89,7 @@ fn merge_block_test() {
     assert_bounds_close(&merged_disk_bounds, &reference_bounds, 1e-8);
 }
 
-fn assert_blocks_match(expected: &[Block], actual: &[Block], tol: f64) {
+fn assert_blocks_match(expected: &[Block], actual: &[Block], tol: Float) {
     assert_eq!(expected.len(), actual.len());
     for (lhs, rhs) in expected.iter().zip(actual.iter()) {
         assert_eq!(lhs.imax, rhs.imax);
@@ -101,7 +101,7 @@ fn assert_blocks_match(expected: &[Block], actual: &[Block], tol: f64) {
     }
 }
 
-fn assert_vec_close(lhs: &[f64], rhs: &[f64], tol: f64) {
+fn assert_vec_close(lhs: &[Float], rhs: &[Float], tol: Float) {
     assert_eq!(lhs.len(), rhs.len());
     for (idx, (a, b)) in lhs.iter().zip(rhs.iter()).enumerate() {
         let delta = (a - b).abs();
@@ -118,13 +118,13 @@ fn assert_vec_close(lhs: &[f64], rhs: &[f64], tol: f64) {
     }
 }
 
-fn calc_bounds(blocks: &[Block]) -> [[f64; 2]; 3] {
-    let mut min_x = f64::INFINITY;
-    let mut max_x = f64::NEG_INFINITY;
-    let mut min_y = f64::INFINITY;
-    let mut max_y = f64::NEG_INFINITY;
-    let mut min_z = f64::INFINITY;
-    let mut max_z = f64::NEG_INFINITY;
+fn calc_bounds(blocks: &[Block]) -> [[Float; 2]; 3] {
+    let mut min_x = Float::INFINITY;
+    let mut max_x = Float::NEG_INFINITY;
+    let mut min_y = Float::INFINITY;
+    let mut max_y = Float::NEG_INFINITY;
+    let mut min_z = Float::INFINITY;
+    let mut max_z = Float::NEG_INFINITY;
 
     for block in blocks {
         for &x in block.x_slice() {
@@ -144,7 +144,7 @@ fn calc_bounds(blocks: &[Block]) -> [[f64; 2]; 3] {
     [[min_x, max_x], [min_y, max_y], [min_z, max_z]]
 }
 
-fn assert_bounds_close(lhs: &[[f64; 2]; 3], rhs: &[[f64; 2]; 3], tol: f64) {
+fn assert_bounds_close(lhs: &[[Float; 2]; 3], rhs: &[[Float; 2]; 3], tol: Float) {
     for (axis_idx, (lhs_axis, rhs_axis)) in lhs.iter().zip(rhs.iter()).enumerate() {
         for (bound_idx, (a, b)) in lhs_axis.iter().zip(rhs_axis.iter()).enumerate() {
             let delta = (a - b).abs();
@@ -153,7 +153,7 @@ fn assert_bounds_close(lhs: &[[f64; 2]; 3], rhs: &[[f64; 2]; 3], tol: f64) {
             }
             let a32 = *a as f32;
             let b32 = *b as f32;
-            if ((a32 - b32).abs() as f64) <= tol {
+            if ((a32 - b32).abs() as Float) <= tol {
                 continue;
             }
             panic!(
