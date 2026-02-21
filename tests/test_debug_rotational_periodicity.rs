@@ -70,11 +70,12 @@ fn test_cases() -> Vec<PairTestCase> {
             face_a: (4216, 12, 264, 0, 12, 444, 28),
             faces_b: vec![(4544, 24, 12, 0, 24, 40, 180)],
         },
-        // Pair 5: Missing — Block 3994 I-const remnant (K=36..60) <-> Block 3664 K-const
+        // Pair 5: Block 3994 I-const remnant (K=36..60) <-> Block 3644 J-const
+        // Note: originally thought 3664 was the partner, but diagnostics showed 3644
         PairTestCase {
-            name: "Pair 5 (MISSING) Block 3994 I-const <-> Block 3664 K-const",
+            name: "Pair 5 Block 3994 I-const <-> Block 3644 J-const",
             face_a: (3994, 12, 0, 36, 12, 264, 60),
-            faces_b: vec![(3664, 0, 0, 124, 48, 12, 124)],
+            faces_b: vec![(3644, 180, 0, 12, 444, 0, 36)],
         },
     ]
 }
@@ -718,7 +719,7 @@ fn remnant_pairs() -> Vec<(&'static str, FaceSpec, FaceSpec)> {
         ("4115 K=0..48 <-> 4561 K=0..24", (4115, 0, 108, 0, 24, 108, 48), (4561, 0, 0, 0, 0, 24, 24)),
         ("4115 K=0..48 <-> 4565 K=0..24", (4115, 0, 108, 0, 24, 108, 48), (4565, 0, 0, 0, 0, 24, 24)),
         ("4109 K=48..72 <-> 4562 K=24..216", (4109, 0, 0, 48, 192, 0, 72), (4562, 36, 0, 24, 36, 24, 216)),
-        ("3994 K=36..60 <-> 3664 K=124", (3994, 12, 0, 36, 12, 264, 60), (3664, 0, 0, 124, 48, 12, 124)),
+        ("3994 K=36..60 <-> 3644 J=0", (3994, 12, 0, 36, 12, 264, 60), (3644, 180, 0, 12, 444, 0, 36)),
     ]
 }
 
