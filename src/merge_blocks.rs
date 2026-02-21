@@ -143,9 +143,9 @@ pub fn combine_blocks_mixed_pairs(
             i += 1;
         }
 
-        for k in 0..merged_blocks.len() {
+        for (k, block) in merged_blocks.iter().enumerate() {
             if !skip.contains(&k) {
-                new_merged.push(merged_blocks[k].clone());
+                new_merged.push(block.clone());
             }
         }
 

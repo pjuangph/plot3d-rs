@@ -76,7 +76,7 @@ pub fn find_angular_bounding_faces(
     let (theta_min, theta_max) = global_theta_extreme(blocks, rotation_axis);
     let theta_range = theta_max - theta_min;
 
-    if theta_range > crate::PI || theta_range < 1e-10 {
+    if !(1e-10..=crate::PI).contains(&theta_range) {
         return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     }
 

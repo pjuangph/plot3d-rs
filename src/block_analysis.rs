@@ -26,6 +26,7 @@ use crate::{
 ///
 /// # Returns
 /// `(x_bounds, y_bounds, z_bounds)` or `None` when the list is empty.
+#[allow(clippy::type_complexity)]
 pub fn get_outer_bounds(
     blocks: &[Block],
 ) -> Option<((Float, Float), (Float, Float), (Float, Float))> {
@@ -91,6 +92,7 @@ impl Default for BlockConnectionOptions {
 ///
 /// # Returns
 /// Four symmetric adjacency matrices for overall connectivity and each axis-specific match.
+#[allow(clippy::type_complexity)]
 pub fn block_connection_matrix(
     blocks: &[Block],
     outer_faces: &[FaceRecord],
@@ -325,6 +327,7 @@ pub fn check_collinearity(v1: [Float; 3], v2: [Float; 3]) -> bool {
 /// Compute outward normals for the six faces of a block.
 ///
 /// Returns normals for `(Imin, Jmin, Kmin, Imax, Jmax, Kmax)`.
+#[allow(clippy::type_complexity)]
 pub fn calculate_outward_normals(
     block: &Block,
 ) -> (
@@ -590,9 +593,7 @@ pub fn find_closest_block(
     direction: &str,
     minvalue: bool,
 ) -> Option<(usize, Float, Float, Float)> {
-    let Some((xbounds, ybounds, zbounds)) = get_outer_bounds(blocks) else {
-        return None;
-    };
+    let (xbounds, ybounds, zbounds) = get_outer_bounds(blocks)?;
     let (target_x, target_y, target_z) = match direction {
         "x" => {
             let dx = xbounds.1 - xbounds.0;
@@ -648,7 +649,7 @@ pub fn common_neighbor(
         .get(&a)?
         .iter()
         .find(|&&n| {
-            n != b && !exclude.contains(&n) && graph.get(&n).map_or(false, |s| s.contains(&b))
+            n != b && !exclude.contains(&n) && graph.get(&n).is_some_and(|s| s.contains(&b))
         })
         .copied()
 }

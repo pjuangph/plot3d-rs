@@ -32,6 +32,7 @@ use crate::{
 /// End-to-end validation is planned to follow the pattern established in
 /// `tests/test_rotational_periodicity.rs`. Until then, exercising this function in a binary or
 /// ad-hoc script is recommended to mirror the original Python examples.
+#[allow(clippy::too_many_arguments)]
 pub fn translational_periodicity(
     blocks: &[Block],
     outer_faces: &[FaceRecord],
@@ -179,8 +180,8 @@ pub fn translational_periodicity(
                 },
                 corner_tol,
             );
-            if orient.is_some() {
-                return Some((face_u.clone(), orient.unwrap()));
+            if let Some(orient) = orient {
+                return Some((face_u.clone(), orient));
             }
             // Try lower original vs upper shifted down
             let orient = full_face_match_transformed(
@@ -196,8 +197,8 @@ pub fn translational_periodicity(
                 },
                 corner_tol,
             );
-            if orient.is_some() {
-                return Some((face_u.clone(), orient.unwrap()));
+            if let Some(orient) = orient {
+                return Some((face_u.clone(), orient));
             }
             None
         });
@@ -299,6 +300,7 @@ pub fn translational_periodicity(
 }
 
 /// Assess one lower/upper face combo and return the match mode when successful.
+#[allow(clippy::too_many_arguments)]
 fn faces_translational_match(
     face_l: &Face,
     face_u: &Face,
@@ -429,6 +431,7 @@ fn median_inplane_spacing(face: &Face, block: &Block, axis: &str) -> Float {
 }
 
 /// Perform a quick planar projection test to reject clearly mismatched faces.
+#[allow(clippy::too_many_arguments)]
 fn orthogonal_precheck(
     face_a: &Face,
     face_b: &Face,

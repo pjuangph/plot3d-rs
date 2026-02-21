@@ -110,11 +110,11 @@ fn face_nodes(face: &Face, block: &Block) -> Vec<FaceNode> {
 ///
 /// Returns the first node that meets the tolerance, preferring the closest
 /// distance. When no node matches, `None` is returned.
-fn find_closest_node<'a>(
-    nodes: &'a [FaceNode],
+fn find_closest_node(
+    nodes: &[FaceNode],
     target: [Float; 3],
     tol: Float,
-) -> Option<&'a FaceNode> {
+) -> Option<&FaceNode> {
     let mut best: Option<(&FaceNode, Float)> = None;
     for node in nodes {
         let dx = node.coord[0] - target[0];

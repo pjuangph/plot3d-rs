@@ -9,6 +9,7 @@ use crate::Float;
 ///
 /// Returns `Some((u, v))` if the minimum distance is within `tol`,
 /// otherwise `None`.
+#[allow(clippy::too_many_arguments)]
 pub fn point_match(
     x: Float,
     y: Float,

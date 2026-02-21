@@ -230,7 +230,7 @@ fn rotational_periodicity_core(
                     for &rot_mat in &[rot_forward, rot_backward] {
                         let transform = |p: [Float; 3]| apply_rotation(p, rot_mat);
                         if let Some(orientation) =
-                            full_face_match_transformed(face_a, face_b, &transform, MATCH_TOL)
+                            full_face_match_transformed(face_a, face_b, transform, MATCH_TOL)
                         {
                             let key_a = face_a.index_key();
                             let key_b = face_b.index_key();
@@ -700,6 +700,7 @@ fn is_valid_face(face: &Face, block: &Block) -> bool {
 /// Split remnants from face_a's block are re-created using the original (unrotated)
 /// block so that their vertex coordinates and cylindrical metadata are correct for
 /// subsequent matching passes.
+#[allow(clippy::too_many_arguments)]
 fn try_split_match(
     face_a: &Face,
     face_b: &Face,

@@ -105,8 +105,8 @@ fn step_search(
         let remainder_cells = total_cells % (step_size * denominator);
         let remainder_dim = remainder_cells / denominator;
 
-        if step_size % gcd == 0
-            && (remainder_dim == 0 || (remainder_dim > 0 && (remainder_dim - 1) % gcd == 0))
+        if step_size.is_multiple_of(gcd)
+            && (remainder_dim == 0 || (remainder_dim > 0 && (remainder_dim - 1).is_multiple_of(gcd)))
         {
             return Some(step_size);
         }

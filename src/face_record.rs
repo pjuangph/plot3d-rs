@@ -207,7 +207,7 @@ impl FaceRecord {
         // Identify u and v varying axes
         // Convention: for K-const → u=I, v=J; for J-const → u=I, v=K; for I-const → u=J, v=K
         let (u_min_ijk, u_max_ijk, v_min_ijk, v_max_ijk) =
-            if k_const || (!i_const && !j_const && !k_const) {
+            if k_const || !i_const && !j_const {
                 // K-constant (or all varying, default to K-const convention)
                 (
                     (ilo, jlo, klo),

@@ -49,6 +49,12 @@ fn corner_index(face: &Face, i: usize, j: usize, k: usize) -> usize {
         .unwrap_or(0)
 }
 
+impl Default for Face {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Face {
     /// Create an empty face.
     pub fn new() -> Self {
@@ -306,7 +312,7 @@ impl Face {
                 let ic = self.imin();
                 for j in self.jmin()..self.jmax() {
                     for k in self.kmin()..=self.kmax() {
-                        if j + 1 <= self.jmax()
+                        if j < self.jmax()
                             && ic < block.imax
                             && j + 1 < block.jmax
                             && k < block.kmax
@@ -321,7 +327,7 @@ impl Face {
                 }
                 for k in self.kmin()..self.kmax() {
                     for j in self.jmin()..=self.jmax() {
-                        if k + 1 <= self.kmax()
+                        if k < self.kmax()
                             && ic < block.imax
                             && j < block.jmax
                             && k + 1 < block.kmax
@@ -339,7 +345,7 @@ impl Face {
                 let jc = self.jmin();
                 for i in self.imin()..self.imax() {
                     for k in self.kmin()..=self.kmax() {
-                        if i + 1 <= self.imax()
+                        if i < self.imax()
                             && i + 1 < block.imax
                             && jc < block.jmax
                             && k < block.kmax
@@ -354,7 +360,7 @@ impl Face {
                 }
                 for k in self.kmin()..self.kmax() {
                     for i in self.imin()..=self.imax() {
-                        if k + 1 <= self.kmax()
+                        if k < self.kmax()
                             && i < block.imax
                             && jc < block.jmax
                             && k + 1 < block.kmax
@@ -372,7 +378,7 @@ impl Face {
                 let kc = self.kmin();
                 for i in self.imin()..self.imax() {
                     for j in self.jmin()..=self.jmax() {
-                        if i + 1 <= self.imax()
+                        if i < self.imax()
                             && i + 1 < block.imax
                             && j < block.jmax
                             && kc < block.kmax
@@ -387,7 +393,7 @@ impl Face {
                 }
                 for j in self.jmin()..self.jmax() {
                     for i in self.imin()..=self.imax() {
-                        if j + 1 <= self.jmax()
+                        if j < self.jmax()
                             && i < block.imax
                             && j + 1 < block.jmax
                             && kc < block.kmax
@@ -483,6 +489,7 @@ impl Face {
     /// * `min_shared_frac` - Minimum fraction of shared nodes.
     /// * `min_shared_abs` - Minimum absolute number of shared nodes.
     /// * `stride_u`, `stride_v` - Sampling stride along the face grid.
+    #[allow(clippy::too_many_arguments)]
     pub fn touches_by_nodes(
         &self,
         other: &Face,
@@ -1242,10 +1249,10 @@ pub fn outer_face_records_to_list(
 pub fn match_faces_to_list(blocks: &[Block], matched_faces: &[FaceMatch], gcd: usize) -> Vec<Face> {
     let mut out = Vec::new();
     for record in matched_faces {
-        let f1 = outer_face_records_to_list(blocks, &[record.block1.clone()], gcd)
+        let f1 = outer_face_records_to_list(blocks, std::slice::from_ref(&record.block1), gcd)
             .into_iter()
             .next();
-        let f2 = outer_face_records_to_list(blocks, &[record.block2.clone()], gcd)
+        let f2 = outer_face_records_to_list(blocks, std::slice::from_ref(&record.block2), gcd)
             .into_iter()
             .next();
         if let Some(face) = f1 {
@@ -1268,6 +1275,7 @@ pub fn match_faces_to_list(blocks: &[Block], matched_faces: &[FaceMatch], gcd: u
 ///
 /// # Returns
 /// Collection of child faces excluding edges and the centre face itself.
+#[allow(clippy::too_many_arguments)]
 pub fn split_face(
     face_to_split: &Face,
     block: &Block,
@@ -1510,7 +1518,7 @@ pub fn rotate_block(block: &Block, rotation: [[Float; 3]; 3]) -> Block {
             }
         }
     }
-    return Block::new(block.imax, block.jmax, block.kmax, x, y, z);
+    Block::new(block.imax, block.jmax, block.kmax, x, y, z)
 }
 
 // Block-level analysis functions (get_outer_bounds, block_connection_matrix,

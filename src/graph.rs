@@ -204,8 +204,8 @@ pub fn write_ddcmp(
     writeln!(f, "{}", n_proc)?;
     writeln!(f, "{}", n_isp)?;
     writeln!(f, "{}", n_blocks)?;
-    for b_idx in 0..n_blocks {
-        writeln!(f, "{} {}", b_idx + 1, parts[b_idx] + 1)?;
+    for (b_idx, part) in parts.iter().enumerate().take(n_blocks) {
+        writeln!(f, "{} {}", b_idx + 1, part + 1)?;
     }
     for isp in 0..n_isp {
         writeln!(f, "{} {}", isp + 1, isp)?;
