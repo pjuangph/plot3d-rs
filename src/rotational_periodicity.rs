@@ -1193,13 +1193,8 @@ pub fn verify_periodicity(
 
         let block2 = &reduced[b2.block_index];
 
-        // Fast path: if orientation is known from Phase 1, trust the match
-        if fm.orientation.is_some() {
-            verified.push(face_matches[idx].clone());
-            continue;
-        }
-
-        // Slow path: no orientation — enumerate corner permutations with rotations
+        // All matches go through corner permutation to ensure block2's
+        // diagonal corners are ordered to correspond to rotated block1 corners.
         let i_vals = [b2.il, b2.ih];
         let j_vals = [b2.jl, b2.jh];
         let k_vals = [b2.kl, b2.kh];
