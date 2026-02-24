@@ -1257,6 +1257,10 @@ pub fn verify_connectivity(
 /// # Returns
 /// Validated face matches with corrected block2 diagonal indices.
 pub fn face_matches_to_dict(blocks: &[Block], face_matches: &[FaceMatch]) -> Vec<FaceMatch> {
+    // GCD factor: MatchPoint indices are on the reduced grid while FaceRecord
+    // indices have already been scaled up by this factor.
+    let gcd = crate::utils::compute_min_gcd(blocks);
+
     face_matches
         .iter()
         .filter_map(|fm| {
@@ -1268,51 +1272,62 @@ pub fn face_matches_to_dict(blocks: &[Block], face_matches: &[FaceMatch]) -> Vec
 
             let mut result = fm.clone();
 
-            // Strategy: use MatchPoint data when available, fall back to spatial search.
-            if !fm.points.is_empty() {
-                // ── MatchPoint-based corner mapping ────────────────────────
-                // Find the match point whose block1 indices are closest to
-                // block1's lower corner (il, jl, kl), then use its block2
-                // indices as block2's lower corner. Same for upper.
+            // Phase 2/3 matches (no orientation) with MatchPoint data:
+            // Use actual node-to-node correspondence to find diagonal corners.
+            // `from_match_points` computes independent min/max per axis, which
+            // may create synthetic bounding-box corners that are not actual
+            // matched nodes. Using MatchPoints avoids this.
+            if fm.orientation.is_none() && !fm.points.is_empty() {
+                // Find the MatchPoint whose block1 position (on the full grid)
+                // is closest to block1's current lower corner.
+                let (x1_l, y1_l, z1_l) = block1.xyz(b1.il, b1.jl, b1.kl);
                 let lower_pt = fm
                     .points
                     .iter()
-                    .min_by_key(|p| {
-                        let di = (p.i1 as isize - b1.il as isize).unsigned_abs();
-                        let dj = (p.j1 as isize - b1.jl as isize).unsigned_abs();
-                        let dk = (p.k1 as isize - b1.kl as isize).unsigned_abs();
-                        di + dj + dk
+                    .min_by(|a, b| {
+                        let (xa, ya, za) = block1.xyz(a.i1 * gcd, a.j1 * gcd, a.k1 * gcd);
+                        let da =
+                            (xa - x1_l).powi(2) + (ya - y1_l).powi(2) + (za - z1_l).powi(2);
+                        let (xb, yb, zb) = block1.xyz(b.i1 * gcd, b.j1 * gcd, b.k1 * gcd);
+                        let db =
+                            (xb - x1_l).powi(2) + (yb - y1_l).powi(2) + (zb - z1_l).powi(2);
+                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .unwrap();
 
+                // Same for upper corner.
+                let (x1_u, y1_u, z1_u) = block1.xyz(b1.ih, b1.jh, b1.kh);
                 let upper_pt = fm
                     .points
                     .iter()
-                    .min_by_key(|p| {
-                        let di = (p.i1 as isize - b1.ih as isize).unsigned_abs();
-                        let dj = (p.j1 as isize - b1.jh as isize).unsigned_abs();
-                        let dk = (p.k1 as isize - b1.kh as isize).unsigned_abs();
-                        di + dj + dk
+                    .min_by(|a, b| {
+                        let (xa, ya, za) = block1.xyz(a.i1 * gcd, a.j1 * gcd, a.k1 * gcd);
+                        let da =
+                            (xa - x1_u).powi(2) + (ya - y1_u).powi(2) + (za - z1_u).powi(2);
+                        let (xb, yb, zb) = block1.xyz(b.i1 * gcd, b.j1 * gcd, b.k1 * gcd);
+                        let db =
+                            (xb - x1_u).powi(2) + (yb - y1_u).powi(2) + (zb - z1_u).powi(2);
+                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .unwrap();
 
-                // Use block1 indices from the actual match points (may differ
-                // from the bounding-box corners in from_match_points).
-                result.block1.il = lower_pt.i1;
-                result.block1.jl = lower_pt.j1;
-                result.block1.kl = lower_pt.k1;
-                result.block1.ih = upper_pt.i1;
-                result.block1.jh = upper_pt.j1;
-                result.block1.kh = upper_pt.k1;
+                // Use actual MatchPoint indices (scaled to full grid).
+                result.block1.il = lower_pt.i1 * gcd;
+                result.block1.jl = lower_pt.j1 * gcd;
+                result.block1.kl = lower_pt.k1 * gcd;
+                result.block1.ih = upper_pt.i1 * gcd;
+                result.block1.jh = upper_pt.j1 * gcd;
+                result.block1.kh = upper_pt.k1 * gcd;
 
-                result.block2.il = lower_pt.i2;
-                result.block2.jl = lower_pt.j2;
-                result.block2.kl = lower_pt.k2;
-                result.block2.ih = upper_pt.i2;
-                result.block2.jh = upper_pt.j2;
-                result.block2.kh = upper_pt.k2;
+                result.block2.il = lower_pt.i2 * gcd;
+                result.block2.jl = lower_pt.j2 * gcd;
+                result.block2.kl = lower_pt.k2 * gcd;
+                result.block2.ih = upper_pt.i2 * gcd;
+                result.block2.jh = upper_pt.j2 * gcd;
+                result.block2.kh = upper_pt.k2 * gcd;
             } else {
-                // ── Spatial proximity search (self-matches, empty points) ──
+                // Phase 1 (has orientation) or no MatchPoints: spatial search
+                // over block2's bounding-box corners.
                 let (x1_l, y1_l, z1_l) = block1.xyz(b1.il, b1.jl, b1.kl);
 
                 let i_vals = [b2.i_lo(), b2.i_hi()];
@@ -1358,14 +1373,6 @@ pub fn face_matches_to_dict(blocks: &[Block], face_matches: &[FaceMatch]) -> Vec
                 result.block2.ih = best_upper.1;
                 result.block2.jh = best_upper.2;
                 result.block2.kh = best_upper.3;
-
-                // Preserve block1 indices as-is for the spatial path
-                result.block1.il = b1.il;
-                result.block1.jl = b1.jl;
-                result.block1.kl = b1.kl;
-                result.block1.ih = b1.ih;
-                result.block1.jh = b1.jh;
-                result.block1.kh = b1.kh;
             }
 
             Some(result)
