@@ -1242,6 +1242,14 @@ pub fn verify_connectivity(
 ///
 /// This is the Rust equivalent of Python's `face_matches_to_dict`.
 ///
+/// For matches that carry `MatchPoint` data (Phase 2/3), the actual node-to-node
+/// correspondence is used to determine the correct corner mapping. This avoids
+/// the pitfall where `from_match_points` computes min/max per axis independently,
+/// creating synthetic bounding-box corners that may not be actual matched nodes.
+///
+/// For matches without `MatchPoint` data (self-matches) or Phase 1 matches with
+/// orientation, a spatial proximity search over block2's face corners is used.
+///
 /// # Arguments
 /// * `blocks` - Block array providing geometry.
 /// * `face_matches` - Matches to validate.
@@ -1260,58 +1268,105 @@ pub fn face_matches_to_dict(blocks: &[Block], face_matches: &[FaceMatch]) -> Vec
 
             let mut result = fm.clone();
 
-            // Block1 lower corner
-            let (x1_l, y1_l, z1_l) = block1.xyz(b1.il, b1.jl, b1.kl);
+            // Strategy: use MatchPoint data when available, fall back to spatial search.
+            if !fm.points.is_empty() {
+                // ── MatchPoint-based corner mapping ────────────────────────
+                // Find the match point whose block1 indices are closest to
+                // block1's lower corner (il, jl, kl), then use its block2
+                // indices as block2's lower corner. Same for upper.
+                let lower_pt = fm
+                    .points
+                    .iter()
+                    .min_by_key(|p| {
+                        let di = (p.i1 as isize - b1.il as isize).unsigned_abs();
+                        let dj = (p.j1 as isize - b1.jl as isize).unsigned_abs();
+                        let dk = (p.k1 as isize - b1.kl as isize).unsigned_abs();
+                        di + dj + dk
+                    })
+                    .unwrap();
 
-            // Search for closest block2 corner to block1's lower corner
-            let i_vals = [b2.i_lo(), b2.i_hi()];
-            let j_vals = [b2.j_lo(), b2.j_hi()];
-            let k_vals = [b2.k_lo(), b2.k_hi()];
+                let upper_pt = fm
+                    .points
+                    .iter()
+                    .min_by_key(|p| {
+                        let di = (p.i1 as isize - b1.ih as isize).unsigned_abs();
+                        let dj = (p.j1 as isize - b1.jh as isize).unsigned_abs();
+                        let dk = (p.k1 as isize - b1.kh as isize).unsigned_abs();
+                        di + dj + dk
+                    })
+                    .unwrap();
 
-            let mut best_lower = (Float::MAX, b2.il, b2.jl, b2.kl);
-            for &i in &i_vals {
-                for &j in &j_vals {
-                    for &k in &k_vals {
-                        let (x2, y2, z2) = block2.xyz(i, j, k);
-                        let d = ((x2 - x1_l).powi(2) + (y2 - y1_l).powi(2) + (z2 - z1_l).powi(2))
+                // Use block1 indices from the actual match points (may differ
+                // from the bounding-box corners in from_match_points).
+                result.block1.il = lower_pt.i1;
+                result.block1.jl = lower_pt.j1;
+                result.block1.kl = lower_pt.k1;
+                result.block1.ih = upper_pt.i1;
+                result.block1.jh = upper_pt.j1;
+                result.block1.kh = upper_pt.k1;
+
+                result.block2.il = lower_pt.i2;
+                result.block2.jl = lower_pt.j2;
+                result.block2.kl = lower_pt.k2;
+                result.block2.ih = upper_pt.i2;
+                result.block2.jh = upper_pt.j2;
+                result.block2.kh = upper_pt.k2;
+            } else {
+                // ── Spatial proximity search (self-matches, empty points) ──
+                let (x1_l, y1_l, z1_l) = block1.xyz(b1.il, b1.jl, b1.kl);
+
+                let i_vals = [b2.i_lo(), b2.i_hi()];
+                let j_vals = [b2.j_lo(), b2.j_hi()];
+                let k_vals = [b2.k_lo(), b2.k_hi()];
+
+                let mut best_lower = (Float::MAX, b2.il, b2.jl, b2.kl);
+                for &i in &i_vals {
+                    for &j in &j_vals {
+                        for &k in &k_vals {
+                            let (x2, y2, z2) = block2.xyz(i, j, k);
+                            let d = ((x2 - x1_l).powi(2)
+                                + (y2 - y1_l).powi(2)
+                                + (z2 - z1_l).powi(2))
                             .sqrt();
-                        if d < best_lower.0 {
-                            best_lower = (d, i, j, k);
+                            if d < best_lower.0 {
+                                best_lower = (d, i, j, k);
+                            }
                         }
                     }
                 }
-            }
-            result.block2.il = best_lower.1;
-            result.block2.jl = best_lower.2;
-            result.block2.kl = best_lower.3;
+                result.block2.il = best_lower.1;
+                result.block2.jl = best_lower.2;
+                result.block2.kl = best_lower.3;
 
-            // Block1 upper corner
-            let (x1_u, y1_u, z1_u) = block1.xyz(b1.ih, b1.jh, b1.kh);
+                let (x1_u, y1_u, z1_u) = block1.xyz(b1.ih, b1.jh, b1.kh);
 
-            let mut best_upper = (Float::MAX, b2.ih, b2.jh, b2.kh);
-            for &i in &i_vals {
-                for &j in &j_vals {
-                    for &k in &k_vals {
-                        let (x2, y2, z2) = block2.xyz(i, j, k);
-                        let d = ((x2 - x1_u).powi(2) + (y2 - y1_u).powi(2) + (z2 - z1_u).powi(2))
+                let mut best_upper = (Float::MAX, b2.ih, b2.jh, b2.kh);
+                for &i in &i_vals {
+                    for &j in &j_vals {
+                        for &k in &k_vals {
+                            let (x2, y2, z2) = block2.xyz(i, j, k);
+                            let d = ((x2 - x1_u).powi(2)
+                                + (y2 - y1_u).powi(2)
+                                + (z2 - z1_u).powi(2))
                             .sqrt();
-                        if d < best_upper.0 {
-                            best_upper = (d, i, j, k);
+                            if d < best_upper.0 {
+                                best_upper = (d, i, j, k);
+                            }
                         }
                     }
                 }
-            }
-            result.block2.ih = best_upper.1;
-            result.block2.jh = best_upper.2;
-            result.block2.kh = best_upper.3;
+                result.block2.ih = best_upper.1;
+                result.block2.jh = best_upper.2;
+                result.block2.kh = best_upper.3;
 
-            // Preserve block1 indices as-is
-            result.block1.il = b1.il;
-            result.block1.jl = b1.jl;
-            result.block1.kl = b1.kl;
-            result.block1.ih = b1.ih;
-            result.block1.jh = b1.jh;
-            result.block1.kh = b1.kh;
+                // Preserve block1 indices as-is for the spatial path
+                result.block1.il = b1.il;
+                result.block1.jl = b1.jl;
+                result.block1.kl = b1.kl;
+                result.block1.ih = b1.ih;
+                result.block1.jh = b1.jh;
+                result.block1.kh = b1.kh;
+            }
 
             Some(result)
         })
