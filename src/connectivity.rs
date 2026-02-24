@@ -157,6 +157,12 @@ fn is_edge(points: &[MatchPoint]) -> bool {
 }
 
 /// Filter matches so the provided key advances monotonically by 1.
+///
+/// When there are exactly 2 unique values, they are always kept regardless of
+/// gap size. This handles the case where a small face (e.g. 2 nodes wide after
+/// GCD reduction) matches a large face — the matching indices on the large face
+/// may span a wide gap (e.g. [0, 113]) but are still a valid match. The
+/// `is_edge()` check upstream has already verified this isn't a degenerate edge.
 fn filter_block_increasing(
     points: &[MatchPoint],
     key: fn(&MatchPoint) -> usize,
@@ -169,6 +175,10 @@ fn filter_block_increasing(
     unique_vals.dedup();
     if unique_vals.len() <= 1 {
         return Vec::new();
+    }
+    // With only 2 unique values, contiguity is trivially satisfied — keep all.
+    if unique_vals.len() == 2 {
+        return points.to_vec();
     }
     let mut keep: HashSet<usize> = HashSet::new();
     for window in unique_vals.windows(2) {
