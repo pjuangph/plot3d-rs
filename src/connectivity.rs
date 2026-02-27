@@ -799,30 +799,6 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
 
                 let corner1 = FaceRecord::from_match_points(i, &points, true).unwrap();
                 let corner2 = FaceRecord::from_match_points(j, &points, false).unwrap();
-                let dims1 = corner1.face_dims();
-                let dims2 = corner2.face_dims();
-                if dims1 != dims2 {
-                    let unique_i1: HashSet<usize> = points.iter().map(|p| p.i1).collect();
-                    let unique_j1: HashSet<usize> = points.iter().map(|p| p.j1).collect();
-                    let unique_k1: HashSet<usize> = points.iter().map(|p| p.k1).collect();
-                    let unique_i2: HashSet<usize> = points.iter().map(|p| p.i2).collect();
-                    let unique_j2: HashSet<usize> = points.iter().map(|p| p.j2).collect();
-                    let unique_k2: HashSet<usize> = points.iter().map(|p| p.k2).collect();
-                    eprintln!("PHASE 2 SIZE MISMATCH:");
-                    eprintln!("  block1 idx={} (imax={},jmax={},kmax={}) face dims=({},{})",
-                        i, blocks[i].imax, blocks[i].jmax, blocks[i].kmax, dims1.0, dims1.1);
-                    eprintln!("  block2 idx={} (imax={},jmax={},kmax={}) face dims=({},{})",
-                        j, blocks[j].imax, blocks[j].jmax, blocks[j].kmax, dims2.0, dims2.1);
-                    eprintln!("  match_points: {} total", points.len());
-                    eprintln!("  block1 unique: i={} j={} k={}",
-                        unique_i1.len(), unique_j1.len(), unique_k1.len());
-                    eprintln!("  block2 unique: i={} j={} k={}",
-                        unique_i2.len(), unique_j2.len(), unique_k2.len());
-                    eprintln!("  block1 ranges: i={}..{}, j={}..{}, k={}..{}",
-                        corner1.il, corner1.ih, corner1.jl, corner1.jh, corner1.kl, corner1.kh);
-                    eprintln!("  block2 ranges: i={}..{}, j={}..{}, k={}..{}",
-                        corner2.il, corner2.ih, corner2.jl, corner2.jh, corner2.kl, corner2.kh);
-                }
                 matches.push(FaceMatch {
                     block1: corner1,
                     block2: corner2,
@@ -1066,30 +1042,6 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
                         FaceRecord::from_match_points(bi, &pts, true),
                         FaceRecord::from_match_points(bj, &pts, false),
                     ) {
-                        let dims1 = c1.face_dims();
-                        let dims2 = c2.face_dims();
-                        if dims1 != dims2 {
-                            let unique_i1: HashSet<usize> = pts.iter().map(|p| p.i1).collect();
-                            let unique_j1: HashSet<usize> = pts.iter().map(|p| p.j1).collect();
-                            let unique_k1: HashSet<usize> = pts.iter().map(|p| p.k1).collect();
-                            let unique_i2: HashSet<usize> = pts.iter().map(|p| p.i2).collect();
-                            let unique_j2: HashSet<usize> = pts.iter().map(|p| p.j2).collect();
-                            let unique_k2: HashSet<usize> = pts.iter().map(|p| p.k2).collect();
-                            eprintln!("PHASE 3 SIZE MISMATCH:");
-                            eprintln!("  block1 idx={} (imax={},jmax={},kmax={}) face dims=({},{})",
-                                bi, blocks[bi].imax, blocks[bi].jmax, blocks[bi].kmax, dims1.0, dims1.1);
-                            eprintln!("  block2 idx={} (imax={},jmax={},kmax={}) face dims=({},{})",
-                                bj, blocks[bj].imax, blocks[bj].jmax, blocks[bj].kmax, dims2.0, dims2.1);
-                            eprintln!("  match_points: {} total", pts.len());
-                            eprintln!("  block1 unique: i={} j={} k={}",
-                                unique_i1.len(), unique_j1.len(), unique_k1.len());
-                            eprintln!("  block2 unique: i={} j={} k={}",
-                                unique_i2.len(), unique_j2.len(), unique_k2.len());
-                            eprintln!("  block1 ranges: i={}..{}, j={}..{}, k={}..{}",
-                                c1.il, c1.ih, c1.jl, c1.jh, c1.kl, c1.kh);
-                            eprintln!("  block2 ranges: i={}..{}, j={}..{}, k={}..{}",
-                                c2.il, c2.ih, c2.jl, c2.jh, c2.kl, c2.kh);
-                        }
                         matches.push(FaceMatch {
                             block1: c1,
                             block2: c2,
