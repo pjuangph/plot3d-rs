@@ -1191,6 +1191,21 @@ pub fn verify_periodicity(
             continue;
         }
 
+        // Check face dimensions match (accounting for axis swapping)
+        let dims1 = face_matches[idx].block1.face_dims();
+        let dims2 = face_matches[idx].block2.face_dims();
+        if dims1 != dims2 {
+            eprintln!(
+                "verify_periodicity: SIZE MISMATCH at face_match index {}: \
+                 block1 (block_index={}) dims=({},{}) vs block2 (block_index={}) dims=({},{})",
+                idx,
+                face_matches[idx].block1.block_index, dims1.0, dims1.1,
+                face_matches[idx].block2.block_index, dims2.0, dims2.1
+            );
+            mismatched.push(face_matches[idx].clone());
+            continue;
+        }
+
         let block2 = &reduced[b2.block_index];
 
         // All matches go through corner permutation to ensure block2's

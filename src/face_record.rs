@@ -189,6 +189,21 @@ impl FaceRecord {
         self.kl > self.kh
     }
 
+    /// Returns the sorted (ascending) pair of face dimension spans.
+    /// For a face with one constant axis, two spans are non-zero.
+    /// Uses absolute differences so reversal of il/ih, jl/jh, kl/kh is handled.
+    /// The constant axis does not need to match between paired faces
+    /// (e.g. a constant-i face can match a constant-k face).
+    pub fn face_dims(&self) -> (usize, usize) {
+        let mut spans = [
+            self.il.abs_diff(self.ih),
+            self.jl.abs_diff(self.jh),
+            self.kl.abs_diff(self.kh),
+        ];
+        spans.sort();
+        (spans[1], spans[2])
+    }
+
     /// Compute and fill in the physical direction metadata by sampling the block.
     ///
     /// For a face with one constant axis (e.g. K-constant), the two varying axes

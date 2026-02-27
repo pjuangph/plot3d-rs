@@ -44,7 +44,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use crate::{
     block::Block,
     block_face_functions::{
-        create_face_from_diagonals, get_outer_faces, reduce_blocks, split_face, Face,
+        create_face_from_diagonals, get_outer_faces, split_face, Face,
     },
     face_record::{FaceKey, FaceMatch, FaceRecord, MatchPoint, Orientation},
     Float,
@@ -317,6 +317,33 @@ pub fn get_face_intersection(
     let matches = apply_axis_filters(matches, face1, face2);
     if matches.len() < 4 {
         return (Vec::new(), Vec::new(), Vec::new());
+    }
+
+    // Reject matches where the two sides have different face dimensions.
+    // On a conforming mesh, a real face overlap always produces equal dims.
+    // Mismatched dims indicate edge/corner contact, not face overlap.
+    {
+        let mut spans1 = [
+            matches.iter().map(|p| p.i1).max().unwrap()
+                - matches.iter().map(|p| p.i1).min().unwrap(),
+            matches.iter().map(|p| p.j1).max().unwrap()
+                - matches.iter().map(|p| p.j1).min().unwrap(),
+            matches.iter().map(|p| p.k1).max().unwrap()
+                - matches.iter().map(|p| p.k1).min().unwrap(),
+        ];
+        let mut spans2 = [
+            matches.iter().map(|p| p.i2).max().unwrap()
+                - matches.iter().map(|p| p.i2).min().unwrap(),
+            matches.iter().map(|p| p.j2).max().unwrap()
+                - matches.iter().map(|p| p.j2).min().unwrap(),
+            matches.iter().map(|p| p.k2).max().unwrap()
+                - matches.iter().map(|p| p.k2).min().unwrap(),
+        ];
+        spans1.sort();
+        spans2.sort();
+        if (spans1[1], spans1[2]) != (spans2[1], spans2[2]) {
+            return (Vec::new(), Vec::new(), Vec::new());
+        }
     }
 
     let split_faces1 = create_split_faces(face1, block1, &matches, true);
@@ -772,6 +799,30 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
 
                 let corner1 = FaceRecord::from_match_points(i, &points, true).unwrap();
                 let corner2 = FaceRecord::from_match_points(j, &points, false).unwrap();
+                let dims1 = corner1.face_dims();
+                let dims2 = corner2.face_dims();
+                if dims1 != dims2 {
+                    let unique_i1: HashSet<usize> = points.iter().map(|p| p.i1).collect();
+                    let unique_j1: HashSet<usize> = points.iter().map(|p| p.j1).collect();
+                    let unique_k1: HashSet<usize> = points.iter().map(|p| p.k1).collect();
+                    let unique_i2: HashSet<usize> = points.iter().map(|p| p.i2).collect();
+                    let unique_j2: HashSet<usize> = points.iter().map(|p| p.j2).collect();
+                    let unique_k2: HashSet<usize> = points.iter().map(|p| p.k2).collect();
+                    eprintln!("PHASE 2 SIZE MISMATCH:");
+                    eprintln!("  block1 idx={} (imax={},jmax={},kmax={}) face dims=({},{})",
+                        i, blocks[i].imax, blocks[i].jmax, blocks[i].kmax, dims1.0, dims1.1);
+                    eprintln!("  block2 idx={} (imax={},jmax={},kmax={}) face dims=({},{})",
+                        j, blocks[j].imax, blocks[j].jmax, blocks[j].kmax, dims2.0, dims2.1);
+                    eprintln!("  match_points: {} total", points.len());
+                    eprintln!("  block1 unique: i={} j={} k={}",
+                        unique_i1.len(), unique_j1.len(), unique_k1.len());
+                    eprintln!("  block2 unique: i={} j={} k={}",
+                        unique_i2.len(), unique_j2.len(), unique_k2.len());
+                    eprintln!("  block1 ranges: i={}..{}, j={}..{}, k={}..{}",
+                        corner1.il, corner1.ih, corner1.jl, corner1.jh, corner1.kl, corner1.kh);
+                    eprintln!("  block2 ranges: i={}..{}, j={}..{}, k={}..{}",
+                        corner2.il, corner2.ih, corner2.jl, corner2.jh, corner2.kl, corner2.kh);
+                }
                 matches.push(FaceMatch {
                     block1: corner1,
                     block2: corner2,
@@ -1015,6 +1066,30 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
                         FaceRecord::from_match_points(bi, &pts, true),
                         FaceRecord::from_match_points(bj, &pts, false),
                     ) {
+                        let dims1 = c1.face_dims();
+                        let dims2 = c2.face_dims();
+                        if dims1 != dims2 {
+                            let unique_i1: HashSet<usize> = pts.iter().map(|p| p.i1).collect();
+                            let unique_j1: HashSet<usize> = pts.iter().map(|p| p.j1).collect();
+                            let unique_k1: HashSet<usize> = pts.iter().map(|p| p.k1).collect();
+                            let unique_i2: HashSet<usize> = pts.iter().map(|p| p.i2).collect();
+                            let unique_j2: HashSet<usize> = pts.iter().map(|p| p.j2).collect();
+                            let unique_k2: HashSet<usize> = pts.iter().map(|p| p.k2).collect();
+                            eprintln!("PHASE 3 SIZE MISMATCH:");
+                            eprintln!("  block1 idx={} (imax={},jmax={},kmax={}) face dims=({},{})",
+                                bi, blocks[bi].imax, blocks[bi].jmax, blocks[bi].kmax, dims1.0, dims1.1);
+                            eprintln!("  block2 idx={} (imax={},jmax={},kmax={}) face dims=({},{})",
+                                bj, blocks[bj].imax, blocks[bj].jmax, blocks[bj].kmax, dims2.0, dims2.1);
+                            eprintln!("  match_points: {} total", pts.len());
+                            eprintln!("  block1 unique: i={} j={} k={}",
+                                unique_i1.len(), unique_j1.len(), unique_k1.len());
+                            eprintln!("  block2 unique: i={} j={} k={}",
+                                unique_i2.len(), unique_j2.len(), unique_k2.len());
+                            eprintln!("  block1 ranges: i={}..{}, j={}..{}, k={}..{}",
+                                c1.il, c1.ih, c1.jl, c1.jh, c1.kl, c1.kh);
+                            eprintln!("  block2 ranges: i={}..{}, j={}..{}, k={}..{}",
+                                c2.il, c2.ih, c2.jl, c2.jh, c2.kl, c2.kh);
+                        }
                         matches.push(FaceMatch {
                             block1: c1,
                             block2: c2,
@@ -1057,182 +1132,59 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
     (matches, formatted)
 }
 
-/// Verify that face-match diagonal corners are spatially consistent.
+/// Verify that paired faces have matching dimensions.
 ///
-/// For each match, checks that block1's lower/upper corner coordinates align
-/// with block2's lower/upper corners (within tolerance). When the stored
-/// diagonal does not match, all permutations of block2's face corners are
-/// tried. If a valid permutation is found the match is corrected; otherwise
-/// it is classified as mismatched.
+/// For each match, checks that block1 and block2 have the same face dimensions
+/// (sorted non-zero axis spans). This ensures the two sides of a connectivity
+/// match have the same point count, which is the fundamental invariant for
+/// conforming structured meshes.
 ///
-/// Uses GCD reduction (same as [`connectivity_fast`]) for efficient lookups.
+/// Bad matches (mismatched dims from corner-only or edge contact) are already
+/// prevented by the dims consistency check in [`get_face_intersection`].
+/// This function serves as a final safety net.
 ///
 /// # Arguments
-/// * `blocks` - Full-resolution blocks.
+/// * `blocks` - Full-resolution blocks (used only for bounds checking).
 /// * `face_matches` - Face matches to verify (typically from [`connectivity_fast`]).
-/// * `tol` - Euclidean distance tolerance for corner matching.
+/// * `_tol` - Unused (kept for API compatibility).
 ///
 /// # Returns
-/// `(verified, mismatched)` where `verified` contains corrected matches and
-/// `mismatched` contains matches that could not be verified.
+/// `(verified, mismatched)` where `verified` contains matches with equal face
+/// dims and `mismatched` contains matches with differing dims.
 pub fn verify_connectivity(
     blocks: &[Block],
     face_matches: &[FaceMatch],
-    tol: Float,
+    _tol: Float,
 ) -> (Vec<FaceMatch>, Vec<FaceMatch>) {
-    // Compute GCD and reduce blocks
-    let gcd_to_use = crate::utils::compute_min_gcd(blocks);
-
-    let reduced = reduce_blocks(blocks, gcd_to_use);
-
-    // Scale down face_match indices by GCD
-    let mut scaled_matches: Vec<FaceMatch> = face_matches.to_vec();
-    for fm in &mut scaled_matches {
-        fm.divide_indices(gcd_to_use);
-    }
-
     let mut verified = Vec::new();
     let mut mismatched = Vec::new();
 
-    let pb = ProgressBar::new(scaled_matches.len() as u64);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "{msg} [{bar:40.cyan/blue}] {pos}/{len} matches ({eta} remaining)",
-        )
-        .unwrap()
-        .progress_chars("=>-"),
-    );
-    pb.set_message("Verify connectivity");
-
-    for (idx, fm) in scaled_matches.iter().enumerate() {
-        pb.inc(1);
+    for fm in face_matches {
         let b1 = &fm.block1;
         let b2 = &fm.block2;
 
-        if b1.block_index >= reduced.len() || b2.block_index >= reduced.len() {
-            mismatched.push(face_matches[idx].clone());
+        if b1.block_index >= blocks.len() || b2.block_index >= blocks.len() {
+            mismatched.push(fm.clone());
             continue;
         }
 
-        let block1 = &reduced[b1.block_index];
-        let block2 = &reduced[b2.block_index];
-
-        // Fast path: if orientation is known from Phase 1, just verify stored diagonal
-        if fm.orientation.is_some() {
-            let (x1_l, y1_l, z1_l) = block1.xyz(b1.il, b1.jl, b1.kl);
-            let (x1_u, y1_u, z1_u) = block1.xyz(b1.ih, b1.jh, b1.kh);
-            let (x2_l, y2_l, z2_l) = block2.xyz(b2.il, b2.jl, b2.kl);
-            let (x2_u, y2_u, z2_u) = block2.xyz(b2.ih, b2.jh, b2.kh);
-
-            let d_lower =
-                ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
-            let d_upper =
-                ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
-
-            if d_lower < tol && d_upper < tol {
-                verified.push(face_matches[idx].clone());
-            } else {
-                // Orientation was set but diagonal doesn't verify — still accept
-                // as the orientation was confirmed at detection time
-                verified.push(face_matches[idx].clone());
-            }
-            continue;
-        }
-
-        // Slow path: no orientation — check stored diagonal then try permutations
-        let (x1_l, y1_l, z1_l) = block1.xyz(b1.il, b1.jl, b1.kl);
-        let (x1_u, y1_u, z1_u) = block1.xyz(b1.ih, b1.jh, b1.kh);
-
-        let (x2_l, y2_l, z2_l) = block2.xyz(b2.il, b2.jl, b2.kl);
-        let (x2_u, y2_u, z2_u) = block2.xyz(b2.ih, b2.jh, b2.kh);
-
-        let d_lower =
-            ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
-        let d_upper =
-            ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
-
-        if d_lower < tol && d_upper < tol {
-            verified.push(face_matches[idx].clone());
-            continue;
-        }
-
-        // Enumerate unique corners of block2's face
-        let i_vals = [b2.il, b2.ih];
-        let j_vals = [b2.jl, b2.jh];
-        let k_vals = [b2.kl, b2.kh];
-
-        let mut unique_corners: Vec<(usize, usize, usize)> = Vec::new();
-        let mut seen = HashSet::new();
-        for &i in &i_vals {
-            for &j in &j_vals {
-                for &k in &k_vals {
-                    if seen.insert((i, j, k)) {
-                        unique_corners.push((i, j, k));
-                    }
-                }
-            }
-        }
-
-        // Try all permutations of block2's corners
-        let mut found = false;
-        for &(il, jl, kl) in &unique_corners {
-            for &(iu, ju, ku) in &unique_corners {
-                if (il, jl, kl) == (iu, ju, ku) {
-                    continue;
-                }
-
-                let (x2_l, y2_l, z2_l) = block2.xyz(il, jl, kl);
-                let (x2_u, y2_u, z2_u) = block2.xyz(iu, ju, ku);
-
-                let dl =
-                    ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
-                let du =
-                    ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
-
-                if dl < tol && du < tol {
-                    let mut corrected = face_matches[idx].clone();
-                    corrected.block2.il = il * gcd_to_use;
-                    corrected.block2.jl = jl * gcd_to_use;
-                    corrected.block2.kl = kl * gcd_to_use;
-                    corrected.block2.ih = iu * gcd_to_use;
-                    corrected.block2.jh = ju * gcd_to_use;
-                    corrected.block2.kh = ku * gcd_to_use;
-                    verified.push(corrected);
-                    found = true;
-                    break;
-                }
-            }
-            if found {
-                break;
-            }
-        }
-
-        if !found {
-            eprintln!("verify_connectivity: MISMATCH at face_match index {}", idx);
+        // Face dimensions must match (accounting for axis swapping).
+        // A constant-i face can match a constant-k face — face_dims()
+        // returns sorted non-zero spans so orientation doesn't matter.
+        let dims1 = b1.face_dims();
+        let dims2 = b2.face_dims();
+        if dims1 != dims2 {
             eprintln!(
-                "  block1 (block_index={}): lower=({},{},{}) upper=({},{},{})",
-                face_matches[idx].block1.block_index,
-                face_matches[idx].block1.il,
-                face_matches[idx].block1.jl,
-                face_matches[idx].block1.kl,
-                face_matches[idx].block1.ih,
-                face_matches[idx].block1.jh,
-                face_matches[idx].block1.kh,
+                "verify_connectivity: SIZE MISMATCH block {} dims=({},{}) vs block {} dims=({},{})",
+                b1.block_index, dims1.0, dims1.1,
+                b2.block_index, dims2.0, dims2.1
             );
-            eprintln!(
-                "  block2 (block_index={}): lower=({},{},{}) upper=({},{},{})",
-                face_matches[idx].block2.block_index,
-                face_matches[idx].block2.il,
-                face_matches[idx].block2.jl,
-                face_matches[idx].block2.kl,
-                face_matches[idx].block2.ih,
-                face_matches[idx].block2.jh,
-                face_matches[idx].block2.kh,
-            );
-            mismatched.push(face_matches[idx].clone());
+            mismatched.push(fm.clone());
+            continue;
         }
+
+        verified.push(fm.clone());
     }
-    pb.finish_and_clear();
 
     (verified, mismatched)
 }
