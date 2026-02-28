@@ -49,7 +49,7 @@ use crate::{
     block::Block,
     block_face_functions::{
         create_face_from_diagonals, match_faces_to_list, outer_face_records_to_list, reduce_blocks,
-        rotate_block, Face, FaceAxis,
+        Face, FaceAxis,
     },
     connectivity::get_face_intersection,
     face_pool::{count_edge_matches, extract_face_edges, FacePool},
@@ -1130,17 +1130,51 @@ pub fn linear_real_transform(face1: &Face, face2: &Face) -> (Float, [[Float; 3];
     (ang, rotation_matrix)
 }
 
-/// Verify periodic face matches by checking diagonal corners after rotation.
+/// Extract all spatial (x, y, z) points on a face defined by a [`FaceRecord`],
+/// clamped to the block dimensions.
+fn extract_face_points_per(block: &Block, rec: &FaceRecord) -> Vec<(Float, Float, Float)> {
+    let i_lo = rec.il.min(rec.ih);
+    let i_hi = rec.il.max(rec.ih).min(block.imax.saturating_sub(1));
+    let j_lo = rec.jl.min(rec.jh);
+    let j_hi = rec.jl.max(rec.jh).min(block.jmax.saturating_sub(1));
+    let k_lo = rec.kl.min(rec.kh);
+    let k_hi = rec.kl.max(rec.kh).min(block.kmax.saturating_sub(1));
+
+    let ni = i_hi - i_lo + 1;
+    let nj = j_hi - j_lo + 1;
+    let nk = k_hi - k_lo + 1;
+    let mut pts = Vec::with_capacity(ni * nj * nk);
+    for i in i_lo..=i_hi {
+        for j in j_lo..=j_hi {
+            for k in k_lo..=k_hi {
+                pts.push(block.xyz(i, j, k));
+            }
+        }
+    }
+    pts
+}
+
+/// Sort a point list by (x, y, z) using total ordering.
+fn sort_points_per(pts: &mut [(Float, Float, Float)]) {
+    pts.sort_by(|a, b| {
+        a.0.total_cmp(&b.0)
+            .then(a.1.total_cmp(&b.1))
+            .then(a.2.total_cmp(&b.2))
+    });
+}
+
+/// Verify periodic face matches by checking all interior points after rotation.
 ///
-/// Same algorithm as [`crate::connectivity::verify_connectivity`] but rotates
-/// block1 by `±theta` before checking spatial consistency.
+/// For each match, extracts all grid points from both faces on the
+/// full-resolution blocks, rotates face1 points by ±theta, sorts both
+/// point sets, and checks that every point pairs up within `tol`.
 ///
 /// # Arguments
 /// * `blocks` - Full-resolution blocks.
 /// * `face_matches` - Periodic face matches to verify.
 /// * `theta` - Rotation angle in radians.
 /// * `rotation_axis` - Axis of rotation (`'x'`, `'y'`, or `'z'`).
-/// * `tol` - Euclidean distance tolerance for corner matching.
+/// * `tol` - Euclidean distance tolerance for point matching.
 ///
 /// # Returns
 /// `(verified, mismatched)` vectors of face matches.
@@ -1151,195 +1185,62 @@ pub fn verify_periodicity(
     rotation_axis: char,
     tol: Float,
 ) -> (Vec<FaceMatch>, Vec<FaceMatch>) {
-    // Compute GCD and reduce blocks
-    let gcd_to_use = compute_min_gcd(blocks);
-
-    let reduced = reduce_blocks(blocks, gcd_to_use);
-
-    // Build rotation matrices for +theta and -theta
     let rot_pos = create_rotation_matrix(theta, rotation_axis);
     let rot_neg = create_rotation_matrix(-theta, rotation_axis);
-
-    // Pre-rotate all reduced blocks in both directions (parallel)
-    let rotated_pos: Vec<Block> = reduced
-        .par_iter()
-        .map(|b| rotate_block(b, rot_pos))
-        .collect();
-    let rotated_neg: Vec<Block> = reduced
-        .par_iter()
-        .map(|b| rotate_block(b, rot_neg))
-        .collect();
-
-    // Scale down face_match indices by GCD
-    let mut scaled_matches: Vec<FaceMatch> = face_matches.to_vec();
-    for fm in &mut scaled_matches {
-        fm.divide_indices(gcd_to_use);
-    }
+    let tol2 = tol * tol;
 
     let mut verified = Vec::new();
     let mut mismatched = Vec::new();
 
-    let pb = make_progress_bar(scaled_matches.len() as u64, "matches", "Verify periodicity");
+    let pb = make_progress_bar(face_matches.len() as u64, "matches", "Verify periodicity");
 
-    for (idx, fm) in scaled_matches.iter().enumerate() {
+    for fm in face_matches {
         pb.inc(1);
         let b1 = &fm.block1;
         let b2 = &fm.block2;
 
-        if b1.block_index >= reduced.len() || b2.block_index >= reduced.len() {
-            mismatched.push(face_matches[idx].clone());
+        if b1.block_index >= blocks.len() || b2.block_index >= blocks.len() {
+            mismatched.push(fm.clone());
             continue;
         }
 
-        // Check face dimensions match (accounting for axis swapping)
-        let dims1 = face_matches[idx].block1.face_dims();
-        let dims2 = face_matches[idx].block2.face_dims();
-        if dims1 != dims2 {
-            eprintln!(
-                "verify_periodicity: SIZE MISMATCH at face_match index {}: \
-                 block1 (block_index={}) dims=({},{}) vs block2 (block_index={}) dims=({},{})",
-                idx,
-                face_matches[idx].block1.block_index, dims1.0, dims1.1,
-                face_matches[idx].block2.block_index, dims2.0, dims2.1
-            );
-            mismatched.push(face_matches[idx].clone());
+        let pts1 = extract_face_points_per(&blocks[b1.block_index], b1);
+        let mut pts2 = extract_face_points_per(&blocks[b2.block_index], b2);
+
+        if pts1.len() != pts2.len() {
+            mismatched.push(fm.clone());
             continue;
         }
 
-        let block2 = &reduced[b2.block_index];
+        sort_points_per(&mut pts2);
 
-        // All matches go through corner permutation to ensure block2's
-        // diagonal corners are ordered to correspond to rotated block1 corners.
-        let i_vals = [b2.il, b2.ih];
-        let j_vals = [b2.jl, b2.jh];
-        let k_vals = [b2.kl, b2.kh];
-
-        let mut unique_corners: Vec<(usize, usize, usize)> = Vec::new();
-        {
-            let mut seen = HashSet::new();
-            for &i in &i_vals {
-                for &j in &j_vals {
-                    for &k in &k_vals {
-                        if seen.insert((i, j, k)) {
-                            unique_corners.push((i, j, k));
-                        }
-                    }
-                }
-            }
-        }
-
+        // Try +theta rotation, then -theta
         let mut found = false;
-        let mut best_d_lower = Float::INFINITY;
-        let mut best_d_upper = Float::INFINITY;
+        for rot in [&rot_pos, &rot_neg] {
+            let mut pts1_rotated: Vec<(Float, Float, Float)> = pts1
+                .iter()
+                .map(|&(x, y, z)| {
+                    let r = apply_rotation([x, y, z], *rot);
+                    (r[0], r[1], r[2])
+                })
+                .collect();
+            sort_points_per(&mut pts1_rotated);
 
-        // Try +theta rotation first, then -theta
-        for rotated_blocks in [&rotated_pos, &rotated_neg] {
-            if found {
-                break;
-            }
+            let all_match = pts1_rotated.iter().zip(pts2.iter()).all(|(p1, p2)| {
+                let d2 =
+                    (p1.0 - p2.0).powi(2) + (p1.1 - p2.1).powi(2) + (p1.2 - p2.2).powi(2);
+                d2 < tol2
+            });
 
-            let block1_rotated = &rotated_blocks[b1.block_index];
-
-            // Block1 rotated diagonal coordinates
-            let (x1_l, y1_l, z1_l) = block1_rotated.xyz(b1.il, b1.jl, b1.kl);
-            let (x1_u, y1_u, z1_u) = block1_rotated.xyz(b1.ih, b1.jh, b1.kh);
-
-            // Check stored diagonal first
-            let (x2_l, y2_l, z2_l) = block2.xyz(b2.il, b2.jl, b2.kl);
-            let (x2_u, y2_u, z2_u) = block2.xyz(b2.ih, b2.jh, b2.kh);
-
-            let d_lower =
-                ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
-            let d_upper =
-                ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
-
-            if d_lower < best_d_lower {
-                best_d_lower = d_lower;
-            }
-            if d_upper < best_d_upper {
-                best_d_upper = d_upper;
-            }
-
-            if d_lower < tol && d_upper < tol {
-                verified.push(face_matches[idx].clone());
+            if all_match {
+                verified.push(fm.clone());
                 found = true;
                 break;
-            }
-
-            // Try all permutations of block2's corners
-            for &(il, jl, kl) in &unique_corners {
-                for &(iu, ju, ku) in &unique_corners {
-                    if (il, jl, kl) == (iu, ju, ku) {
-                        continue;
-                    }
-
-                    let (x2_l, y2_l, z2_l) = block2.xyz(il, jl, kl);
-                    let (x2_u, y2_u, z2_u) = block2.xyz(iu, ju, ku);
-
-                    let dl =
-                        ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2))
-                            .sqrt();
-                    let du =
-                        ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2))
-                            .sqrt();
-
-                    if dl < best_d_lower {
-                        best_d_lower = dl;
-                    }
-                    if du < best_d_upper {
-                        best_d_upper = du;
-                    }
-
-                    if dl < tol && du < tol {
-                        let mut corrected = face_matches[idx].clone();
-                        corrected.block2.il = il * gcd_to_use;
-                        corrected.block2.jl = jl * gcd_to_use;
-                        corrected.block2.kl = kl * gcd_to_use;
-                        corrected.block2.ih = iu * gcd_to_use;
-                        corrected.block2.jh = ju * gcd_to_use;
-                        corrected.block2.kh = ku * gcd_to_use;
-                        verified.push(corrected);
-                        found = true;
-                        break;
-                    }
-                }
-                if found {
-                    break;
-                }
             }
         }
 
         if !found {
-            eprintln!("verify_periodicity: MISMATCH at face_match index {}", idx);
-            eprintln!(
-                "  block1 (block_index={}): lower=({},{},{}) upper=({},{},{})",
-                face_matches[idx].block1.block_index,
-                face_matches[idx].block1.il,
-                face_matches[idx].block1.jl,
-                face_matches[idx].block1.kl,
-                face_matches[idx].block1.ih,
-                face_matches[idx].block1.jh,
-                face_matches[idx].block1.kh,
-            );
-            eprintln!(
-                "  block2 (block_index={}): lower=({},{},{}) upper=({},{},{})",
-                face_matches[idx].block2.block_index,
-                face_matches[idx].block2.il,
-                face_matches[idx].block2.jl,
-                face_matches[idx].block2.kl,
-                face_matches[idx].block2.ih,
-                face_matches[idx].block2.jh,
-                face_matches[idx].block2.kh,
-            );
-            eprintln!(
-                "  Closest rotated block1 corner dist to block2 lower: {:.6e}",
-                best_d_lower
-            );
-            eprintln!(
-                "  Closest rotated block1 corner dist to block2 upper: {:.6e}",
-                best_d_upper
-            );
-            mismatched.push(face_matches[idx].clone());
+            mismatched.push(fm.clone());
         }
     }
     pb.finish_and_clear();

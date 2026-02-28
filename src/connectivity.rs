@@ -319,32 +319,9 @@ pub fn get_face_intersection(
         return (Vec::new(), Vec::new(), Vec::new());
     }
 
-    // Reject matches where the two sides have different face dimensions.
-    // On a conforming mesh, a real face overlap always produces equal dims.
-    // Mismatched dims indicate edge/corner contact, not face overlap.
-    {
-        let mut spans1 = [
-            matches.iter().map(|p| p.i1).max().unwrap()
-                - matches.iter().map(|p| p.i1).min().unwrap(),
-            matches.iter().map(|p| p.j1).max().unwrap()
-                - matches.iter().map(|p| p.j1).min().unwrap(),
-            matches.iter().map(|p| p.k1).max().unwrap()
-                - matches.iter().map(|p| p.k1).min().unwrap(),
-        ];
-        let mut spans2 = [
-            matches.iter().map(|p| p.i2).max().unwrap()
-                - matches.iter().map(|p| p.i2).min().unwrap(),
-            matches.iter().map(|p| p.j2).max().unwrap()
-                - matches.iter().map(|p| p.j2).min().unwrap(),
-            matches.iter().map(|p| p.k2).max().unwrap()
-                - matches.iter().map(|p| p.k2).min().unwrap(),
-        ];
-        spans1.sort();
-        spans2.sort();
-        if (spans1[1], spans1[2]) != (spans2[1], spans2[2]) {
-            return (Vec::new(), Vec::new(), Vec::new());
-        }
-    }
+    // NOTE: dims consistency check removed — is_edge + filter_block_increasing
+    // already reject degenerate matches; the strict dims check was also
+    // rejecting legitimate partial-face matches on GCD-reduced grids.
 
     let split_faces1 = create_split_faces(face1, block1, &matches, true);
     let split_faces2 = create_split_faces(face2, block2, &matches, false);
@@ -1084,34 +1061,77 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
     (matches, formatted)
 }
 
-/// Verify that paired faces have matching dimensions.
+/// Extract all spatial (x, y, z) points on a face defined by a [`FaceRecord`].
 ///
-/// For each match, checks that block1 and block2 have the same face dimensions
-/// (sorted non-zero axis spans). This ensures the two sides of a connectivity
-/// match have the same point count, which is the fundamental invariant for
-/// conforming structured meshes.
+/// Iterates every grid point in the rectangle bounded by the record's
+/// diagonal corners, clamped to the block dimensions.
+fn extract_face_points(block: &Block, rec: &FaceRecord) -> Vec<(Float, Float, Float)> {
+    let i_lo = rec.il.min(rec.ih);
+    let i_hi = rec.il.max(rec.ih).min(block.imax.saturating_sub(1));
+    let j_lo = rec.jl.min(rec.jh);
+    let j_hi = rec.jl.max(rec.jh).min(block.jmax.saturating_sub(1));
+    let k_lo = rec.kl.min(rec.kh);
+    let k_hi = rec.kl.max(rec.kh).min(block.kmax.saturating_sub(1));
+
+    let ni = i_hi - i_lo + 1;
+    let nj = j_hi - j_lo + 1;
+    let nk = k_hi - k_lo + 1;
+    let mut pts = Vec::with_capacity(ni * nj * nk);
+    for i in i_lo..=i_hi {
+        for j in j_lo..=j_hi {
+            for k in k_lo..=k_hi {
+                pts.push(block.xyz(i, j, k));
+            }
+        }
+    }
+    pts
+}
+
+/// Sort a point list by (x, y, z) using total ordering.
+fn sort_points(pts: &mut [(Float, Float, Float)]) {
+    pts.sort_by(|a, b| {
+        a.0.total_cmp(&b.0)
+            .then(a.1.total_cmp(&b.1))
+            .then(a.2.total_cmp(&b.2))
+    });
+}
+
+/// Verify that every grid point on each face pair is spatially coincident.
 ///
-/// Bad matches (mismatched dims from corner-only or edge contact) are already
-/// prevented by the dims consistency check in [`get_face_intersection`].
-/// This function serves as a final safety net.
+/// For each match, extracts all interior grid points from both faces on the
+/// full-resolution blocks, sorts them, and checks that every point on face1
+/// has a corresponding point on face2 within `tol` Euclidean distance.
 ///
 /// # Arguments
-/// * `blocks` - Full-resolution blocks (used only for bounds checking).
+/// * `blocks` - Full-resolution blocks.
 /// * `face_matches` - Face matches to verify (typically from [`connectivity_fast`]).
-/// * `_tol` - Unused (kept for API compatibility).
+/// * `tol` - Euclidean distance tolerance for point matching.
 ///
 /// # Returns
-/// `(verified, mismatched)` where `verified` contains matches with equal face
-/// dims and `mismatched` contains matches with differing dims.
+/// `(verified, mismatched)` — verified matches have all interior points
+/// coincident; mismatched matches have at least one non-matching point or
+/// differing point counts.
 pub fn verify_connectivity(
     blocks: &[Block],
     face_matches: &[FaceMatch],
-    _tol: Float,
+    tol: Float,
 ) -> (Vec<FaceMatch>, Vec<FaceMatch>) {
     let mut verified = Vec::new();
     let mut mismatched = Vec::new();
+    let tol2 = tol * tol;
+
+    let pb = ProgressBar::new(face_matches.len() as u64);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{msg} [{bar:40.cyan/blue}] {pos}/{len} matches ({eta} remaining)",
+        )
+        .unwrap()
+        .progress_chars("=>-"),
+    );
+    pb.set_message("Verify connectivity");
 
     for fm in face_matches {
+        pb.inc(1);
         let b1 = &fm.block1;
         let b2 = &fm.block2;
 
@@ -1120,24 +1140,30 @@ pub fn verify_connectivity(
             continue;
         }
 
-        // Face dimensions must match (accounting for axis swapping).
-        // A constant-i face can match a constant-k face — face_dims()
-        // returns sorted non-zero spans so orientation doesn't matter.
-        let dims1 = b1.face_dims();
-        let dims2 = b2.face_dims();
-        if dims1 != dims2 {
-            eprintln!(
-                "verify_connectivity: SIZE MISMATCH block {} dims=({},{}) vs block {} dims=({},{})",
-                b1.block_index, dims1.0, dims1.1,
-                b2.block_index, dims2.0, dims2.1
-            );
+        let mut pts1 = extract_face_points(&blocks[b1.block_index], b1);
+        let mut pts2 = extract_face_points(&blocks[b2.block_index], b2);
+
+        if pts1.len() != pts2.len() {
             mismatched.push(fm.clone());
             continue;
         }
 
-        verified.push(fm.clone());
+        sort_points(&mut pts1);
+        sort_points(&mut pts2);
+
+        let all_match = pts1.iter().zip(pts2.iter()).all(|(p1, p2)| {
+            let d2 = (p1.0 - p2.0).powi(2) + (p1.1 - p2.1).powi(2) + (p1.2 - p2.2).powi(2);
+            d2 < tol2
+        });
+
+        if all_match {
+            verified.push(fm.clone());
+        } else {
+            mismatched.push(fm.clone());
+        }
     }
 
+    pb.finish_with_message("Verify connectivity done");
     (verified, mismatched)
 }
 
