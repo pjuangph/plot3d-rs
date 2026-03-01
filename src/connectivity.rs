@@ -1061,25 +1061,36 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
     (matches, formatted)
 }
 
-/// Extract all spatial (x, y, z) points on a face defined by a [`FaceRecord`].
-///
-/// Iterates every grid point in the rectangle bounded by the record's
-/// diagonal corners, clamped to the block dimensions.
-fn extract_face_points(block: &Block, rec: &FaceRecord) -> Vec<(Float, Float, Float)> {
-    let i_lo = rec.il.min(rec.ih);
-    let i_hi = rec.il.max(rec.ih).min(block.imax.saturating_sub(1));
-    let j_lo = rec.jl.min(rec.jh);
-    let j_hi = rec.jl.max(rec.jh).min(block.jmax.saturating_sub(1));
-    let k_lo = rec.kl.min(rec.kh);
-    let k_hi = rec.kl.max(rec.kh).min(block.kmax.saturating_sub(1));
+/// Build an inclusive range from `start` to `end`, stepping +1 or −1.
+fn directed_range(start: usize, end: usize) -> Vec<usize> {
+    if start <= end {
+        (start..=end).collect()
+    } else {
+        (end..=start).rev().collect()
+    }
+}
 
-    let ni = i_hi - i_lo + 1;
-    let nj = j_hi - j_lo + 1;
-    let nk = k_hi - k_lo + 1;
-    let mut pts = Vec::with_capacity(ni * nj * nk);
-    for i in i_lo..=i_hi {
-        for j in j_lo..=j_hi {
-            for k in k_lo..=k_hi {
+/// Extract face points in the traversal order defined by the [`FaceRecord`] diagonals.
+///
+/// The diagonal corners `(il,jl,kl)` → `(ih,jh,kh)` define a directed
+/// traversal.  Point *n* from face A must match point *n* from face B —
+/// no sorting is needed or desired.
+fn extract_face_points(block: &Block, rec: &FaceRecord) -> Vec<(Float, Float, Float)> {
+    let il = rec.il.min(block.imax.saturating_sub(1));
+    let ih = rec.ih.min(block.imax.saturating_sub(1));
+    let jl = rec.jl.min(block.jmax.saturating_sub(1));
+    let jh = rec.jh.min(block.jmax.saturating_sub(1));
+    let kl = rec.kl.min(block.kmax.saturating_sub(1));
+    let kh = rec.kh.min(block.kmax.saturating_sub(1));
+
+    let i_range = directed_range(il, ih);
+    let j_range = directed_range(jl, jh);
+    let k_range = directed_range(kl, kh);
+
+    let mut pts = Vec::with_capacity(i_range.len() * j_range.len() * k_range.len());
+    for &i in &i_range {
+        for &j in &j_range {
+            for &k in &k_range {
                 pts.push(block.xyz(i, j, k));
             }
         }
@@ -1087,38 +1098,35 @@ fn extract_face_points(block: &Block, rec: &FaceRecord) -> Vec<(Float, Float, Fl
     pts
 }
 
-/// Sort a point list by (x, y, z) using total ordering.
-fn sort_points(pts: &mut [(Float, Float, Float)]) {
-    pts.sort_by(|a, b| {
-        a.0.total_cmp(&b.0)
-            .then(a.1.total_cmp(&b.1))
-            .then(a.2.total_cmp(&b.2))
-    });
-}
 
-/// Verify that every grid point on each face pair is spatially coincident.
+/// Align face2's diagonal so directed I→J→K traversal matches face1 point-by-point.
 ///
-/// For each match, extracts all interior grid points from both faces on the
-/// full-resolution blocks, sorts them, and checks that every point on face1
-/// has a corresponding point on face2 within `tol` Euclidean distance.
+/// For same-axis, same-dimension matches, tries all 8 diagonal orientations
+/// of face2 (4 direction combinations × potential axis reversal) to find the
+/// one where every point in face1's lb→ub traversal matches face2's lb→ub
+/// traversal.
+///
+/// Matches with non-matching raw (di,dj,dk) dimensions (cross-axis or
+/// axis-swapped connections) are passed through trusting the corner
+/// verification, since the directed I→J→K traversal cannot handle them
+/// without axis permutation information.
 ///
 /// # Arguments
-/// * `blocks` - Full-resolution blocks.
-/// * `face_matches` - Face matches to verify (typically from [`connectivity_fast`]).
-/// * `tol` - Euclidean distance tolerance for point matching.
+/// * `blocks` - Block array providing geometry.
+/// * `face_matches` - Verified face matches (from `verify_connectivity`).
+/// * `tol` - Euclidean distance tolerance.
 ///
 /// # Returns
-/// `(verified, mismatched)` — verified matches have all interior points
-/// coincident; mismatched matches have at least one non-matching point or
-/// differing point counts.
-pub fn verify_connectivity(
+/// `(aligned, rejected)` — aligned matches with corrected block2 diagonals,
+/// and rejected matches where no orientation produces point-by-point equality.
+pub fn align_face_orientations(
     blocks: &[Block],
     face_matches: &[FaceMatch],
     tol: Float,
 ) -> (Vec<FaceMatch>, Vec<FaceMatch>) {
-    let mut verified = Vec::new();
-    let mut mismatched = Vec::new();
     let tol2 = tol * tol;
+    let mut aligned = Vec::new();
+    let mut rejected = Vec::new();
 
     let pb = ProgressBar::new(face_matches.len() as u64);
     pb.set_style(
@@ -1128,70 +1136,326 @@ pub fn verify_connectivity(
         .unwrap()
         .progress_chars("=>-"),
     );
-    pb.set_message("Verify connectivity");
+    pb.set_message("Align orientations");
 
     for fm in face_matches {
         pb.inc(1);
         let b1 = &fm.block1;
         let b2 = &fm.block2;
 
+        // Raw (di, dj, dk) dimensions including the constant axis
+        let d1 = (
+            b1.il.abs_diff(b1.ih) + 1,
+            b1.jl.abs_diff(b1.jh) + 1,
+            b1.kl.abs_diff(b1.kh) + 1,
+        );
+        let d2 = (
+            b2.il.abs_diff(b2.ih) + 1,
+            b2.jl.abs_diff(b2.jh) + 1,
+            b2.kl.abs_diff(b2.kh) + 1,
+        );
+
+        if d1 != d2 {
+            // Cross-axis or swapped varying axes: can't verify with
+            // simple directed I→J→K traversal — trust the corner match.
+            aligned.push(fm.clone());
+            continue;
+        }
+
         if b1.block_index >= blocks.len() || b2.block_index >= blocks.len() {
-            mismatched.push(fm.clone());
+            rejected.push(fm.clone());
             continue;
         }
 
-        let mut pts1 = extract_face_points(&blocks[b1.block_index], b1);
-        let mut pts2 = extract_face_points(&blocks[b2.block_index], b2);
+        let block1 = &blocks[b1.block_index];
+        let block2 = &blocks[b2.block_index];
 
-        if pts1.len() != pts2.len() {
-            mismatched.push(fm.clone());
+        // Extract face1 points in directed traversal order
+        let pts1 = extract_face_points(block1, b1);
+
+        // Check current orientation first
+        let pts2 = extract_face_points(block2, b2);
+        if pts1.len() == pts2.len()
+            && pts1.iter().zip(pts2.iter()).all(|(a, b_pt)| {
+                (a.0 - b_pt.0).powi(2) + (a.1 - b_pt.1).powi(2) + (a.2 - b_pt.2).powi(2) < tol2
+            })
+        {
+            aligned.push(fm.clone());
             continue;
         }
 
-        sort_points(&mut pts1);
-        sort_points(&mut pts2);
+        // Try all 8 diagonal orientations of face2
+        let (i_lo, i_hi) = (b2.i_lo(), b2.i_hi());
+        let (j_lo, j_hi) = (b2.j_lo(), b2.j_hi());
+        let (k_lo, k_hi) = (b2.k_lo(), b2.k_hi());
 
-        let all_match = pts1.iter().zip(pts2.iter()).all(|(p1, p2)| {
-            let d2 = (p1.0 - p2.0).powi(2) + (p1.1 - p2.1).powi(2) + (p1.2 - p2.2).powi(2);
-            d2 < tol2
-        });
+        let diagonals = [
+            (i_lo, j_lo, k_lo, i_hi, j_hi, k_hi),
+            (i_hi, j_lo, k_lo, i_lo, j_hi, k_hi),
+            (i_lo, j_hi, k_lo, i_hi, j_lo, k_hi),
+            (i_lo, j_lo, k_hi, i_hi, j_hi, k_lo),
+            (i_hi, j_hi, k_lo, i_lo, j_lo, k_hi),
+            (i_hi, j_lo, k_hi, i_lo, j_hi, k_lo),
+            (i_lo, j_hi, k_hi, i_hi, j_lo, k_lo),
+            (i_hi, j_hi, k_hi, i_lo, j_lo, k_lo),
+        ];
 
-        if all_match {
-            verified.push(fm.clone());
-        } else {
-            mismatched.push(fm.clone());
+        let mut found = false;
+        for &(il, jl, kl, ih, jh, kh) in &diagonals {
+            let mut rec2 = b2.clone();
+            rec2.il = il;
+            rec2.jl = jl;
+            rec2.kl = kl;
+            rec2.ih = ih;
+            rec2.jh = jh;
+            rec2.kh = kh;
+            let try_pts = extract_face_points(block2, &rec2);
+            if pts1.len() == try_pts.len()
+                && pts1.iter().zip(try_pts.iter()).all(|(a, b_pt)| {
+                    (a.0 - b_pt.0).powi(2) + (a.1 - b_pt.1).powi(2) + (a.2 - b_pt.2).powi(2)
+                        < tol2
+                })
+            {
+                let mut fm_out = fm.clone();
+                fm_out.block2.il = il;
+                fm_out.block2.jl = jl;
+                fm_out.block2.kl = kl;
+                fm_out.block2.ih = ih;
+                fm_out.block2.jh = jh;
+                fm_out.block2.kh = kh;
+                aligned.push(fm_out);
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            eprintln!(
+                "  align: REJECTED block {}↔{} — no orientation matches directed traversal",
+                b1.block_index, b2.block_index
+            );
+            rejected.push(fm.clone());
         }
     }
 
-    pb.finish_with_message("Verify connectivity done");
-    (verified, mismatched)
+    pb.finish_with_message("Align orientations done");
+    (aligned, rejected)
 }
 
-/// Validate and standardize face-match records by ensuring block2's diagonal
-/// corners are ordered to match the closest spatial correspondence with block1.
+/// Derive correct lb/ub for both block1 and block2 from the full MatchPoint set.
+///
+/// Returns `(block1_rec, block2_rec, method)` where method is:
+///   0 = direct opposite corner, 1 = axis-end derivation, 2 = min/max fallback
+fn derive_diagonal_from_match_points(
+    fm: &FaceMatch,
+    gcd: usize,
+) -> Option<(FaceRecord, FaceRecord, u8)> {
+    let points = &fm.points;
+    if points.is_empty() {
+        return None;
+    }
+
+    // Step 1: Find min/max per axis on block1 side (reduced grid)
+    let i1_min = points.iter().map(|p| p.i1).min()?;
+    let i1_max = points.iter().map(|p| p.i1).max()?;
+    let j1_min = points.iter().map(|p| p.j1).min()?;
+    let j1_max = points.iter().map(|p| p.j1).max()?;
+    let k1_min = points.iter().map(|p| p.k1).min()?;
+    let k1_max = points.iter().map(|p| p.k1).max()?;
+
+    // Helper: build min/max fallback for both sides
+    let minmax_fallback = || -> Option<(FaceRecord, FaceRecord, u8)> {
+        let i2_min = points.iter().map(|p| p.i2).min()?;
+        let i2_max = points.iter().map(|p| p.i2).max()?;
+        let j2_min = points.iter().map(|p| p.j2).min()?;
+        let j2_max = points.iter().map(|p| p.j2).max()?;
+        let k2_min = points.iter().map(|p| p.k2).min()?;
+        let k2_max = points.iter().map(|p| p.k2).max()?;
+        let b1 = FaceRecord {
+            block_index: fm.block1.block_index,
+            il: i1_min * gcd, jl: j1_min * gcd, kl: k1_min * gcd,
+            ih: i1_max * gcd, jh: j1_max * gcd, kh: k1_max * gcd,
+            id: fm.block1.id,
+            u_physical: None, v_physical: None,
+        };
+        let b2 = FaceRecord {
+            block_index: fm.block2.block_index,
+            il: i2_min * gcd, jl: j2_min * gcd, kl: k2_min * gcd,
+            ih: i2_max * gcd, jh: j2_max * gcd, kh: k2_max * gcd,
+            id: fm.block2.id,
+            u_physical: None, v_physical: None,
+        };
+        Some((b1, b2, 2))
+    };
+
+    // Helper: compute face area (number of grid points) from a FaceRecord
+    let face_area = |r: &FaceRecord| -> usize {
+        let di = if r.il == r.ih { 1 } else { (r.ih as isize - r.il as isize).unsigned_abs() + 1 };
+        let dj = if r.jl == r.jh { 1 } else { (r.jh as isize - r.jl as isize).unsigned_abs() + 1 };
+        let dk = if r.kl == r.kh { 1 } else { (r.kh as isize - r.kl as isize).unsigned_abs() + 1 };
+        di * dj * dk
+    };
+
+    // Step 2: Find the origin — an actual corner MatchPoint on block1
+    let corners = [
+        (i1_min, j1_min, k1_min),
+        (i1_max, j1_min, k1_min),
+        (i1_min, j1_max, k1_min),
+        (i1_min, j1_min, k1_max),
+        (i1_max, j1_max, k1_min),
+        (i1_max, j1_min, k1_max),
+        (i1_min, j1_max, k1_max),
+        (i1_max, j1_max, k1_max),
+    ];
+
+    let mut origin_idx = None;
+    let mut origin_corner = (i1_min, j1_min, k1_min);
+    for &(ci, cj, ck) in &corners {
+        if let Some(idx) = points.iter().position(|p| p.i1 == ci && p.j1 == cj && p.k1 == ck) {
+            origin_idx = Some(idx);
+            origin_corner = (ci, cj, ck);
+            break;
+        }
+    }
+
+    if origin_idx.is_none() {
+        return minmax_fallback();
+    }
+
+    let origin = &points[origin_idx.unwrap()];
+    let (oi, oj, ok) = origin_corner;
+
+    // Step 3: Compute opposite corner on block1
+    let opp_i = if i1_min != i1_max { if oi == i1_min { i1_max } else { i1_min } } else { oi };
+    let opp_j = if j1_min != j1_max { if oj == j1_min { j1_max } else { j1_min } } else { oj };
+    let opp_k = if k1_min != k1_max { if ok == k1_min { k1_max } else { k1_min } } else { ok };
+
+    // Try direct approach: find opposite corner MatchPoint
+    if let Some(opp) = points.iter().find(|p| p.i1 == opp_i && p.j1 == opp_j && p.k1 == opp_k) {
+        let b1_out = FaceRecord {
+            block_index: fm.block1.block_index,
+            il: oi * gcd, jl: oj * gcd, kl: ok * gcd,
+            ih: opp_i * gcd, jh: opp_j * gcd, kh: opp_k * gcd,
+            id: fm.block1.id,
+            u_physical: None, v_physical: None,
+        };
+        let b2_out = FaceRecord {
+            block_index: fm.block2.block_index,
+            il: origin.i2 * gcd, jl: origin.j2 * gcd, kl: origin.k2 * gcd,
+            ih: opp.i2 * gcd, jh: opp.j2 * gcd, kh: opp.k2 * gcd,
+            id: fm.block2.id,
+            u_physical: None, v_physical: None,
+        };
+        // Area check — two real MatchPoints should always give consistent areas
+        if face_area(&b1_out) != face_area(&b2_out) {
+            return minmax_fallback();
+        }
+        return Some((b1_out, b2_out, 0));
+    }
+
+    // Step 4: Opposite corner is phantom — use axis-end delta derivation
+    let b1_i_varies = i1_min != i1_max;
+    let b1_j_varies = j1_min != j1_max;
+    let b1_k_varies = k1_min != k1_max;
+
+    let b2_il = origin.i2 as isize;
+    let b2_jl = origin.j2 as isize;
+    let b2_kl = origin.k2 as isize;
+
+    let mut b2_ih = b2_il;
+    let mut b2_jh = b2_jl;
+    let mut b2_kh = b2_kl;
+
+    if b1_i_varies {
+        let i_target = if oi == i1_min { i1_max } else { i1_min };
+        if let Some(i_end) = points.iter().find(|p| p.i1 == i_target && p.j1 == oj && p.k1 == ok) {
+            b2_ih += i_end.i2 as isize - origin.i2 as isize;
+            b2_jh += i_end.j2 as isize - origin.j2 as isize;
+            b2_kh += i_end.k2 as isize - origin.k2 as isize;
+        } else {
+            return minmax_fallback();
+        }
+    }
+
+    if b1_j_varies {
+        let j_target = if oj == j1_min { j1_max } else { j1_min };
+        if let Some(j_end) = points.iter().find(|p| p.i1 == oi && p.j1 == j_target && p.k1 == ok) {
+            b2_ih += j_end.i2 as isize - origin.i2 as isize;
+            b2_jh += j_end.j2 as isize - origin.j2 as isize;
+            b2_kh += j_end.k2 as isize - origin.k2 as isize;
+        } else {
+            return minmax_fallback();
+        }
+    }
+
+    if b1_k_varies {
+        let k_target = if ok == k1_min { k1_max } else { k1_min };
+        if let Some(k_end) = points.iter().find(|p| p.i1 == oi && p.j1 == oj && p.k1 == k_target) {
+            b2_ih += k_end.i2 as isize - origin.i2 as isize;
+            b2_jh += k_end.j2 as isize - origin.j2 as isize;
+            b2_kh += k_end.k2 as isize - origin.k2 as isize;
+        } else {
+            return minmax_fallback();
+        }
+    }
+
+    // Validate: if any block2 index went negative, the derivation is wrong
+    if b2_ih < 0 || b2_jh < 0 || b2_kh < 0 {
+        return minmax_fallback();
+    }
+
+    let b1_out = FaceRecord {
+        block_index: fm.block1.block_index,
+        il: oi * gcd, jl: oj * gcd, kl: ok * gcd,
+        ih: opp_i * gcd, jh: opp_j * gcd, kh: opp_k * gcd,
+        id: fm.block1.id,
+        u_physical: None, v_physical: None,
+    };
+    let b2_out = FaceRecord {
+        block_index: fm.block2.block_index,
+        il: origin.i2 * gcd, jl: origin.j2 * gcd, kl: origin.k2 * gcd,
+        ih: b2_ih as usize * gcd, jh: b2_jh as usize * gcd, kh: b2_kh as usize * gcd,
+        id: fm.block2.id,
+        u_physical: None, v_physical: None,
+    };
+
+    // Final area check
+    if face_area(&b1_out) != face_area(&b2_out) {
+        return minmax_fallback();
+    }
+
+    Some((b1_out, b2_out, 1))
+}
+
+/// Validate and standardize face-match records using the full MatchPoint set
+/// to derive correct diagonal corners with proper axis mapping.
 ///
 /// This is the Rust equivalent of Python's `face_matches_to_dict`.
 ///
-/// For matches that carry `MatchPoint` data (Phase 2/3), the actual node-to-node
-/// correspondence is used to determine the correct corner mapping. This avoids
-/// the pitfall where `from_match_points` computes min/max per axis independently,
-/// creating synthetic bounding-box corners that may not be actual matched nodes.
+/// For matches that carry `MatchPoint` data, uses the "origin + axis-end"
+/// derivation to correctly handle cross-axis matches and direction reversals.
 ///
-/// For matches without `MatchPoint` data (self-matches) or Phase 1 matches with
-/// orientation, a spatial proximity search over block2's face corners is used.
+/// For matches without `MatchPoint` data (self-matches), a spatial proximity
+/// search over block2's face corners is used as a fallback.
 ///
 /// # Arguments
 /// * `blocks` - Block array providing geometry.
 /// * `face_matches` - Matches to validate.
 ///
 /// # Returns
-/// Validated face matches with corrected block2 diagonal indices.
+/// Validated face matches with corrected diagonal indices.
 pub fn face_matches_to_dict(blocks: &[Block], face_matches: &[FaceMatch]) -> Vec<FaceMatch> {
     // GCD factor: MatchPoint indices are on the reduced grid while FaceRecord
     // indices have already been scaled up by this factor.
     let gcd = crate::utils::compute_min_gcd(blocks);
 
-    face_matches
+    let mut direct_count = 0usize;   // opposite corner found
+    let mut axisend_count = 0usize;  // axis-end derivation
+    let mut minmax_count = 0usize;   // min/max fallback
+    let mut empty_count = 0usize;    // no MatchPoints at all
+    let mut spatial_count = 0usize;
+
+    let result: Vec<FaceMatch> = face_matches
         .iter()
         .filter_map(|fm| {
             let b1 = &fm.block1;
@@ -1202,61 +1466,21 @@ pub fn face_matches_to_dict(blocks: &[Block], face_matches: &[FaceMatch]) -> Vec
 
             let mut result = fm.clone();
 
-            // Phase 2/3 matches (no orientation) with MatchPoint data:
-            // Use actual node-to-node correspondence to find diagonal corners.
-            // `from_match_points` computes independent min/max per axis, which
-            // may create synthetic bounding-box corners that are not actual
-            // matched nodes. Using MatchPoints avoids this.
-            if fm.orientation.is_none() && !fm.points.is_empty() {
-                // Find the MatchPoint whose block1 position (on the full grid)
-                // is closest to block1's current lower corner.
-                let (x1_l, y1_l, z1_l) = block1.xyz(b1.il, b1.jl, b1.kl);
-                let lower_pt = fm
-                    .points
-                    .iter()
-                    .min_by(|a, b| {
-                        let (xa, ya, za) = block1.xyz(a.i1 * gcd, a.j1 * gcd, a.k1 * gcd);
-                        let da =
-                            (xa - x1_l).powi(2) + (ya - y1_l).powi(2) + (za - z1_l).powi(2);
-                        let (xb, yb, zb) = block1.xyz(b.i1 * gcd, b.j1 * gcd, b.k1 * gcd);
-                        let db =
-                            (xb - x1_l).powi(2) + (yb - y1_l).powi(2) + (zb - z1_l).powi(2);
-                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .unwrap();
-
-                // Same for upper corner.
-                let (x1_u, y1_u, z1_u) = block1.xyz(b1.ih, b1.jh, b1.kh);
-                let upper_pt = fm
-                    .points
-                    .iter()
-                    .min_by(|a, b| {
-                        let (xa, ya, za) = block1.xyz(a.i1 * gcd, a.j1 * gcd, a.k1 * gcd);
-                        let da =
-                            (xa - x1_u).powi(2) + (ya - y1_u).powi(2) + (za - z1_u).powi(2);
-                        let (xb, yb, zb) = block1.xyz(b.i1 * gcd, b.j1 * gcd, b.k1 * gcd);
-                        let db =
-                            (xb - x1_u).powi(2) + (yb - y1_u).powi(2) + (zb - z1_u).powi(2);
-                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .unwrap();
-
-                // Use actual MatchPoint indices (scaled to full grid).
-                result.block1.il = lower_pt.i1 * gcd;
-                result.block1.jl = lower_pt.j1 * gcd;
-                result.block1.kl = lower_pt.k1 * gcd;
-                result.block1.ih = upper_pt.i1 * gcd;
-                result.block1.jh = upper_pt.j1 * gcd;
-                result.block1.kh = upper_pt.k1 * gcd;
-
-                result.block2.il = lower_pt.i2 * gcd;
-                result.block2.jl = lower_pt.j2 * gcd;
-                result.block2.kl = lower_pt.k2 * gcd;
-                result.block2.ih = upper_pt.i2 * gcd;
-                result.block2.jh = upper_pt.j2 * gcd;
-                result.block2.kh = upper_pt.k2 * gcd;
+            if !fm.points.is_empty() {
+                // Has MatchPoint data — use diagonal derivation
+                if let Some((b1_new, b2_new, method)) = derive_diagonal_from_match_points(fm, gcd) {
+                    result.block1 = b1_new;
+                    result.block2 = b2_new;
+                    match method {
+                        0 => direct_count += 1,
+                        1 => axisend_count += 1,
+                        _ => minmax_count += 1,
+                    }
+                } else {
+                    empty_count += 1;
+                }
             } else {
-                // Phase 1 (has orientation) or no MatchPoints: spatial search
+                // No MatchPoints (self-matches): spatial search
                 // over block2's bounding-box corners.
                 let (x1_l, y1_l, z1_l) = block1.xyz(b1.il, b1.jl, b1.kl);
 
@@ -1303,9 +1527,17 @@ pub fn face_matches_to_dict(blocks: &[Block], face_matches: &[FaceMatch]) -> Vec
                 result.block2.ih = best_upper.1;
                 result.block2.jh = best_upper.2;
                 result.block2.kh = best_upper.3;
+
+                spatial_count += 1;
             }
 
             Some(result)
         })
-        .collect()
+        .collect();
+
+    eprintln!(
+        "  face_matches_to_dict: {} direct, {} axis-end, {} minmax, {} empty, {} spatial",
+        direct_count, axisend_count, minmax_count, empty_count, spatial_count
+    );
+    result
 }

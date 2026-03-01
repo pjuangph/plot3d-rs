@@ -403,6 +403,8 @@ pub struct FaceMatch {
 
 impl FaceMatch {
     /// Downscale both participating face records by `divisor`.
+    /// Note: MatchPoints are NOT scaled — they may be from full-resolution
+    /// Phase 2/3 matching and should only be used with full-resolution blocks.
     pub fn divide_indices(&mut self, divisor: usize) {
         self.block1.divide_indices(divisor);
         self.block2.divide_indices(divisor);

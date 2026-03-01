@@ -50,6 +50,7 @@ pub mod rotational_periodicity;
 pub mod split_block;
 pub mod translational_periodicity;
 pub mod utils;
+pub mod verification;
 pub mod write;
 
 pub use block::{Block, FaceData};
@@ -63,8 +64,8 @@ pub use block_face_functions::{
     reduce_blocks, rotate_block, Face,
 };
 pub use connectivity::{
-    connectivity, connectivity_fast, face_matches_to_dict, get_face_intersection,
-    verify_connectivity,
+    align_face_orientations, connectivity, connectivity_fast, face_matches_to_dict,
+    get_face_intersection,
 };
 pub use cylindrical::{find_angular_bounding_faces, to_radius, to_theta};
 pub use differencing::{find_edges, find_face_edges, BlockDiff, FaceDiff};
@@ -81,9 +82,13 @@ pub use read::{read_ap_nasa, read_plot3d_ascii, read_plot3d_binary, BinaryFormat
 pub use rotational_periodicity::{
     count_rotated_corners_on_face, create_rotation_matrix, faces_support_any,
     faces_support_direction, linear_real_transform, periodicity_check_with_points,
-    rotate_block_with_matrix, rotated_periodicity, rotational_periodicity, verify_periodicity,
+    rotate_block_with_matrix, rotated_periodicity, rotational_periodicity,
+};
+pub use verification::{
+    verify_connectivity, connectivity_bruteforce, verify_periodicity,
+    periodicity_bruteforce,
 };
 pub use split_block::{split_blocks, SplitDirection};
 pub use translational_periodicity::translational_periodicity;
-pub use utils::{apply_rotation, Endian};
+pub use utils::{apply_rotation, compute_min_gcd, Endian};
 pub use write::write_plot3d;
