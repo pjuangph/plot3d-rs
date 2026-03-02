@@ -253,89 +253,51 @@ pub fn translational_periodicity(
     let lower_faces = outer_face_records_to_list(&blocks_reduced, &lower_faces_records, 1);
     let upper_faces = outer_face_records_to_list(&blocks_reduced, &upper_faces_records, 1);
 
-    let delta_axis = match axis.as_str() {
-        "x" => {
-            let min_x = blocks_reduced
-                .iter()
-                .map(|b| {
-                    b.x_slice()
-                        .iter()
-                        .cloned()
-                        .fold(Float::INFINITY, Float::min)
-                })
-                .fold(Float::INFINITY, Float::min);
-            let max_x = blocks_reduced
-                .iter()
-                .map(|b| {
-                    b.x_slice()
-                        .iter()
-                        .cloned()
-                        .fold(Float::NEG_INFINITY, Float::max)
-                })
-                .fold(Float::NEG_INFINITY, Float::max);
-            delta.unwrap_or(max_x - min_x)
-        }
-        "y" => {
-            let min_y = blocks_reduced
-                .iter()
-                .map(|b| {
-                    b.y_slice()
-                        .iter()
-                        .cloned()
-                        .fold(Float::INFINITY, Float::min)
-                })
-                .fold(Float::INFINITY, Float::min);
-            let max_y = blocks_reduced
-                .iter()
-                .map(|b| {
-                    b.y_slice()
-                        .iter()
-                        .cloned()
-                        .fold(Float::NEG_INFINITY, Float::max)
-                })
-                .fold(Float::NEG_INFINITY, Float::max);
-            delta.unwrap_or(max_y - min_y)
-        }
-        _ => {
-            let min_z = blocks_reduced
-                .iter()
-                .map(|b| {
-                    b.z_slice()
-                        .iter()
-                        .cloned()
-                        .fold(Float::INFINITY, Float::min)
-                })
-                .fold(Float::INFINITY, Float::min);
-            let max_z = blocks_reduced
-                .iter()
-                .map(|b| {
-                    b.z_slice()
-                        .iter()
-                        .cloned()
-                        .fold(Float::NEG_INFINITY, Float::max)
-                })
-                .fold(Float::NEG_INFINITY, Float::max);
-            delta.unwrap_or(max_z - min_z)
-        }
-    };
+    let delta_axis = delta.unwrap_or_else(|| {
+        let global_min = blocks_reduced
+            .iter()
+            .map(|b| {
+                b.axis_slice(axis_idx)
+                    .iter()
+                    .cloned()
+                    .fold(Float::INFINITY, Float::min)
+            })
+            .fold(Float::INFINITY, Float::min);
+        let global_max = blocks_reduced
+            .iter()
+            .map(|b| {
+                b.axis_slice(axis_idx)
+                    .iter()
+                    .cloned()
+                    .fold(Float::NEG_INFINITY, Float::max)
+            })
+            .fold(Float::NEG_INFINITY, Float::max);
+        global_max - global_min
+    });
 
+    let axis_char = axis.chars().next().unwrap();
     let blocks_up: Vec<Block> = blocks_reduced
         .iter()
-        .map(|b| b.shifted(delta_axis, axis.chars().next().unwrap()))
+        .map(|b| b.shifted(delta_axis, axis_char))
         .collect();
     let blocks_dn: Vec<Block> = blocks_reduced
         .iter()
-        .map(|b| b.shifted(-delta_axis, axis.chars().next().unwrap()))
+        .map(|b| b.shifted(-delta_axis, axis_char))
         .collect();
 
     let mut periodic_matches = Vec::new();
+    // Track original (pre-KDTree-correction) block2 FaceRecords so we can
+    // remove the correct outer faces later. The corrected lb2/ub2 may differ
+    // from the original outer face keys.
+    let mut original_block2_recs: Vec<FaceRecord> = Vec::new();
 
     let lower_pool = dedup_faces(lower_faces);
     let upper_pool = dedup_faces(upper_faces);
 
     // ── Phase 1: Fast full-face matching via 4-corner comparison ──
     let corner_tol = node_tol_xyz.unwrap_or(1e-6);
-    let axis_char = axis.chars().next().unwrap();
+    let shift_up = |mut p: [Float; 3]| -> [Float; 3] { p[axis_idx] += delta_axis; p };
+    let shift_dn = |mut p: [Float; 3]| -> [Float; 3] { p[axis_idx] -= delta_axis; p };
     let mut consumed_lower = HashSet::<FaceKey>::new();
     let mut consumed_upper = HashSet::<FaceKey>::new();
 
@@ -354,43 +316,20 @@ pub fn translational_periodicity(
         if consumed_lower.contains(&face_l.index_key()) {
             continue;
         }
-        // Build forward translation transform: shift face_l by +delta along axis
         let matched = upper_pool.iter().find_map(|face_u| {
             if consumed_upper.contains(&face_u.index_key()) {
                 return None;
             }
             // Try lower shifted up vs upper original
-            let orient = full_face_match_transformed(
-                face_l,
-                face_u,
-                |mut p| {
-                    match axis_char {
-                        'x' => p[0] += delta_axis,
-                        'y' => p[1] += delta_axis,
-                        _ => p[2] += delta_axis,
-                    }
-                    p
-                },
-                corner_tol,
-            );
-            if let Some(orient) = orient {
+            if let Some(orient) = full_face_match_transformed(
+                face_l, face_u, shift_up, corner_tol,
+            ) {
                 return Some((face_u.clone(), orient));
             }
-            // Try lower original vs upper shifted down
-            let orient = full_face_match_transformed(
-                face_u,
-                face_l,
-                |mut p| {
-                    match axis_char {
-                        'x' => p[0] -= delta_axis,
-                        'y' => p[1] -= delta_axis,
-                        _ => p[2] -= delta_axis,
-                    }
-                    p
-                },
-                corner_tol,
-            );
-            if let Some(orient) = orient {
+            // Try upper shifted down vs lower original
+            if let Some(orient) = full_face_match_transformed(
+                face_u, face_l, shift_dn, corner_tol,
+            ) {
                 return Some((face_u.clone(), orient));
             }
             None
@@ -401,6 +340,9 @@ pub fn translational_periodicity(
 
             let rec1 = FaceRecord::from_face(face_l);
             let mut rec2 = FaceRecord::from_face(&face_u);
+            // Save original block2 record before KDTree correction
+            original_block2_recs.push(rec2.clone());
+
             let lb1 = [rec1.il, rec1.jl, rec1.kl];
             let ub1 = [rec1.ih, rec1.jh, rec1.kh];
             let lb2_orig = [rec2.il, rec2.jl, rec2.kl];
@@ -523,6 +465,9 @@ pub fn translational_periodicity(
             let face_u = upper_pool_2.remove(idx);
             let rec1 = FaceRecord::from_face(face_l);
             let mut rec2 = FaceRecord::from_face(&face_u.face);
+            // Save original block2 record before KDTree correction
+            original_block2_recs.push(rec2.clone());
+
             let lb1 = [rec1.il, rec1.jl, rec1.kl];
             let ub1 = [rec1.ih, rec1.jh, rec1.kh];
             let lb2_orig = [rec2.il, rec2.jl, rec2.kl];
@@ -571,10 +516,21 @@ pub fn translational_periodicity(
         }
     }
 
+    // Also scale original (pre-correction) block2 records back to original resolution
+    if gcd_to_use > 1 {
+        for rec in &mut original_block2_recs {
+            rec.scale_indices(gcd_to_use);
+        }
+    }
+
     let mut periodic_keys = HashSet::new();
     for rec in &periodic_matches {
         periodic_keys.insert(rec.block1.index_key());
-        periodic_keys.insert(rec.block2.index_key());
+        periodic_keys.insert(rec.block2.index_key()); // corrected block2 keys
+    }
+    // Add original (pre-correction) block2 keys — these match the outer_faces entries
+    for rec in &original_block2_recs {
+        periodic_keys.insert(rec.index_key());
     }
 
     // outer_faces are already at original resolution — do NOT scale remaining.

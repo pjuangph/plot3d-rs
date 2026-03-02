@@ -93,6 +93,16 @@ impl Block {
         &self.z
     }
 
+    /// Coordinate slice by axis index: 0=x, 1=y, 2=z.
+    #[inline]
+    pub fn axis_slice(&self, axis_idx: usize) -> &[Float] {
+        match axis_idx {
+            0 => &self.x,
+            1 => &self.y,
+            _ => &self.z,
+        }
+    }
+
     #[inline]
     pub fn centroid(&self) -> (Float, Float, Float) {
         let n = self.npoints() as Float;
