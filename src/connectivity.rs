@@ -677,19 +677,16 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
     use rayon::prelude::*;
 
     // Parallelize outer face extraction per block.
-    // Include degenerate faces (where opposite sides coincide) so that
-    // thin blocks can still participate in inter-block matching.
+    // Extract outer faces for each block. Degenerate face pairs (where
+    // opposite sides coincide) are NOT added to the inter-block pool —
+    // they are handled as self-matches later in this function (lines 856+).
+    // This matches the Python behavior where get_outer_faces returns
+    // (non_matching, matching) and only non_matching enters the pool.
     let mut block_outer_faces: Vec<Vec<Face>> = blocks
         .par_iter()
         .enumerate()
         .map(|(idx, block)| {
-            let (mut faces, degenerate_pairs) = get_outer_faces(block);
-            // Re-add degenerate faces to the pool — they still need to match
-            // with adjacent blocks even though they coincide on this block.
-            for (face_a, face_b) in degenerate_pairs {
-                faces.push(face_a);
-                faces.push(face_b);
-            }
+            let (faces, _degenerate_pairs) = get_outer_faces(block);
             faces
                 .into_iter()
                 .map(|mut f| {
@@ -1244,18 +1241,27 @@ pub fn align_face_orientations(
 
 /// Derive correct lb/ub for both block1 and block2 from the full MatchPoint set.
 ///
-/// Returns `(block1_rec, block2_rec, method)` where method is:
-///   0 = direct opposite corner, 1 = axis-end derivation, 2 = min/max fallback
+/// This mirrors Python's `face_matches_to_dict` algorithm:
+/// - block1 lb/ub are always min-to-max indices from the MatchPoints
+/// - block2 lb is whichever of block2's face corners is closest in XYZ to block1's lb
+/// - block2 ub is whichever of block2's face corners is closest in XYZ to block1's ub
+///
+/// The spatial proximity approach correctly handles cross-axis matches
+/// (e.g., face1 is I-const, face2 is K-const) and direction reversals.
 fn derive_diagonal_from_match_points(
     fm: &FaceMatch,
     gcd: usize,
-) -> Option<(FaceRecord, FaceRecord, u8)> {
+    blocks: &[Block],
+) -> Option<(FaceRecord, FaceRecord)> {
     let points = &fm.points;
     if points.is_empty() {
         return None;
     }
 
-    // Step 1: Find min/max per axis on block1 side (reduced grid)
+    let block1 = blocks.get(fm.block1.block_index)?;
+    let block2 = blocks.get(fm.block2.block_index)?;
+
+    // Block1: always min-to-max (matching Python convention)
     let i1_min = points.iter().map(|p| p.i1).min()?;
     let i1_max = points.iter().map(|p| p.i1).max()?;
     let j1_min = points.iter().map(|p| p.j1).min()?;
@@ -1263,168 +1269,87 @@ fn derive_diagonal_from_match_points(
     let k1_min = points.iter().map(|p| p.k1).min()?;
     let k1_max = points.iter().map(|p| p.k1).max()?;
 
-    // Helper: build min/max fallback for both sides
-    let minmax_fallback = || -> Option<(FaceRecord, FaceRecord, u8)> {
-        let i2_min = points.iter().map(|p| p.i2).min()?;
-        let i2_max = points.iter().map(|p| p.i2).max()?;
-        let j2_min = points.iter().map(|p| p.j2).min()?;
-        let j2_max = points.iter().map(|p| p.j2).max()?;
-        let k2_min = points.iter().map(|p| p.k2).min()?;
-        let k2_max = points.iter().map(|p| p.k2).max()?;
-        let b1 = FaceRecord {
-            block_index: fm.block1.block_index,
-            il: i1_min * gcd, jl: j1_min * gcd, kl: k1_min * gcd,
-            ih: i1_max * gcd, jh: j1_max * gcd, kh: k1_max * gcd,
-            id: fm.block1.id,
-            u_physical: None, v_physical: None,
-        };
-        let b2 = FaceRecord {
-            block_index: fm.block2.block_index,
-            il: i2_min * gcd, jl: j2_min * gcd, kl: k2_min * gcd,
-            ih: i2_max * gcd, jh: j2_max * gcd, kh: k2_max * gcd,
-            id: fm.block2.id,
-            u_physical: None, v_physical: None,
-        };
-        Some((b1, b2, 2))
-    };
+    // Block2: compute candidate corner indices from MatchPoints
+    let i2_min = points.iter().map(|p| p.i2).min()?;
+    let i2_max = points.iter().map(|p| p.i2).max()?;
+    let j2_min = points.iter().map(|p| p.j2).min()?;
+    let j2_max = points.iter().map(|p| p.j2).max()?;
+    let k2_min = points.iter().map(|p| p.k2).min()?;
+    let k2_max = points.iter().map(|p| p.k2).max()?;
 
-    // Helper: compute face area (number of grid points) from a FaceRecord
-    let face_area = |r: &FaceRecord| -> usize {
-        let di = if r.il == r.ih { 1 } else { (r.ih as isize - r.il as isize).unsigned_abs() + 1 };
-        let dj = if r.jl == r.jh { 1 } else { (r.jh as isize - r.jl as isize).unsigned_abs() + 1 };
-        let dk = if r.kl == r.kh { 1 } else { (r.kh as isize - r.kl as isize).unsigned_abs() + 1 };
-        di * dj * dk
-    };
+    // Get block1's lower corner XYZ (MatchPoint indices are on the reduced grid;
+    // multiply by gcd to get full-resolution indices for block.xyz())
+    let (x1_l, y1_l, z1_l) = block1.xyz(i1_min * gcd, j1_min * gcd, k1_min * gcd);
 
-    // Step 2: Find the origin — an actual corner MatchPoint on block1
-    let corners = [
-        (i1_min, j1_min, k1_min),
-        (i1_max, j1_min, k1_min),
-        (i1_min, j1_max, k1_min),
-        (i1_min, j1_min, k1_max),
-        (i1_max, j1_max, k1_min),
-        (i1_max, j1_min, k1_max),
-        (i1_min, j1_max, k1_max),
-        (i1_max, j1_max, k1_max),
-    ];
+    // Search ALL corners of block2's face for closest to block1's lower corner.
+    // This is the product of [i2_min, i2_max] x [j2_min, j2_max] x [k2_min, k2_max]
+    // (up to 8 corners, but for a face with one constant axis only 4 are unique).
+    let i2_vals = [i2_min, i2_max];
+    let j2_vals = [j2_min, j2_max];
+    let k2_vals = [k2_min, k2_max];
 
-    let mut origin_idx = None;
-    let mut origin_corner = (i1_min, j1_min, k1_min);
-    for &(ci, cj, ck) in &corners {
-        if let Some(idx) = points.iter().position(|p| p.i1 == ci && p.j1 == cj && p.k1 == ck) {
-            origin_idx = Some(idx);
-            origin_corner = (ci, cj, ck);
-            break;
+    let mut best_lb = (Float::MAX, i2_min, j2_min, k2_min);
+    for &i in &i2_vals {
+        for &j in &j2_vals {
+            for &k in &k2_vals {
+                let (x2, y2, z2) = block2.xyz(i * gcd, j * gcd, k * gcd);
+                let dx = x2 - x1_l;
+                let dy = y2 - y1_l;
+                let dz = z2 - z1_l;
+                let d = (dx * dx + dy * dy + dz * dz).sqrt();
+                if d < best_lb.0 {
+                    best_lb = (d, i, j, k);
+                }
+            }
         }
     }
 
-    if origin_idx.is_none() {
-        return minmax_fallback();
-    }
+    // Get block1's upper corner XYZ
+    let (x1_u, y1_u, z1_u) = block1.xyz(i1_max * gcd, j1_max * gcd, k1_max * gcd);
 
-    let origin = &points[origin_idx.unwrap()];
-    let (oi, oj, ok) = origin_corner;
-
-    // Step 3: Compute opposite corner on block1
-    let opp_i = if i1_min != i1_max { if oi == i1_min { i1_max } else { i1_min } } else { oi };
-    let opp_j = if j1_min != j1_max { if oj == j1_min { j1_max } else { j1_min } } else { oj };
-    let opp_k = if k1_min != k1_max { if ok == k1_min { k1_max } else { k1_min } } else { ok };
-
-    // Try direct approach: find opposite corner MatchPoint
-    if let Some(opp) = points.iter().find(|p| p.i1 == opp_i && p.j1 == opp_j && p.k1 == opp_k) {
-        let b1_out = FaceRecord {
-            block_index: fm.block1.block_index,
-            il: oi * gcd, jl: oj * gcd, kl: ok * gcd,
-            ih: opp_i * gcd, jh: opp_j * gcd, kh: opp_k * gcd,
-            id: fm.block1.id,
-            u_physical: None, v_physical: None,
-        };
-        let b2_out = FaceRecord {
-            block_index: fm.block2.block_index,
-            il: origin.i2 * gcd, jl: origin.j2 * gcd, kl: origin.k2 * gcd,
-            ih: opp.i2 * gcd, jh: opp.j2 * gcd, kh: opp.k2 * gcd,
-            id: fm.block2.id,
-            u_physical: None, v_physical: None,
-        };
-        // Area check — two real MatchPoints should always give consistent areas
-        if face_area(&b1_out) != face_area(&b2_out) {
-            return minmax_fallback();
-        }
-        return Some((b1_out, b2_out, 0));
-    }
-
-    // Step 4: Opposite corner is phantom — use axis-end delta derivation
-    let b1_i_varies = i1_min != i1_max;
-    let b1_j_varies = j1_min != j1_max;
-    let b1_k_varies = k1_min != k1_max;
-
-    let b2_il = origin.i2 as isize;
-    let b2_jl = origin.j2 as isize;
-    let b2_kl = origin.k2 as isize;
-
-    let mut b2_ih = b2_il;
-    let mut b2_jh = b2_jl;
-    let mut b2_kh = b2_kl;
-
-    if b1_i_varies {
-        let i_target = if oi == i1_min { i1_max } else { i1_min };
-        if let Some(i_end) = points.iter().find(|p| p.i1 == i_target && p.j1 == oj && p.k1 == ok) {
-            b2_ih += i_end.i2 as isize - origin.i2 as isize;
-            b2_jh += i_end.j2 as isize - origin.j2 as isize;
-            b2_kh += i_end.k2 as isize - origin.k2 as isize;
-        } else {
-            return minmax_fallback();
+    // Search ALL corners of block2's face for closest to block1's upper corner
+    let mut best_ub = (Float::MAX, i2_max, j2_max, k2_max);
+    for &i in &i2_vals {
+        for &j in &j2_vals {
+            for &k in &k2_vals {
+                let (x2, y2, z2) = block2.xyz(i * gcd, j * gcd, k * gcd);
+                let dx = x2 - x1_u;
+                let dy = y2 - y1_u;
+                let dz = z2 - z1_u;
+                let d = (dx * dx + dy * dy + dz * dz).sqrt();
+                if d < best_ub.0 {
+                    best_ub = (d, i, j, k);
+                }
+            }
         }
     }
 
-    if b1_j_varies {
-        let j_target = if oj == j1_min { j1_max } else { j1_min };
-        if let Some(j_end) = points.iter().find(|p| p.i1 == oi && p.j1 == j_target && p.k1 == ok) {
-            b2_ih += j_end.i2 as isize - origin.i2 as isize;
-            b2_jh += j_end.j2 as isize - origin.j2 as isize;
-            b2_kh += j_end.k2 as isize - origin.k2 as isize;
-        } else {
-            return minmax_fallback();
-        }
-    }
-
-    if b1_k_varies {
-        let k_target = if ok == k1_min { k1_max } else { k1_min };
-        if let Some(k_end) = points.iter().find(|p| p.i1 == oi && p.j1 == oj && p.k1 == k_target) {
-            b2_ih += k_end.i2 as isize - origin.i2 as isize;
-            b2_jh += k_end.j2 as isize - origin.j2 as isize;
-            b2_kh += k_end.k2 as isize - origin.k2 as isize;
-        } else {
-            return minmax_fallback();
-        }
-    }
-
-    // Validate: if any block2 index went negative, the derivation is wrong
-    if b2_ih < 0 || b2_jh < 0 || b2_kh < 0 {
-        return minmax_fallback();
-    }
-
-    let b1_out = FaceRecord {
+    let b1 = FaceRecord {
         block_index: fm.block1.block_index,
-        il: oi * gcd, jl: oj * gcd, kl: ok * gcd,
-        ih: opp_i * gcd, jh: opp_j * gcd, kh: opp_k * gcd,
+        il: i1_min * gcd,
+        jl: j1_min * gcd,
+        kl: k1_min * gcd,
+        ih: i1_max * gcd,
+        jh: j1_max * gcd,
+        kh: k1_max * gcd,
         id: fm.block1.id,
-        u_physical: None, v_physical: None,
+        u_physical: None,
+        v_physical: None,
     };
-    let b2_out = FaceRecord {
+    let b2 = FaceRecord {
         block_index: fm.block2.block_index,
-        il: origin.i2 * gcd, jl: origin.j2 * gcd, kl: origin.k2 * gcd,
-        ih: b2_ih as usize * gcd, jh: b2_jh as usize * gcd, kh: b2_kh as usize * gcd,
+        il: best_lb.1 * gcd,
+        jl: best_lb.2 * gcd,
+        kl: best_lb.3 * gcd,
+        ih: best_ub.1 * gcd,
+        jh: best_ub.2 * gcd,
+        kh: best_ub.3 * gcd,
         id: fm.block2.id,
-        u_physical: None, v_physical: None,
+        u_physical: None,
+        v_physical: None,
     };
 
-    // Final area check
-    if face_area(&b1_out) != face_area(&b2_out) {
-        return minmax_fallback();
-    }
-
-    Some((b1_out, b2_out, 1))
+    Some((b1, b2))
 }
 
 /// Validate and standardize face-match records using the full MatchPoint set
@@ -1432,14 +1357,15 @@ fn derive_diagonal_from_match_points(
 ///
 /// This is the Rust equivalent of Python's `face_matches_to_dict`.
 ///
-/// For matches that carry `MatchPoint` data, uses the "origin + axis-end"
-/// derivation to correctly handle cross-axis matches and direction reversals.
+/// For matches that carry `MatchPoint` data, uses spatial proximity (XYZ
+/// distance) to find which of block2's face corners is closest to block1's
+/// lower and upper corners — exactly matching the Python algorithm.
 ///
 /// For matches without `MatchPoint` data (self-matches), a spatial proximity
 /// search over block2's face corners is used as a fallback.
 ///
 /// # Arguments
-/// * `blocks` - Block array providing geometry.
+/// * `blocks` - Block array providing geometry (full resolution).
 /// * `face_matches` - Matches to validate.
 ///
 /// # Returns
@@ -1449,10 +1375,8 @@ pub fn face_matches_to_dict(blocks: &[Block], face_matches: &[FaceMatch]) -> Vec
     // indices have already been scaled up by this factor.
     let gcd = crate::utils::compute_min_gcd(blocks);
 
-    let mut direct_count = 0usize;   // opposite corner found
-    let mut axisend_count = 0usize;  // axis-end derivation
-    let mut minmax_count = 0usize;   // min/max fallback
-    let mut empty_count = 0usize;    // no MatchPoints at all
+    let mut matched_count = 0usize;
+    let mut empty_count = 0usize;
     let mut spatial_count = 0usize;
 
     let result: Vec<FaceMatch> = face_matches
@@ -1467,15 +1391,13 @@ pub fn face_matches_to_dict(blocks: &[Block], face_matches: &[FaceMatch]) -> Vec
             let mut result = fm.clone();
 
             if !fm.points.is_empty() {
-                // Has MatchPoint data — use diagonal derivation
-                if let Some((b1_new, b2_new, method)) = derive_diagonal_from_match_points(fm, gcd) {
+                // Has MatchPoint data — use spatial proximity derivation
+                if let Some((b1_new, b2_new)) =
+                    derive_diagonal_from_match_points(fm, gcd, blocks)
+                {
                     result.block1 = b1_new;
                     result.block2 = b2_new;
-                    match method {
-                        0 => direct_count += 1,
-                        1 => axisend_count += 1,
-                        _ => minmax_count += 1,
-                    }
+                    matched_count += 1;
                 } else {
                     empty_count += 1;
                 }
@@ -1536,8 +1458,8 @@ pub fn face_matches_to_dict(blocks: &[Block], face_matches: &[FaceMatch]) -> Vec
         .collect();
 
     eprintln!(
-        "  face_matches_to_dict: {} direct, {} axis-end, {} minmax, {} empty, {} spatial",
-        direct_count, axisend_count, minmax_count, empty_count, spatial_count
+        "  face_matches_to_dict: {} matched, {} empty, {} spatial",
+        matched_count, empty_count, spatial_count
     );
     result
 }
