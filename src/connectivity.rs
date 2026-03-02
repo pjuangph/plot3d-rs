@@ -47,6 +47,7 @@ use crate::{
         create_face_from_diagonals, get_outer_faces, split_face, Face,
     },
     face_record::{FaceKey, FaceMatch, FaceRecord, MatchPoint, Orientation},
+    verification::{extract_face_points, try_all_permutations},
     Float,
 };
 
@@ -1058,55 +1059,12 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
     (matches, formatted)
 }
 
-/// Build an inclusive range from `start` to `end`, stepping +1 or −1.
-fn directed_range(start: usize, end: usize) -> Vec<usize> {
-    if start <= end {
-        (start..=end).collect()
-    } else {
-        (end..=start).rev().collect()
-    }
-}
-
-/// Extract face points in the traversal order defined by the [`FaceRecord`] diagonals.
-///
-/// The diagonal corners `(il,jl,kl)` → `(ih,jh,kh)` define a directed
-/// traversal.  Point *n* from face A must match point *n* from face B —
-/// no sorting is needed or desired.
-fn extract_face_points(block: &Block, rec: &FaceRecord) -> Vec<(Float, Float, Float)> {
-    let il = rec.il.min(block.imax.saturating_sub(1));
-    let ih = rec.ih.min(block.imax.saturating_sub(1));
-    let jl = rec.jl.min(block.jmax.saturating_sub(1));
-    let jh = rec.jh.min(block.jmax.saturating_sub(1));
-    let kl = rec.kl.min(block.kmax.saturating_sub(1));
-    let kh = rec.kh.min(block.kmax.saturating_sub(1));
-
-    let i_range = directed_range(il, ih);
-    let j_range = directed_range(jl, jh);
-    let k_range = directed_range(kl, kh);
-
-    let mut pts = Vec::with_capacity(i_range.len() * j_range.len() * k_range.len());
-    for &i in &i_range {
-        for &j in &j_range {
-            for &k in &k_range {
-                pts.push(block.xyz(i, j, k));
-            }
-        }
-    }
-    pts
-}
-
-
 /// Align face2's diagonal so directed I→J→K traversal matches face1 point-by-point.
 ///
-/// For same-axis, same-dimension matches, tries all 8 diagonal orientations
-/// of face2 (4 direction combinations × potential axis reversal) to find the
-/// one where every point in face1's lb→ub traversal matches face2's lb→ub
-/// traversal.
-///
-/// Matches with non-matching raw (di,dj,dk) dimensions (cross-axis or
-/// axis-swapped connections) are passed through trusting the corner
-/// verification, since the directed I→J→K traversal cannot handle them
-/// without axis permutation information.
+/// Uses the 8-permutation approach (4 direct + 4 transposed) to find the
+/// correct orientation of face2 that makes every point match face1's
+/// directed traversal. This handles cross-axis matches (e.g., face1 is
+/// I-const, face2 is K-const) through the transposed permutations.
 ///
 /// # Arguments
 /// * `blocks` - Block array providing geometry.
@@ -1140,25 +1098,6 @@ pub fn align_face_orientations(
         let b1 = &fm.block1;
         let b2 = &fm.block2;
 
-        // Raw (di, dj, dk) dimensions including the constant axis
-        let d1 = (
-            b1.il.abs_diff(b1.ih) + 1,
-            b1.jl.abs_diff(b1.jh) + 1,
-            b1.kl.abs_diff(b1.kh) + 1,
-        );
-        let d2 = (
-            b2.il.abs_diff(b2.ih) + 1,
-            b2.jl.abs_diff(b2.jh) + 1,
-            b2.kl.abs_diff(b2.kh) + 1,
-        );
-
-        if d1 != d2 {
-            // Cross-axis or swapped varying axes: can't verify with
-            // simple directed I→J→K traversal — trust the corner match.
-            aligned.push(fm.clone());
-            continue;
-        }
-
         if b1.block_index >= blocks.len() || b2.block_index >= blocks.len() {
             rejected.push(fm.clone());
             continue;
@@ -1181,52 +1120,17 @@ pub fn align_face_orientations(
             continue;
         }
 
-        // Try all 8 diagonal orientations of face2
-        let (i_lo, i_hi) = (b2.i_lo(), b2.i_hi());
-        let (j_lo, j_hi) = (b2.j_lo(), b2.j_hi());
-        let (k_lo, k_hi) = (b2.k_lo(), b2.k_hi());
-
-        let diagonals = [
-            (i_lo, j_lo, k_lo, i_hi, j_hi, k_hi),
-            (i_hi, j_lo, k_lo, i_lo, j_hi, k_hi),
-            (i_lo, j_hi, k_lo, i_hi, j_lo, k_hi),
-            (i_lo, j_lo, k_hi, i_hi, j_hi, k_lo),
-            (i_hi, j_hi, k_lo, i_lo, j_lo, k_hi),
-            (i_hi, j_lo, k_hi, i_lo, j_hi, k_lo),
-            (i_lo, j_hi, k_hi, i_hi, j_lo, k_lo),
-            (i_hi, j_hi, k_hi, i_lo, j_lo, k_lo),
-        ];
-
-        let mut found = false;
-        for &(il, jl, kl, ih, jh, kh) in &diagonals {
-            let mut rec2 = b2.clone();
-            rec2.il = il;
-            rec2.jl = jl;
-            rec2.kl = kl;
-            rec2.ih = ih;
-            rec2.jh = jh;
-            rec2.kh = kh;
-            let try_pts = extract_face_points(block2, &rec2);
-            if pts1.len() == try_pts.len()
-                && pts1.iter().zip(try_pts.iter()).all(|(a, b_pt)| {
-                    (a.0 - b_pt.0).powi(2) + (a.1 - b_pt.1).powi(2) + (a.2 - b_pt.2).powi(2)
-                        < tol2
-                })
-            {
-                let mut fm_out = fm.clone();
-                fm_out.block2.il = il;
-                fm_out.block2.jl = jl;
-                fm_out.block2.kl = kl;
-                fm_out.block2.ih = ih;
-                fm_out.block2.jh = jh;
-                fm_out.block2.kh = kh;
-                aligned.push(fm_out);
-                found = true;
-                break;
-            }
-        }
-
-        if !found {
+        // Try all 8 permutations (4 direct + 4 transposed)
+        if let Some(perm) = try_all_permutations(&pts1, block2, b2, tol) {
+            let mut fm_out = fm.clone();
+            fm_out.block2.il = perm.il;
+            fm_out.block2.jl = perm.jl;
+            fm_out.block2.kl = perm.kl;
+            fm_out.block2.ih = perm.ih;
+            fm_out.block2.jh = perm.jh;
+            fm_out.block2.kh = perm.kh;
+            aligned.push(fm_out);
+        } else {
             eprintln!(
                 "  align: REJECTED block {}↔{} — no orientation matches directed traversal",
                 b1.block_index, b2.block_index
@@ -1241,109 +1145,44 @@ pub fn align_face_orientations(
 
 /// Derive correct lb/ub for both block1 and block2 from the full MatchPoint set.
 ///
-/// This mirrors Python's `face_matches_to_dict` algorithm:
-/// - block1 lb/ub are always min-to-max indices from the MatchPoints
-/// - block2 lb is whichever of block2's face corners is closest in XYZ to block1's lb
-/// - block2 ub is whichever of block2's face corners is closest in XYZ to block1's ub
+/// Matches Python's iloc-style derivation (connectivity.py lines 747-750):
+/// - block1 lb = first MatchPoint's (i1,j1,k1), ub = last MatchPoint's (i1,j1,k1)
+/// - block2 lb = first MatchPoint's (i2,j2,k2), ub = last MatchPoint's (i2,j2,k2)
 ///
-/// The spatial proximity approach correctly handles cross-axis matches
-/// (e.g., face1 is I-const, face2 is K-const) and direction reversals.
+/// The traversal order of MatchPoints encodes the orientation relationship
+/// between the two faces, which is lost if we use min/max or spatial proximity.
 fn derive_diagonal_from_match_points(
     fm: &FaceMatch,
     gcd: usize,
-    blocks: &[Block],
 ) -> Option<(FaceRecord, FaceRecord)> {
     let points = &fm.points;
     if points.is_empty() {
         return None;
     }
 
-    let block1 = blocks.get(fm.block1.block_index)?;
-    let block2 = blocks.get(fm.block2.block_index)?;
-
-    // Block1: always min-to-max (matching Python convention)
-    let i1_min = points.iter().map(|p| p.i1).min()?;
-    let i1_max = points.iter().map(|p| p.i1).max()?;
-    let j1_min = points.iter().map(|p| p.j1).min()?;
-    let j1_max = points.iter().map(|p| p.j1).max()?;
-    let k1_min = points.iter().map(|p| p.k1).min()?;
-    let k1_max = points.iter().map(|p| p.k1).max()?;
-
-    // Block2: compute candidate corner indices from MatchPoints
-    let i2_min = points.iter().map(|p| p.i2).min()?;
-    let i2_max = points.iter().map(|p| p.i2).max()?;
-    let j2_min = points.iter().map(|p| p.j2).min()?;
-    let j2_max = points.iter().map(|p| p.j2).max()?;
-    let k2_min = points.iter().map(|p| p.k2).min()?;
-    let k2_max = points.iter().map(|p| p.k2).max()?;
-
-    // Get block1's lower corner XYZ (MatchPoint indices are on the reduced grid;
-    // multiply by gcd to get full-resolution indices for block.xyz())
-    let (x1_l, y1_l, z1_l) = block1.xyz(i1_min * gcd, j1_min * gcd, k1_min * gcd);
-
-    // Search ALL corners of block2's face for closest to block1's lower corner.
-    // This is the product of [i2_min, i2_max] x [j2_min, j2_max] x [k2_min, k2_max]
-    // (up to 8 corners, but for a face with one constant axis only 4 are unique).
-    let i2_vals = [i2_min, i2_max];
-    let j2_vals = [j2_min, j2_max];
-    let k2_vals = [k2_min, k2_max];
-
-    let mut best_lb = (Float::MAX, i2_min, j2_min, k2_min);
-    for &i in &i2_vals {
-        for &j in &j2_vals {
-            for &k in &k2_vals {
-                let (x2, y2, z2) = block2.xyz(i * gcd, j * gcd, k * gcd);
-                let dx = x2 - x1_l;
-                let dy = y2 - y1_l;
-                let dz = z2 - z1_l;
-                let d = (dx * dx + dy * dy + dz * dz).sqrt();
-                if d < best_lb.0 {
-                    best_lb = (d, i, j, k);
-                }
-            }
-        }
-    }
-
-    // Get block1's upper corner XYZ
-    let (x1_u, y1_u, z1_u) = block1.xyz(i1_max * gcd, j1_max * gcd, k1_max * gcd);
-
-    // Search ALL corners of block2's face for closest to block1's upper corner
-    let mut best_ub = (Float::MAX, i2_max, j2_max, k2_max);
-    for &i in &i2_vals {
-        for &j in &j2_vals {
-            for &k in &k2_vals {
-                let (x2, y2, z2) = block2.xyz(i * gcd, j * gcd, k * gcd);
-                let dx = x2 - x1_u;
-                let dy = y2 - y1_u;
-                let dz = z2 - z1_u;
-                let d = (dx * dx + dy * dy + dz * dz).sqrt();
-                if d < best_ub.0 {
-                    best_ub = (d, i, j, k);
-                }
-            }
-        }
-    }
+    let first = &points[0];
+    let last = &points[points.len() - 1];
 
     let b1 = FaceRecord {
         block_index: fm.block1.block_index,
-        il: i1_min * gcd,
-        jl: j1_min * gcd,
-        kl: k1_min * gcd,
-        ih: i1_max * gcd,
-        jh: j1_max * gcd,
-        kh: k1_max * gcd,
+        il: first.i1 * gcd,
+        jl: first.j1 * gcd,
+        kl: first.k1 * gcd,
+        ih: last.i1 * gcd,
+        jh: last.j1 * gcd,
+        kh: last.k1 * gcd,
         id: fm.block1.id,
         u_physical: None,
         v_physical: None,
     };
     let b2 = FaceRecord {
         block_index: fm.block2.block_index,
-        il: best_lb.1 * gcd,
-        jl: best_lb.2 * gcd,
-        kl: best_lb.3 * gcd,
-        ih: best_ub.1 * gcd,
-        jh: best_ub.2 * gcd,
-        kh: best_ub.3 * gcd,
+        il: first.i2 * gcd,
+        jl: first.j2 * gcd,
+        kl: first.k2 * gcd,
+        ih: last.i2 * gcd,
+        jh: last.j2 * gcd,
+        kh: last.k2 * gcd,
         id: fm.block2.id,
         u_physical: None,
         v_physical: None,
@@ -1393,7 +1232,7 @@ pub fn face_matches_to_dict(blocks: &[Block], face_matches: &[FaceMatch]) -> Vec
             if !fm.points.is_empty() {
                 // Has MatchPoint data — use spatial proximity derivation
                 if let Some((b1_new, b2_new)) =
-                    derive_diagonal_from_match_points(fm, gcd, blocks)
+                    derive_diagonal_from_match_points(fm, gcd)
                 {
                     result.block1 = b1_new;
                     result.block2 = b2_new;

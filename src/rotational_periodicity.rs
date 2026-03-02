@@ -726,9 +726,40 @@ fn try_split_match(
         let orientation =
             infer_orientation_from_match_points(&match_points, &pair_faces[0], &pair_faces[1]);
 
+        // Derive lb/ub from first/last MatchPoint (iloc-style), matching Python's
+        // _build_periodic_export which uses df.iloc[0] / df.iloc[-1].
+        let b1_rec = if !match_points.is_empty() {
+            let first = &match_points[0];
+            let last = &match_points[match_points.len() - 1];
+            FaceRecord {
+                block_index: pair_faces[0].block_index().unwrap_or(usize::MAX),
+                il: first.i1, jl: first.j1, kl: first.k1,
+                ih: last.i1, jh: last.j1, kh: last.k1,
+                id: pair_faces[0].id(),
+                u_physical: None,
+                v_physical: None,
+            }
+        } else {
+            FaceRecord::from_face(&pair_faces[0])
+        };
+        let b2_rec = if !match_points.is_empty() {
+            let first = &match_points[0];
+            let last = &match_points[match_points.len() - 1];
+            FaceRecord {
+                block_index: pair_faces[1].block_index().unwrap_or(usize::MAX),
+                il: first.i2, jl: first.j2, kl: first.k2,
+                ih: last.i2, jh: last.j2, kh: last.k2,
+                id: pair_faces[1].id(),
+                u_physical: None,
+                v_physical: None,
+            }
+        } else {
+            FaceRecord::from_face(&pair_faces[1])
+        };
+
         periodic_exports.push(FaceMatch {
-            block1: FaceRecord::from_face(&pair_faces[0]),
-            block2: FaceRecord::from_face(&pair_faces[1]),
+            block1: b1_rec,
+            block2: b2_rec,
             points: match_points,
             orientation,
         });

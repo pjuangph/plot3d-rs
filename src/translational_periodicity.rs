@@ -20,10 +20,196 @@ use crate::{
     block::Block,
     block_analysis::find_bounding_faces,
     block_face_functions::{full_face_match_transformed, outer_face_records_to_list, Face},
-    face_record::{FaceKey, FaceMatch, FaceRecord},
+    face_record::{FaceKey, FaceMatch, FaceRecord, Orientation},
     utils::compute_min_gcd,
     Float,
 };
+
+/// Compute corrected lb2/ub2 and orientation for a periodic face pair.
+///
+/// Mirrors Python's `_compute_periodic_lb_ub_orientation`:
+///   1. Shifts face1's lb/ub corners by `shift_amount` along `shift_axis`.
+///   2. Builds all face2 grid points within the face2 index range.
+///   3. Finds the nearest face2 point to each shifted face1 corner (brute-force).
+///   4. Computes the orientation vector by stepping along each face1 axis and
+///      querying which face2 axis changes.
+///
+/// Returns `(corrected_lb2, corrected_ub2, orientation)` where indices are
+/// `[i, j, k]` and orientation is Python's 1-indexed `[a, b, c]` vector.
+fn compute_periodic_lb_ub_orientation(
+    blk1: &Block,
+    lb1: [usize; 3],
+    ub1: [usize; 3],
+    blk2: &Block,
+    lb2_orig: [usize; 3],
+    ub2_orig: [usize; 3],
+    shift_axis: usize,
+    shift_amount: Float,
+) -> ([usize; 3], [usize; 3], [usize; 3]) {
+    // face1 lb and ub corners (shifted)
+    let (x1l, y1l, z1l) = blk1.xyz(lb1[0], lb1[1], lb1[2]);
+    let (x1u, y1u, z1u) = blk1.xyz(ub1[0], ub1[1], ub1[2]);
+    let mut p1_lb = [x1l, y1l, z1l];
+    let mut p1_ub = [x1u, y1u, z1u];
+    p1_lb[shift_axis] += shift_amount;
+    p1_ub[shift_axis] += shift_amount;
+
+    // face2 index range
+    let lo2 = [
+        lb2_orig[0].min(ub2_orig[0]),
+        lb2_orig[1].min(ub2_orig[1]),
+        lb2_orig[2].min(ub2_orig[2]),
+    ];
+    let hi2 = [
+        lb2_orig[0].max(ub2_orig[0]),
+        lb2_orig[1].max(ub2_orig[1]),
+        lb2_orig[2].max(ub2_orig[2]),
+    ];
+
+    // Build all face2 grid points
+    let mut indices2: Vec<[usize; 3]> = Vec::new();
+    let mut coords2: Vec<[Float; 3]> = Vec::new();
+    for i in lo2[0]..=hi2[0] {
+        for j in lo2[1]..=hi2[1] {
+            for k in lo2[2]..=hi2[2] {
+                indices2.push([i, j, k]);
+                let (x, y, z) = blk2.xyz(i, j, k);
+                coords2.push([x, y, z]);
+            }
+        }
+    }
+
+    // Nearest-neighbor search (brute-force, face grids are small at GCD resolution)
+    let nearest = |query: &[Float; 3]| -> usize {
+        let mut best_idx = 0;
+        let mut best_dist = Float::INFINITY;
+        for (i, c) in coords2.iter().enumerate() {
+            let d = (c[0] - query[0]).powi(2)
+                + (c[1] - query[1]).powi(2)
+                + (c[2] - query[2]).powi(2);
+            if d < best_dist {
+                best_dist = d;
+                best_idx = i;
+            }
+        }
+        best_idx
+    };
+
+    let corrected_lb2 = indices2[nearest(&p1_lb)];
+    let corrected_ub2 = indices2[nearest(&p1_ub)];
+
+    // Compute orientation: step along each face1 axis, find which face2 axis changes
+    let dims1 = [
+        (ub1[0] as isize - lb1[0] as isize).unsigned_abs() + 1,
+        (ub1[1] as isize - lb1[1] as isize).unsigned_abs() + 1,
+        (ub1[2] as isize - lb1[2] as isize).unsigned_abs() + 1,
+    ];
+    let step1: [isize; 3] = [
+        if ub1[0] >= lb1[0] { 1 } else { -1 },
+        if ub1[1] >= lb1[1] { 1 } else { -1 },
+        if ub1[2] >= lb1[2] { 1 } else { -1 },
+    ];
+    let cdims2 = [
+        (corrected_ub2[0] as isize - corrected_lb2[0] as isize).unsigned_abs() + 1,
+        (corrected_ub2[1] as isize - corrected_lb2[1] as isize).unsigned_abs() + 1,
+        (corrected_ub2[2] as isize - corrected_lb2[2] as isize).unsigned_abs() + 1,
+    ];
+
+    let mut orientation = [0usize; 3];
+    for d1 in 0..3 {
+        if dims1[d1] == 1 {
+            // Constant axis on face1 → find constant axis on face2
+            for d2 in 0..3 {
+                if cdims2[d2] == 1 {
+                    orientation[d1] = d2 + 1;
+                    break;
+                }
+            }
+        } else {
+            // Step one index along face1 axis d1
+            let mut next_idx1 = [lb1[0] as isize, lb1[1] as isize, lb1[2] as isize];
+            next_idx1[d1] += step1[d1];
+            let (nx, ny, nz) =
+                blk1.xyz(next_idx1[0] as usize, next_idx1[1] as usize, next_idx1[2] as usize);
+            let mut p1_next = [nx, ny, nz];
+            p1_next[shift_axis] += shift_amount;
+            let face2_next = indices2[nearest(&p1_next)];
+            // Find which face2 axis changed → that's the face2 axis for face1 axis d1
+            for d2 in 0..3 {
+                if face2_next[d2] != corrected_lb2[d2] && cdims2[d2] > 1 {
+                    orientation[d1] = d2 + 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Fill any missing entries (sanity fallback)
+    let used: HashSet<usize> = orientation.iter().copied().filter(|&v| v != 0).collect();
+    if used.len() < 3 {
+        let missing_d1: Vec<usize> = (0..3).filter(|&d| orientation[d] == 0).collect();
+        let missing_d2: Vec<usize> = (1..=3).filter(|d| !used.contains(d)).collect();
+        for (d1, d2) in missing_d1.iter().zip(missing_d2.iter()) {
+            orientation[*d1] = *d2;
+        }
+    }
+
+    (corrected_lb2, corrected_ub2, orientation)
+}
+
+/// Get the coordinate value along `axis_idx` (0=x, 1=y, 2=z) at a given IJK index.
+#[inline]
+fn block_axis_val(block: &Block, ijk: [usize; 3], axis_idx: usize) -> Float {
+    let (x, y, z) = block.xyz(ijk[0], ijk[1], ijk[2]);
+    match axis_idx {
+        0 => x,
+        1 => y,
+        _ => z,
+    }
+}
+
+/// Convert the Python-style orientation vector `[a, b, c]` (1-indexed face2 axis
+/// per face1 axis) into the Rust `Orientation` struct by examining the corrected
+/// lb2/ub2 step directions relative to face1's lb1/ub1.
+fn orientation_from_orient_vec(
+    orient_vec: &[usize; 3],
+    lb1: &[usize; 3],
+    ub1: &[usize; 3],
+    corrected_lb2: &[usize; 3],
+    corrected_ub2: &[usize; 3],
+) -> Orientation {
+    // Find the two varying axes on face1 (dims > 1)
+    let dims1: [usize; 3] = [
+        (ub1[0] as isize - lb1[0] as isize).unsigned_abs() + 1,
+        (ub1[1] as isize - lb1[1] as isize).unsigned_abs() + 1,
+        (ub1[2] as isize - lb1[2] as isize).unsigned_abs() + 1,
+    ];
+    let varying1: Vec<usize> = (0..3).filter(|&d| dims1[d] > 1).collect();
+    if varying1.len() != 2 {
+        return Orientation { u_reversed: false, v_reversed: false, swapped: false };
+    }
+
+    // Face1 varying axes are u (first) and v (second)
+    let u1 = varying1[0];
+    let v1 = varying1[1];
+    // Each maps to a face2 axis via orient_vec
+    let u2 = orient_vec[u1].wrapping_sub(1); // 0-indexed
+    let v2 = orient_vec[v1].wrapping_sub(1);
+
+    // Check if face2's u and v axes are swapped relative to face1's
+    let swapped = u2 != u1 || v2 != v1;
+
+    // Check reversal: face1 step direction vs face2 step direction
+    let step1 = |d: usize| -> isize { if ub1[d] >= lb1[d] { 1 } else { -1 } };
+    let step2 = |d: usize| -> isize {
+        if corrected_ub2[d] >= corrected_lb2[d] { 1 } else { -1 }
+    };
+
+    let u_reversed = step1(u1) != step2(u2);
+    let v_reversed = step1(v1) != step2(v2);
+
+    Orientation { u_reversed, v_reversed, swapped }
+}
 
 /// Detect translational periodicity along an axis.
 /// Discover translational periodicity along a chosen axis.
@@ -50,6 +236,11 @@ pub fn translational_periodicity(
 
     let axis = translational_direction.trim().to_ascii_lowercase();
     assert!(matches!(axis.as_str(), "x" | "y" | "z"));
+    let axis_idx: usize = match axis.as_str() {
+        "x" => 0,
+        "y" => 1,
+        _ => 2,
+    };
 
     let (lower_faces_records, upper_faces_records, _, _) =
         find_bounding_faces(blocks, outer_faces, &axis, "both", 1e-6, 1e-6);
@@ -57,8 +248,10 @@ pub fn translational_periodicity(
     let gcd_to_use = compute_min_gcd(blocks);
 
     let blocks_reduced = crate::block_face_functions::reduce_blocks(blocks, gcd_to_use);
-    let lower_faces = outer_face_records_to_list(&blocks_reduced, &lower_faces_records, gcd_to_use);
-    let upper_faces = outer_face_records_to_list(&blocks_reduced, &upper_faces_records, gcd_to_use);
+    // find_bounding_faces already returns records at reduced resolution,
+    // so pass gcd=1 to avoid dividing indices a second time.
+    let lower_faces = outer_face_records_to_list(&blocks_reduced, &lower_faces_records, 1);
+    let upper_faces = outer_face_records_to_list(&blocks_reduced, &upper_faces_records, 1);
 
     let delta_axis = match axis.as_str() {
         "x" => {
@@ -202,12 +395,40 @@ pub fn translational_periodicity(
             }
             None
         });
-        if let Some((face_u, orient)) = matched {
+        if let Some((face_u, _orient)) = matched {
             consumed_lower.insert(face_l.index_key());
             consumed_upper.insert(face_u.index_key());
+
+            let rec1 = FaceRecord::from_face(face_l);
+            let mut rec2 = FaceRecord::from_face(&face_u);
+            let lb1 = [rec1.il, rec1.jl, rec1.kl];
+            let ub1 = [rec1.ih, rec1.jh, rec1.kh];
+            let lb2_orig = [rec2.il, rec2.jl, rec2.kl];
+            let ub2_orig = [rec2.ih, rec2.jh, rec2.kh];
+
+            // Determine shift direction: face1_lb axis value < face2_lb → shift +delta
+            let blk1_r = &blocks_reduced[rec1.block_index];
+            let blk2_r = &blocks_reduced[rec2.block_index];
+            let p1_val = block_axis_val(blk1_r, lb1, axis_idx);
+            let p2_val = block_axis_val(blk2_r, lb2_orig, axis_idx);
+            let shift_amt = if p1_val < p2_val { delta_axis } else { -delta_axis };
+
+            let (corrected_lb2, corrected_ub2, _orient_vec) =
+                compute_periodic_lb_ub_orientation(
+                    blk1_r, lb1, ub1, blk2_r, lb2_orig, ub2_orig,
+                    axis_idx, shift_amt,
+                );
+            rec2.il = corrected_lb2[0];
+            rec2.jl = corrected_lb2[1];
+            rec2.kl = corrected_lb2[2];
+            rec2.ih = corrected_ub2[0];
+            rec2.jh = corrected_ub2[1];
+            rec2.kh = corrected_ub2[2];
+
+            let orient = orientation_from_orient_vec(&_orient_vec, &lb1, &ub1, &corrected_lb2, &corrected_ub2);
             periodic_matches.push(FaceMatch {
-                block1: FaceRecord::from_face(face_l),
-                block2: FaceRecord::from_face(&face_u),
+                block1: rec1,
+                block2: rec2,
                 points: Vec::new(),
                 orientation: Some(orient),
             });
@@ -221,13 +442,31 @@ pub fn translational_periodicity(
         .filter(|f| !consumed_lower.contains(&f.index_key()))
         .cloned()
         .collect();
-    let mut upper_remainder: Vec<Face> = upper_pool
+    let upper_remainder: Vec<Face> = upper_pool
         .iter()
         .filter(|f| !consumed_upper.contains(&f.index_key()))
         .cloned()
         .collect();
 
-    // ── Phase 2: Slow node-by-node matching on remainder ──
+    // ── Phase 2: Centroid-sorted greedy node-by-node matching on remainder ──
+    // Build upper candidate pool with in-plane centroids for nearest-first matching
+    struct UpperCandidate {
+        face: Face,
+        centroid_2d: [Float; 2],
+    }
+    let mut upper_pool_2: Vec<UpperCandidate> = upper_remainder
+        .into_iter()
+        .map(|f| {
+            let c = f.centroid();
+            let centroid_2d = match axis_idx {
+                0 => [c[1], c[2]],
+                1 => [c[0], c[2]],
+                _ => [c[0], c[1]],
+            };
+            UpperCandidate { face: f, centroid_2d }
+        })
+        .collect();
+
     let pb2 = ProgressBar::new(lower_remainder.len() as u64);
     pb2.set_style(
         ProgressStyle::with_template(
@@ -240,10 +479,32 @@ pub fn translational_periodicity(
 
     for face_l in &lower_remainder {
         pb2.inc(1);
-        let candidate = upper_remainder.iter().enumerate().find_map(|(idx, f)| {
+        if upper_pool_2.is_empty() {
+            break;
+        }
+
+        // Compute lower face's in-plane centroid for distance sorting
+        let c = face_l.centroid();
+        let lower_c2d = match axis_idx {
+            0 => [c[1], c[2]],
+            1 => [c[0], c[2]],
+            _ => [c[0], c[1]],
+        };
+
+        // Sort upper candidates by distance to lower face centroid (nearest first)
+        let mut indices: Vec<usize> = (0..upper_pool_2.len()).collect();
+        indices.sort_by(|&a, &b| {
+            let da = (upper_pool_2[a].centroid_2d[0] - lower_c2d[0]).powi(2)
+                + (upper_pool_2[a].centroid_2d[1] - lower_c2d[1]).powi(2);
+            let db = (upper_pool_2[b].centroid_2d[0] - lower_c2d[0]).powi(2)
+                + (upper_pool_2[b].centroid_2d[1] - lower_c2d[1]).powi(2);
+            da.partial_cmp(&db).unwrap()
+        });
+
+        let matched_idx = indices.iter().find_map(|&idx| {
             faces_translational_match(
                 face_l,
-                f,
+                &upper_pool_2[idx].face,
                 &blocks_reduced,
                 &blocks_up,
                 &blocks_dn,
@@ -255,15 +516,42 @@ pub fn translational_periodicity(
                 stride_u,
                 stride_v,
             )
-            .map(|mode| (idx, mode))
+            .map(|_mode| idx)
         });
-        if let Some((pos, _mode)) = candidate {
-            let face_u = upper_remainder.remove(pos);
+
+        if let Some(idx) = matched_idx {
+            let face_u = upper_pool_2.remove(idx);
+            let rec1 = FaceRecord::from_face(face_l);
+            let mut rec2 = FaceRecord::from_face(&face_u.face);
+            let lb1 = [rec1.il, rec1.jl, rec1.kl];
+            let ub1 = [rec1.ih, rec1.jh, rec1.kh];
+            let lb2_orig = [rec2.il, rec2.jl, rec2.kl];
+            let ub2_orig = [rec2.ih, rec2.jh, rec2.kh];
+
+            let blk1_r = &blocks_reduced[rec1.block_index];
+            let blk2_r = &blocks_reduced[rec2.block_index];
+            let p1_val = block_axis_val(blk1_r, lb1, axis_idx);
+            let p2_val = block_axis_val(blk2_r, lb2_orig, axis_idx);
+            let shift_amt = if p1_val < p2_val { delta_axis } else { -delta_axis };
+
+            let (corrected_lb2, corrected_ub2, orient_vec) =
+                compute_periodic_lb_ub_orientation(
+                    blk1_r, lb1, ub1, blk2_r, lb2_orig, ub2_orig,
+                    axis_idx, shift_amt,
+                );
+            rec2.il = corrected_lb2[0];
+            rec2.jl = corrected_lb2[1];
+            rec2.kl = corrected_lb2[2];
+            rec2.ih = corrected_ub2[0];
+            rec2.jh = corrected_ub2[1];
+            rec2.kh = corrected_ub2[2];
+
+            let orient = orientation_from_orient_vec(&orient_vec, &lb1, &ub1, &corrected_lb2, &corrected_ub2);
             periodic_matches.push(FaceMatch {
-                block1: FaceRecord::from_face(face_l),
-                block2: FaceRecord::from_face(&face_u),
+                block1: rec1,
+                block2: rec2,
                 points: Vec::new(),
-                orientation: None,
+                orientation: Some(orient),
             });
         }
     }
@@ -273,26 +561,27 @@ pub fn translational_periodicity(
     drop(blocks_up);
     drop(blocks_dn);
 
+    // Scale periodic matches back to original resolution FIRST so that
+    // periodic_keys are at the same resolution as outer_faces (which are
+    // already at original resolution from connectivity_fast).
+    if gcd_to_use > 1 {
+        for rec in &mut periodic_matches {
+            rec.block1.scale_indices(gcd_to_use);
+            rec.block2.scale_indices(gcd_to_use);
+        }
+    }
+
     let mut periodic_keys = HashSet::new();
     for rec in &periodic_matches {
         periodic_keys.insert(rec.block1.index_key());
         periodic_keys.insert(rec.block2.index_key());
     }
 
+    // outer_faces are already at original resolution — do NOT scale remaining.
     let mut remaining = Vec::new();
     for record in outer_faces {
         if !periodic_keys.contains(&record.index_key()) {
             remaining.push(record.clone());
-        }
-    }
-
-    if gcd_to_use > 1 {
-        for rec in &mut periodic_matches {
-            rec.block1.scale_indices(gcd_to_use);
-            rec.block2.scale_indices(gcd_to_use);
-        }
-        for record in &mut remaining {
-            record.scale_indices(gcd_to_use);
         }
     }
 
