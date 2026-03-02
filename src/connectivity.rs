@@ -8,14 +8,20 @@
 //!
 //! The [`connectivity_fast`] function detects face matches in three phases:
 //!
-//! **Phase 1 — Full-face corner matching (O(1) per pair)**
+//! **Phase 1 -- Full-face corner matching (O(1) per pair)**
 //!
 //! For every pair of outer faces, the four corner vertices are compared using
-//! all 8 valid orientation permutations (4 flip combinations × 2 swap).
+//! all 8 valid orientation permutations (4 flip combinations x 2 swap).
 //! When all four corners match within tolerance, a [`FaceMatch`] is recorded
 //! immediately. This is the fast path for 1:1 face matches.
 //!
-//! **Phase 2 — Partial / split-face node-by-node matching**
+//! During this phase the algorithm also records the winning permutation
+//! index and whether the match is in-plane or cross-plane, storing them in
+//! the [`FaceMatch::orientation`] field as an [`Orientation`] value. This
+//! lets downstream code (e.g. solver coupling) reconstruct the exact
+//! node-to-node mapping without re-sampling block coordinates.
+//!
+//! **Phase 2 -- Partial / split-face node-by-node matching**
 //!
 //! Remaining unmatched faces are tested for partial overlap via
 //! [`get_face_intersection`]. When a partial match is found, both faces are
@@ -24,7 +30,7 @@
 //! pool for subsequent iterations. This loop continues until no new matches
 //! are discovered during a full pass.
 //!
-//! **Phase 3 — Fresh-face validation with all-node AABB pre-checks**
+//! **Phase 3 -- Fresh-face validation with all-node AABB pre-checks**
 //!
 //! After Phase 2 converges, any remaining unmatched faces may still have
 //! partial overlaps with faces that were *already matched* in Phases 1 or 2.
@@ -33,6 +39,22 @@
 //! overlap before calling `get_face_intersection`. This catches edge cases
 //! where two corners of a sub-face lie outside the bounding diagonal of
 //! a candidate face, which the 2-corner AABB would miss.
+//!
+//! # Post-processing
+//!
+//! After matching, [`align_face_orientations`] can optionally correct the
+//! diagonal corners of `block2` in each [`FaceMatch`] so that they encode
+//! the detected orientation. This embeds the permutation directly into the
+//! `il/jl/kl` and `ih/jh/kh` fields, which is the format expected by
+//! solvers that use the GridPro/GlennHT diagonal convention.
+//!
+//! # Tolerance
+//!
+//! The default spatial tolerance used for vertex comparisons is
+//! [`DEFAULT_TOL`] (1e-6). Both [`connectivity`] and [`connectivity_fast`]
+//! accept an explicit tolerance parameter to override this default.
+//!
+//! # Verification
 //!
 //! Use [`verify_connectivity`] after running connectivity to confirm that
 //! all matched face pairs have coincident nodes.
@@ -388,18 +410,18 @@ fn build_match_points_from_orientation(
     for (u_off, &u1) in u1_vals.iter().enumerate() {
         for (v_off, &v1) in v1_vals.iter().enumerate() {
             // Apply orientation mapping to get face2's (u, v) offsets
-            let (u2_off, v2_off) = if orientation.swapped {
+            let (u2_off, v2_off) = if orientation.swapped() {
                 (v_off, u_off)
             } else {
                 (u_off, v_off)
             };
 
-            let u2_idx = if orientation.u_reversed {
+            let u2_idx = if orientation.u_reversed() {
                 u2_vals.len().saturating_sub(1).saturating_sub(u2_off)
             } else {
                 u2_off
             };
-            let v2_idx = if orientation.v_reversed {
+            let v2_idx = if orientation.v_reversed() {
                 v2_vals.len().saturating_sub(1).saturating_sub(v2_off)
             } else {
                 v2_off
@@ -502,12 +524,12 @@ fn verify_match_interior(
     points: &[MatchPoint],
     tol: Float,
 ) -> bool {
-    if points.len() <= 4 {
+    if points.len() < 2 {
         return true;
     }
 
-    // Check every interior point (skip first and last which are corners)
-    for p in &points[1..points.len() - 1] {
+    // Check all matched points (including corners for small faces like 2×2)
+    for p in points {
         let (x1, y1, z1) = block1.xyz(p.i1, p.j1, p.k1);
         let (x2, y2, z2) = block2.xyz(p.i2, p.j2, p.k2);
         let d = ((x1 - x2).powi(2) + (y1 - y2).powi(2) + (z1 - z2).powi(2)).sqrt();
@@ -1121,7 +1143,7 @@ pub fn align_face_orientations(
         }
 
         // Try all 8 permutations (4 direct + 4 transposed)
-        if let Some(perm) = try_all_permutations(&pts1, block2, b2, tol) {
+        if let Some((perm, _perm_idx)) = try_all_permutations(&pts1, block2, b2, tol) {
             let mut fm_out = fm.clone();
             fm_out.block2.il = perm.il;
             fm_out.block2.jl = perm.jl;

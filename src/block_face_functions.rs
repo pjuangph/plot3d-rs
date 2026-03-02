@@ -13,6 +13,9 @@ use crate::{
 
 const DEFAULT_TOL: Float = 1e-8;
 
+/// Vertex-matching tolerance used by [`Face::match_indices`].
+const VERTEX_MATCH_TOL: Float = 1e-6;
+
 /// Enumeration describing which index remains constant over a structured face.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum FaceAxis {
@@ -35,6 +38,8 @@ pub struct Face {
 }
 
 /// Find the linear index of the vertex whose structured indices match `(i, j, k)`.
+///
+/// Panics if the requested indices are not found in the face.
 fn corner_index(face: &Face, i: usize, j: usize, k: usize) -> usize {
     face.indices
         .iter()
@@ -46,7 +51,12 @@ fn corner_index(face: &Face, i: usize, j: usize, k: usize) -> usize {
                 None
             }
         })
-        .unwrap_or(0)
+        .unwrap_or_else(|| {
+            panic!(
+                "corner_index: vertex ({}, {}, {}) not found in face with {} vertices",
+                i, j, k, face.indices.len()
+            )
+        })
 }
 
 impl Default for Face {
@@ -643,9 +653,9 @@ impl Face {
     /// Find vertex-index correspondences between `self` and `other`.
     ///
     /// Returns pairs `[i_self, j_other]` where vertex `i_self` of this face
-    /// matches vertex `j_other` of `other` within tolerance 1e-6.
+    /// matches vertex `j_other` of `other` within [`VERTEX_MATCH_TOL`].
     pub fn match_indices(&self, other: &Face) -> Vec<[usize; 2]> {
-        let tol = 1e-6;
+        let tol = VERTEX_MATCH_TOL;
         let mut matched_other = vec![false; other.vertices.len()];
         let mut result = Vec::new();
         for (i, v_self) in self.vertices.iter().enumerate() {
@@ -1005,30 +1015,31 @@ fn try_corner_permutations(
     cb: &[[Float; 3]; 4],
     tol: Float,
 ) -> Option<crate::face_record::Orientation> {
-    use crate::face_record::Orientation;
+    use crate::face_record::{Orientation, OrientationPlane};
 
-    // Each entry: (index permutation of cb, u_reversed, v_reversed, swapped)
-    const PERMS: [([usize; 4], bool, bool, bool); 8] = [
-        ([0, 1, 2, 3], false, false, false), // identity
-        ([2, 3, 0, 1], true, false, false),  // u_reversed
-        ([1, 0, 3, 2], false, true, false),  // v_reversed
-        ([3, 2, 1, 0], true, true, false),   // both reversed
-        ([0, 2, 1, 3], false, false, true),  // swapped
-        ([2, 0, 3, 1], true, false, true),   // swapped + u_reversed
-        ([1, 3, 0, 2], false, true, true),   // swapped + v_reversed
-        ([3, 1, 2, 0], true, true, true),    // swapped + both
+    // Corner index permutations corresponding to each of the 8 orientation matrices.
+    // Canonical corner ordering: [0]=(u_min,v_min), [1]=(u_min,v_max),
+    //                            [2]=(u_max,v_min), [3]=(u_max,v_max)
+    const CORNER_PERMS: [[usize; 4]; 8] = [
+        [0, 1, 2, 3],  // 0: identity
+        [2, 3, 0, 1],  // 1: u reversed
+        [1, 0, 3, 2],  // 2: v reversed
+        [3, 2, 1, 0],  // 3: both reversed
+        [0, 2, 1, 3],  // 4: swapped
+        [2, 0, 3, 1],  // 5: swap + u_reversed
+        [1, 3, 0, 2],  // 6: swap + v_reversed
+        [3, 1, 2, 0],  // 7: swap + both
     ];
 
-    for &(ref perm, u_rev, v_rev, swapped) in &PERMS {
+    for (idx, perm) in CORNER_PERMS.iter().enumerate() {
         let all_match = perm
             .iter()
             .enumerate()
             .all(|(i, &j)| distance(ca[i], cb[j]) <= tol);
         if all_match {
             return Some(Orientation {
-                u_reversed: u_rev,
-                v_reversed: v_rev,
-                swapped,
+                permutation_index: idx as u8,
+                plane: if idx >= 4 { OrientationPlane::CrossPlane } else { OrientationPlane::InPlane },
             });
         }
     }

@@ -1,13 +1,39 @@
 //! Gold-standard verification for connectivity and periodicity.
 //!
-//! Pure pass/fail checks — takes lb/ub as given from the pipeline,
+//! Pure pass/fail checks -- takes lb/ub as given from the pipeline,
 //! does directed traversal, compares point-by-point.
 //! Do NOT modify these to get better results.
 //!
-//! Checks:
-//!   1. Face AREA must match: `di*dj*dk == di'*dj'*dk'`
-//!   2. Every point from face1 (traversing lb→ub) must match the
-//!      corresponding point from face2 (traversing lb→ub).
+//! # Verification checks
+//!
+//!   1. **Face area**: `di*dj*dk == di'*dj'*dk'` -- the total number of
+//!      grid points on both faces must agree.
+//!   2. **Point-by-point**: every point from face1 (traversing the
+//!      diagonal `lb -> ub`) must match the corresponding point from
+//!      face2 within the supplied tolerance.
+//!
+//! # Permutation testing approach
+//!
+//! When the stored diagonal of `block2` does not produce a point-by-point
+//! match, [`try_all_permutations`] exhaustively tests all 8 orientation
+//! permutations (see [`crate::face_record::PERMUTATION_MATRICES`]):
+//!
+//! 1. Extract face2's grid points **once** in canonical ascending order
+//!    (both u and v increasing).
+//! 2. For each of the 8 permutations (bit encoding:
+//!    `perm_idx = u_reversed | (v_reversed << 1) | (swapped << 2)`),
+//!    remap output indices back to canonical grid indices via index
+//!    arithmetic, avoiding redundant coordinate extraction.
+//! 3. Compare every remapped point against face1's points (held
+//!    constant). Accept on the first permutation where all points match
+//!    within tolerance.
+//! 4. On success, reconstruct a corrected [`FaceRecord`] whose diagonal
+//!    corners encode the winning orientation, and return the permutation
+//!    index.
+//!
+//! This approach is used by both [`verify_connectivity`] and
+//! [`verify_periodicity`]. The periodicity variant additionally rotates
+//! block1 by +/- theta before comparison.
 
 use crate::block::Block;
 use crate::block_face_functions::{reduce_blocks, rotate_block};
@@ -61,105 +87,128 @@ pub(crate) fn extract_face_points(block: &Block, rec: &FaceRecord) -> Vec<(Float
     pts
 }
 
-/// Generate all 8 traversal permutations for a face (4 direct + 4 transposed).
+/// Try all 8 permutations of face2 against face1 using index-based grid manipulation.
 ///
-/// Matches Python's `_generate_permutations(lb, ub)`:
-///   1. Find the constant axis (where il==ih, jl==jh, or kl==kh).
-///   2. For the two varying axes d0, d1:
-///      - 4 direct: all combos of forward/reverse for d0 and d1.
-///      - 4 transposed: swap d0's values into d1's slot and vice versa.
-///   3. Return 8 FaceRecords (constant axis unchanged).
-pub(crate) fn generate_permutations(rec: &FaceRecord) -> Vec<FaceRecord> {
-    let lb = [rec.il, rec.jl, rec.kl];
-    let ub = [rec.ih, rec.jh, rec.kh];
-
-    let mut perms = Vec::with_capacity(8);
-
-    for dim in 0..3 {
-        if lb[dim] == ub[dim] {
-            // This is the constant axis
-            let varying: Vec<usize> = (0..3).filter(|&d| d != dim).collect();
-            let d0 = varying[0];
-            let d1 = varying[1];
-            let vals = [[lb[d0], ub[d0]], [lb[d1], ub[d1]]];
-
-            // 4 direct permutations
-            for s0 in 0..2usize {
-                for s1 in 0..2usize {
-                    let mut new_lb = lb;
-                    let mut new_ub = ub;
-                    new_lb[d0] = vals[0][s0];
-                    new_ub[d0] = vals[0][1 - s0];
-                    new_lb[d1] = vals[1][s1];
-                    new_ub[d1] = vals[1][1 - s1];
-                    perms.push(FaceRecord {
-                        block_index: rec.block_index,
-                        il: new_lb[0], jl: new_lb[1], kl: new_lb[2],
-                        ih: new_ub[0], jh: new_ub[1], kh: new_ub[2],
-                        id: rec.id,
-                        u_physical: None,
-                        v_physical: None,
-                    });
-                }
-            }
-
-            // 4 transposed permutations (swap which axis values go to d0 vs d1)
-            for s0 in 0..2usize {
-                for s1 in 0..2usize {
-                    let mut new_lb = lb;
-                    let mut new_ub = ub;
-                    new_lb[d0] = vals[1][s0];    // d1's values → d0's slot
-                    new_ub[d0] = vals[1][1 - s0];
-                    new_lb[d1] = vals[0][s1];    // d0's values → d1's slot
-                    new_ub[d1] = vals[0][1 - s1];
-                    perms.push(FaceRecord {
-                        block_index: rec.block_index,
-                        il: new_lb[0], jl: new_lb[1], kl: new_lb[2],
-                        ih: new_ub[0], jh: new_ub[1], kh: new_ub[2],
-                        id: rec.id,
-                        u_physical: None,
-                        v_physical: None,
-                    });
-                }
-            }
-
-            break;
-        }
-    }
-
-    perms
-}
-
-/// Try all 8 direction permutations of block2's face against block1's face points.
+/// Extracts face2 points **once** in canonical (both axes ascending) order, then
+/// applies each of the 8 permutations (flip-u, flip-v, swap) via index arithmetic
+/// rather than re-extracting points for each permutation.
 ///
-/// Matches Python's `_try_all_permutations`:
-///   - Holds pts1 fixed (already extracted).
-///   - For block2, tries all 8 permutations (4 direct + 4 transposed).
-///   - Returns the first matching permuted FaceRecord, or None.
+/// Bit encoding: `perm_idx = u_reversed | (v_reversed << 1) | (swapped << 2)`
+///
+/// Returns `(corrected_FaceRecord, permutation_index)` on match, or `None`.
 pub(crate) fn try_all_permutations(
     pts1: &[(Float, Float, Float)],
     block2: &Block,
     rec2: &FaceRecord,
     tol: Float,
-) -> Option<FaceRecord> {
+) -> Option<(FaceRecord, u8)> {
     let tol2 = tol * tol;
 
-    for perm in generate_permutations(rec2) {
-        let pts2 = extract_face_points(block2, &perm);
-        if pts1.len() != pts2.len() {
+    // Normalize to ascending ranges, clamped to block dimensions
+    let clamp = [
+        block2.imax.saturating_sub(1),
+        block2.jmax.saturating_sub(1),
+        block2.kmax.saturating_sub(1),
+    ];
+    let lo = [
+        rec2.il.min(rec2.ih).min(clamp[0]),
+        rec2.jl.min(rec2.jh).min(clamp[1]),
+        rec2.kl.min(rec2.kh).min(clamp[2]),
+    ];
+    let hi = [
+        rec2.il.max(rec2.ih).min(clamp[0]),
+        rec2.jl.max(rec2.jh).min(clamp[1]),
+        rec2.kl.max(rec2.kh).min(clamp[2]),
+    ];
+
+    // Find constant axis
+    let const_dim = (0..3).find(|&d| lo[d] == hi[d])?;
+    let varying: Vec<usize> = (0..3).filter(|&d| d != const_dim).collect();
+    let d0 = varying[0]; // "u" axis
+    let d1 = varying[1]; // "v" axis
+    let nu = hi[d0] - lo[d0] + 1;
+    let nv = hi[d1] - lo[d1] + 1;
+
+    // Extract face2 points once in canonical ascending order: u outer, v inner
+    let mut grid = Vec::with_capacity(nu * nv);
+    for u in 0..nu {
+        for v in 0..nv {
+            let mut idx = [0usize; 3];
+            idx[const_dim] = lo[const_dim];
+            idx[d0] = lo[d0] + u;
+            idx[d1] = lo[d1] + v;
+            grid.push(block2.xyz(idx[0], idx[1], idx[2]));
+        }
+    }
+
+    // Try each of the 8 permutations
+    for perm_idx in 0u8..8 {
+        let u_rev = perm_idx & 1 != 0;
+        let v_rev = perm_idx & 2 != 0;
+        let swap = perm_idx & 4 != 0;
+
+        // Output dimensions after potential swap
+        let (out_nu, out_nv) = if swap { (nv, nu) } else { (nu, nv) };
+
+        if pts1.len() != out_nu * out_nv {
             continue;
         }
 
-        let worst = pts1
-            .iter()
-            .zip(pts2.iter())
-            .map(|(a, b)| {
-                (a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)
-            })
-            .fold(0.0 as Float, Float::max);
+        let mut ok = true;
+        for ou in 0..out_nu {
+            if !ok {
+                break;
+            }
+            for ov in 0..out_nv {
+                // Map output (ou, ov) back to canonical grid indices (gu, gv)
+                let (gu, gv) = if swap { (ov, ou) } else { (ou, ov) };
+                let gu = if u_rev { nu - 1 - gu } else { gu };
+                let gv = if v_rev { nv - 1 - gv } else { gv };
 
-        if worst <= tol2 {
-            return Some(perm);
+                let p2 = grid[gu * nv + gv];
+                let p1 = pts1[ou * out_nv + ov];
+                let d2 =
+                    (p1.0 - p2.0).powi(2) + (p1.1 - p2.1).powi(2) + (p1.2 - p2.2).powi(2);
+                if d2 > tol2 {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+
+        if ok {
+            // Reconstruct corrected FaceRecord with the matching diagonal
+            let mut new_lo = lo;
+            let mut new_hi = lo;
+            new_lo[const_dim] = lo[const_dim];
+            new_hi[const_dim] = lo[const_dim];
+
+            if swap {
+                new_lo[d0] = if u_rev { hi[d1] } else { lo[d1] };
+                new_hi[d0] = if u_rev { lo[d1] } else { hi[d1] };
+                new_lo[d1] = if v_rev { hi[d0] } else { lo[d0] };
+                new_hi[d1] = if v_rev { lo[d0] } else { hi[d0] };
+            } else {
+                new_lo[d0] = if u_rev { hi[d0] } else { lo[d0] };
+                new_hi[d0] = if u_rev { lo[d0] } else { hi[d0] };
+                new_lo[d1] = if v_rev { hi[d1] } else { lo[d1] };
+                new_hi[d1] = if v_rev { lo[d1] } else { hi[d1] };
+            }
+
+            let corrected = FaceRecord {
+                block_index: rec2.block_index,
+                il: new_lo[0],
+                jl: new_lo[1],
+                kl: new_lo[2],
+                ih: new_hi[0],
+                jh: new_hi[1],
+                kh: new_hi[2],
+                id: rec2.id,
+                u_physical: None,
+                v_physical: None,
+            };
+
+            return Some((corrected, perm_idx));
         }
     }
 
@@ -257,7 +306,7 @@ pub fn verify_connectivity(
         }
 
         // Step 3d: Try all 8 permutations of block2's direction
-        if let Some(perm) = try_all_permutations(&pts1, block2, b2, tol) {
+        if let Some((perm, _perm_idx)) = try_all_permutations(&pts1, block2, b2, tol) {
             // Step 3e: Correct block2's lb/ub, scale back by GCD
             let mut corrected = face_matches[idx].clone();
             corrected.block2.il = perm.il * gcd_to_use;
@@ -429,7 +478,7 @@ pub fn verify_periodicity(
             }
 
             // Try all 8 permutations of block2's direction
-            if let Some(perm) = try_all_permutations(&pts1, block2, b2, tol) {
+            if let Some((perm, _perm_idx)) = try_all_permutations(&pts1, block2, b2, tol) {
                 let mut corrected = face_matches[idx].clone();
                 corrected.block2.il = perm.il * gcd_to_use;
                 corrected.block2.jl = perm.jl * gcd_to_use;

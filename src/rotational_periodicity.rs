@@ -53,7 +53,7 @@ use crate::{
     },
     connectivity::get_face_intersection,
     face_pool::{count_edge_matches, extract_face_edges, FacePool},
-    face_record::{FaceKey, FaceMatch, FaceRecord, MatchPoint, Orientation, PeriodicPair},
+    face_record::{FaceKey, FaceMatch, FaceRecord, MatchPoint, Orientation, OrientationPlane, PeriodicPair},
     utils::{apply_rotation, compute_min_gcd, distance3},
     Float,
 };
@@ -188,8 +188,9 @@ fn rotational_periodicity_core(
     // Build the face pool with cylindrical metadata
     let mut pool = FacePool::new(outer_faces_all, rotation_axis);
 
-    // Theta tolerance for candidate search: use the rotation angle plus some margin
-    let theta_tol = rotation_angle.abs() * 0.15 + 0.05;
+    // Theta tolerance for candidate search: fraction of rotation angle, clamped to a
+    // reasonable range to avoid excessively wide searches for few-blade machines.
+    let theta_tol = (rotation_angle.abs() * 0.15 + 0.05).min(0.25);
 
     // ===== PHASE 1: Full-face matching via cylindrical bucketing =====
     {
@@ -994,11 +995,12 @@ fn infer_orientation_from_match_points(
             false
         };
         let v_reversed = dv2_from_u != 0 && (du1.signum() != dv2_from_u.signum());
-        Some(Orientation {
+        Some(Orientation::from_flags(
             u_reversed,
             v_reversed,
-            swapped: true,
-        })
+            true,
+            if axis1 == axis2 { OrientationPlane::InPlane } else { OrientationPlane::CrossPlane },
+        ))
     } else {
         let u_reversed = du1 != 0 && du2 != 0 && (du1.signum() != du2.signum());
         let v_reversed = if let Some(v_info) = v_pair {
@@ -1008,11 +1010,12 @@ fn infer_orientation_from_match_points(
         } else {
             false
         };
-        Some(Orientation {
+        Some(Orientation::from_flags(
             u_reversed,
             v_reversed,
-            swapped: false,
-        })
+            false,
+            if axis1 == axis2 { OrientationPlane::InPlane } else { OrientationPlane::CrossPlane },
+        ))
     }
 }
 

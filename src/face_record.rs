@@ -15,7 +15,7 @@
 //! When you need min/max values (e.g. for range iteration), use the
 //! normalized accessors: [`FaceRecord::i_lo()`], [`FaceRecord::i_hi()`], etc.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{block::Block, block_face_functions::Face};
 
@@ -367,22 +367,154 @@ impl FaceRecordTraits for Vec<FaceRecord> {
     }
 }
 
-/// Describes the index mapping between two matched faces.
+/// The 8 canonical 2x2 permutation matrices for face orientation.
 ///
-/// For a face with a constant axis (e.g., K-constant), the two varying
-/// dimensions form a (u, v) parametric space. `u_reversed` and `v_reversed`
-/// indicate whether block2's u/v directions run opposite to block1's.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+/// Each matrix operates on parametric (u, v) coordinates. The index encodes:
+/// - bit 0: `u_reversed`
+/// - bit 1: `v_reversed`
+/// - bit 2: `swapped` (transpose u and v)
+///
+/// The index is computed as:
+/// ```text
+/// index = u_reversed | (v_reversed << 1) | (swapped << 2)
+/// ```
+///
+/// | Index | Matrix              | Effect            |
+/// |:-----:|:-------------------:|:-----------------:|
+/// |   0   | `[[ 1, 0],[ 0, 1]]`| identity          |
+/// |   1   | `[[-1, 0],[ 0, 1]]`| flip u            |
+/// |   2   | `[[ 1, 0],[ 0,-1]]`| flip v            |
+/// |   3   | `[[-1, 0],[ 0,-1]]`| flip both         |
+/// |   4   | `[[ 0, 1],[ 1, 0]]`| transpose         |
+/// |   5   | `[[ 0,-1],[ 1, 0]]`| transpose + flip u|
+/// |   6   | `[[ 0, 1],[-1, 0]]`| transpose + flip v|
+/// |   7   | `[[ 0,-1],[-1, 0]]`| transpose + both  |
+///
+/// # Examples
+///
+/// ```
+/// use plot3d::PERMUTATION_MATRICES;
+///
+/// // Identity (index 0): no reversal, no swap
+/// assert_eq!(PERMUTATION_MATRICES[0], [[1, 0], [0, 1]]);
+///
+/// // Index 5 = u_reversed (bit 0) + swapped (bit 2) = 1 + 4
+/// assert_eq!(PERMUTATION_MATRICES[5], [[0, -1], [1, 0]]);
+///
+/// // Verify the full table has exactly 8 entries
+/// assert_eq!(PERMUTATION_MATRICES.len(), 8);
+/// ```
+pub const PERMUTATION_MATRICES: [[[i8; 2]; 2]; 8] = [
+    [[ 1,  0], [ 0,  1]],  // 0: identity
+    [[-1,  0], [ 0,  1]],  // 1: u reversed
+    [[ 1,  0], [ 0, -1]],  // 2: v reversed
+    [[-1,  0], [ 0, -1]],  // 3: both reversed
+    [[ 0,  1], [ 1,  0]],  // 4: swapped
+    [[ 0, -1], [ 1,  0]],  // 5: swap + u reversed
+    [[ 0,  1], [-1,  0]],  // 6: swap + v reversed
+    [[ 0, -1], [-1,  0]],  // 7: swap + both reversed
+];
+
+/// Whether a face match is in-plane or cross-plane.
+///
+/// When two block faces share an interface, their constant axes may or may
+/// not be the same. This distinction matters because cross-plane matches
+/// require a parametric axis swap (bit 2 of `permutation_index`), while
+/// in-plane matches only need reversal flags.
+///
+/// - [`InPlane`](OrientationPlane::InPlane): both faces have the same
+///   constant axis (e.g., both K-constant). Only the 4 non-swap
+///   permutations (indices 0-3) apply.
+/// - [`CrossPlane`](OrientationPlane::CrossPlane): faces have different
+///   constant axes (e.g., K-constant abutting J-constant). The full set of
+///   8 permutations (indices 0-7) must be tested.
+///
+/// # Examples
+///
+/// ```
+/// use plot3d::OrientationPlane;
+///
+/// let plane = OrientationPlane::InPlane;
+/// assert_eq!(plane, OrientationPlane::InPlane);
+///
+/// let cross = OrientationPlane::CrossPlane;
+/// assert_ne!(plane, cross);
+/// ```
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum OrientationPlane {
+    InPlane,
+    CrossPlane,
+}
+
+/// Describes the parametric orientation between two matched faces using a
+/// permutation matrix index (0-7).
+///
+/// The permutation matrix transforms face2's parametric (u, v) coordinates
+/// to align with face1's. The `plane` field indicates whether the faces share
+/// the same constant axis (in-plane) or have different constant axes
+/// (cross-plane).
+///
+/// Construct via [`Orientation::from_flags`] when you have individual boolean
+/// flags, or set `permutation_index` directly when you already know the
+/// encoded value.
+///
+/// # Bit layout
+///
+/// ```text
+/// permutation_index = u_reversed | (v_reversed << 1) | (swapped << 2)
+/// ```
+///
+/// # Examples
+///
+/// ```
+/// use plot3d::{Orientation, OrientationPlane, PERMUTATION_MATRICES};
+///
+/// // Build from boolean flags: u reversed, v not reversed, axes swapped
+/// let orient = Orientation::from_flags(true, false, true, OrientationPlane::CrossPlane);
+/// assert_eq!(orient.permutation_index, 5); // 1 + 0 + 4
+/// assert!(orient.u_reversed());
+/// assert!(!orient.v_reversed());
+/// assert!(orient.swapped());
+///
+/// // Retrieve the 2x2 matrix
+/// let m = orient.matrix();
+/// assert_eq!(*m, PERMUTATION_MATRICES[5]);
+/// ```
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Orientation {
-    /// When true, block2's u-axis increases in the opposite spatial direction
-    /// to block1's u-axis (min-to-max mapping).
-    pub u_reversed: bool,
-    /// When true, block2's v-axis increases in the opposite spatial direction
-    /// to block1's v-axis.
-    pub v_reversed: bool,
-    /// When true, block2's u and v axes are transposed relative to block1's
-    /// (e.g., block1 has u=J,v=K but block2 has u=K,v=J).
-    pub swapped: bool,
+    /// Index (0-7) into [`PERMUTATION_MATRICES`].
+    pub permutation_index: u8,
+    /// Whether this is an in-plane or cross-plane match.
+    pub plane: OrientationPlane,
+}
+
+impl Orientation {
+    /// Construct from the legacy boolean flags.
+    pub fn from_flags(u_reversed: bool, v_reversed: bool, swapped: bool, plane: OrientationPlane) -> Self {
+        let index = (u_reversed as u8) | ((v_reversed as u8) << 1) | ((swapped as u8) << 2);
+        Self { permutation_index: index, plane }
+    }
+
+    /// Whether block2's u-axis is reversed relative to block1's.
+    pub fn u_reversed(&self) -> bool {
+        self.permutation_index & 1 != 0
+    }
+
+    /// Whether block2's v-axis is reversed relative to block1's.
+    pub fn v_reversed(&self) -> bool {
+        self.permutation_index & 2 != 0
+    }
+
+    /// Whether block2's u and v axes are transposed relative to block1's.
+    pub fn swapped(&self) -> bool {
+        self.permutation_index & 4 != 0
+    }
+
+    /// Get the 2×2 permutation matrix for this orientation.
+    pub fn matrix(&self) -> &[[i8; 2]; 2] {
+        &PERMUTATION_MATRICES[self.permutation_index as usize]
+    }
 }
 
 /// Aggregates the matching data between two faces.

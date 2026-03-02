@@ -8,6 +8,9 @@ use crate::{
     Float,
 };
 
+/// Default vertex-matching tolerance for block merging operations.
+const DEFAULT_MERGE_TOL: Float = 1e-8;
+
 /// Result type for `combine_blocks_mixed_pairs`.
 pub type CombinedBlocks = (Vec<Block>, Vec<usize>);
 
@@ -174,7 +177,7 @@ pub fn combine_nxnxn_cubes_mixed_pairs(
     cube_size: usize,
     tol: Option<Float>,
 ) -> Vec<(Block, HashSet<usize>)> {
-    let tol = tol.unwrap_or(1e-8);
+    let tol = tol.unwrap_or(DEFAULT_MERGE_TOL);
     if cube_size == 0 {
         return Vec::new();
     }

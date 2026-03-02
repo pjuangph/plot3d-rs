@@ -174,19 +174,24 @@ impl Block {
         new
     }
 
-    /// Convert to cylindrical coordinates (rotation axis = X).
+    /// Convert to cylindrical coordinates about the given rotation axis.
     ///
-    /// Returns `(r, theta)` where `r = sqrt(z^2 + y^2)` and `theta = atan2(y, z)`.
+    /// Returns `(r, theta)` where `r` and `theta` are computed in the plane
+    /// perpendicular to the rotation axis.
     /// Each vector has `npoints()` elements in the same index order as `x/y/z`.
-    pub fn cylindrical(&self) -> (Vec<Float>, Vec<Float>) {
+    pub fn cylindrical(&self, rotation_axis: char) -> (Vec<Float>, Vec<Float>) {
         let n = self.npoints();
         let mut r = Vec::with_capacity(n);
         let mut theta = Vec::with_capacity(n);
         for idx in 0..n {
-            let yi = self.y[idx];
-            let zi = self.z[idx];
-            r.push((zi * zi + yi * yi).sqrt());
-            theta.push(yi.atan2(zi));
+            let (a, b) = match rotation_axis.to_ascii_lowercase() {
+                'x' => (self.y[idx], self.z[idx]),
+                'y' => (self.z[idx], self.x[idx]),
+                'z' => (self.x[idx], self.y[idx]),
+                _ => (self.y[idx], self.z[idx]), // default to x-axis
+            };
+            r.push((a * a + b * b).sqrt());
+            theta.push(a.atan2(b));
         }
         (r, theta)
     }

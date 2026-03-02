@@ -20,10 +20,16 @@ use crate::{
     block::Block,
     block_analysis::find_bounding_faces,
     block_face_functions::{full_face_match_transformed, outer_face_records_to_list, Face},
-    face_record::{FaceKey, FaceMatch, FaceRecord, Orientation},
+    face_record::{FaceKey, FaceMatch, FaceRecord, Orientation, OrientationPlane},
     utils::compute_min_gcd,
     Float,
 };
+
+/// Default spatial tolerance for bounding-face detection and corner matching.
+const DEFAULT_TOL: Float = 1e-6;
+
+/// Minimum floor for the adaptive node-matching tolerance.
+const ADAPTIVE_TOL_FLOOR: Float = 1e-4;
 
 /// Compute corrected lb2/ub2 and orientation for a periodic face pair.
 ///
@@ -186,8 +192,22 @@ fn orientation_from_orient_vec(
     ];
     let varying1: Vec<usize> = (0..3).filter(|&d| dims1[d] > 1).collect();
     if varying1.len() != 2 {
-        return Orientation { u_reversed: false, v_reversed: false, swapped: false };
+        return Orientation::from_flags(false, false, false, OrientationPlane::InPlane);
     }
+
+    // Determine constant axes for plane classification
+    let const_axis1 = (0..3).find(|&d| dims1[d] == 1).unwrap_or(0);
+    let dims2: [usize; 3] = [
+        (corrected_ub2[0] as isize - corrected_lb2[0] as isize).unsigned_abs() + 1,
+        (corrected_ub2[1] as isize - corrected_lb2[1] as isize).unsigned_abs() + 1,
+        (corrected_ub2[2] as isize - corrected_lb2[2] as isize).unsigned_abs() + 1,
+    ];
+    let const_axis2 = (0..3).find(|&d| dims2[d] == 1).unwrap_or(0);
+    let plane = if const_axis1 == const_axis2 {
+        OrientationPlane::InPlane
+    } else {
+        OrientationPlane::CrossPlane
+    };
 
     // Face1 varying axes are u (first) and v (second)
     let u1 = varying1[0];
@@ -208,7 +228,7 @@ fn orientation_from_orient_vec(
     let u_reversed = step1(u1) != step2(u2);
     let v_reversed = step1(v1) != step2(v2);
 
-    Orientation { u_reversed, v_reversed, swapped }
+    Orientation::from_flags(u_reversed, v_reversed, swapped, plane)
 }
 
 /// Detect translational periodicity along an axis.
@@ -243,7 +263,7 @@ pub fn translational_periodicity(
     };
 
     let (lower_faces_records, upper_faces_records, _, _) =
-        find_bounding_faces(blocks, outer_faces, &axis, "both", 1e-6, 1e-6);
+        find_bounding_faces(blocks, outer_faces, &axis, "both", DEFAULT_TOL, DEFAULT_TOL);
 
     let gcd_to_use = compute_min_gcd(blocks);
 
@@ -295,7 +315,7 @@ pub fn translational_periodicity(
     let upper_pool = dedup_faces(upper_faces);
 
     // ── Phase 1: Fast full-face matching via 4-corner comparison ──
-    let corner_tol = node_tol_xyz.unwrap_or(1e-6);
+    let corner_tol = node_tol_xyz.unwrap_or(DEFAULT_TOL);
     let shift_up = |mut p: [Float; 3]| -> [Float; 3] { p[axis_idx] += delta_axis; p };
     let shift_dn = |mut p: [Float; 3]| -> [Float; 3] { p[axis_idx] -= delta_axis; p };
     let mut consumed_lower = HashSet::<FaceKey>::new();
@@ -651,7 +671,7 @@ fn pair_tolerance(
     }
     let spacing_a = median_inplane_spacing(face_a, &blocks[face_a.block_index().unwrap()], axis);
     let spacing_b = median_inplane_spacing(face_b, &blocks[face_b.block_index().unwrap()], axis);
-    (0.03 * spacing_a.max(spacing_b)).max(1e-4)
+    (0.03 * spacing_a.max(spacing_b)).max(ADAPTIVE_TOL_FLOOR)
 }
 
 /// Compute a median edge length for the face in the non-periodic directions.

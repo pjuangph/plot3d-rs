@@ -64,6 +64,68 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
+## Orientation & Permutation Matrices
+
+When two block faces share an interface, their parametric (u, v) coordinate
+systems may differ by any combination of axis reversal and transposition. The
+crate encodes all 8 possible orientations as a 3-bit index into the
+`PERMUTATION_MATRICES` constant array of 2x2 matrices.
+
+### Bit encoding
+
+The `permutation_index` stored in [`Orientation`] is built from three boolean
+flags:
+
+```text
+permutation_index = u_reversed | (v_reversed << 1) | (swapped << 2)
+```
+
+| Index | Binary | u_reversed | v_reversed | swapped | Matrix              | Effect             |
+|:-----:|:------:|:----------:|:----------:|:-------:|:-------------------:|:------------------:|
+|   0   | `000`  |     no     |     no     |   no    | `[[ 1, 0],[ 0, 1]]`| identity           |
+|   1   | `001`  |    yes     |     no     |   no    | `[[-1, 0],[ 0, 1]]`| flip u             |
+|   2   | `010`  |     no     |    yes     |   no    | `[[ 1, 0],[ 0,-1]]`| flip v             |
+|   3   | `011`  |    yes     |    yes     |   no    | `[[-1, 0],[ 0,-1]]`| flip both          |
+|   4   | `100`  |     no     |     no     |  yes    | `[[ 0, 1],[ 1, 0]]`| transpose          |
+|   5   | `101`  |    yes     |     no     |  yes    | `[[ 0,-1],[ 1, 0]]`| transpose + flip u |
+|   6   | `110`  |     no     |    yes     |  yes    | `[[ 0, 1],[-1, 0]]`| transpose + flip v |
+|   7   | `111`  |    yes     |    yes     |  yes    | `[[ 0,-1],[-1, 0]]`| transpose + both   |
+
+### Why 8 permutations?
+
+In-plane matches (both faces share the same constant axis, e.g. both
+K-constant) can usually be described by simply reversing one or both
+diagonal corners. Cross-plane matches (e.g. a K-constant face abutting a
+J-constant face) additionally require a swap of the u and v axes, giving
+the full set of 8 orientations.
+
+### Accessing orientation from a `FaceMatch`
+
+After running `connectivity_fast`, each `FaceMatch` carries an optional
+`orientation` field:
+
+```rust
+use plot3d::{read_plot3d_ascii, connectivity_fast, PERMUTATION_MATRICES};
+
+let blocks = read_plot3d_ascii("grid.xyz").unwrap();
+let (matches, _outer) = connectivity_fast(&blocks);
+
+for m in &matches {
+    if let Some(ref orient) = m.orientation {
+        let idx = orient.permutation_index;
+        let matrix = &PERMUTATION_MATRICES[idx as usize];
+        println!(
+            "block {} <-> block {}: permutation {}, matrix {:?}, plane {:?}",
+            m.block1.block_index, m.block2.block_index,
+            idx, matrix, orient.plane,
+        );
+    }
+}
+```
+
+The `Orientation` struct also provides convenience accessors:
+`u_reversed()`, `v_reversed()`, `swapped()`, and `matrix()`.
+
 ## Relationship to the Python Project
 
 The original Python implementation includes comprehensive notebooks, example data, and a GUI. plot3d-rs strives to remain API-compatible where possible:
@@ -73,6 +135,11 @@ The original Python implementation includes comprehensive notebooks, example dat
 - Many structs (e.g., `FaceRecord`, `FaceMatch`, `PeriodicPair`) are direct translations of the Python dictionaries used in the NASA project
 
 When uncertain about the expected behaviour, use the Python utilities as ground truth. The Rust crate is intentionally lightweight and pragmatic, making it well-suited for embedding PLOT3D workflows in larger Rust applications or integrating with other numerical codes.
+
+## Documentation
+
+- [Unverified Connectivity Faces: Root Cause Analysis](docs/unverified_connectivity_findings.md) — why cross-plane face connections need orientation flags beyond lb/ub, and how plot3d-rs handles them
+- [Presentation (PowerPoint)](docs/unverified_connectivity_findings.pptx) — visual walkthrough of the 2D→3D combinatorics and the orientation fix
 
 ## Contributing
 

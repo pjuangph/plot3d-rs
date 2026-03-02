@@ -19,6 +19,15 @@ use crate::{
     Float,
 };
 
+/// Default node-matching tolerance used in [`BlockConnectionOptions`].
+const DEFAULT_NODE_TOL: Float = 1e-7;
+
+/// Tolerance for the area-overlap fallback in [`block_connection_matrix`].
+const AREA_FALLBACK_PLANE_TOL: Float = 1e-6;
+
+/// Sine threshold below which two vectors are considered collinear.
+const COLLINEARITY_SIN_THRESHOLD: Float = 1e-10;
+
 /// Compute the global bounds across all blocks.
 ///
 /// # Arguments
@@ -71,7 +80,7 @@ pub struct BlockConnectionOptions {
 impl Default for BlockConnectionOptions {
     fn default() -> Self {
         Self {
-            node_tol_xyz: 1e-7,
+            node_tol_xyz: DEFAULT_NODE_TOL,
             min_shared_frac: 0.02,
             min_shared_abs: 4,
             stride_u: 1,
@@ -172,7 +181,7 @@ pub fn block_connection_matrix(
                     );
 
                     let area_match = if !node_match && options.use_area_fallback {
-                        face_i.touches(face_j, 10.0, 1e-6, options.area_min_overlap_frac)
+                        face_i.touches(face_j, 10.0, AREA_FALLBACK_PLANE_TOL, options.area_min_overlap_frac)
                     } else {
                         false
                     };
@@ -227,6 +236,10 @@ pub fn block_connection_matrix(
 }
 
 /// Standardise block orientation so that indices increase with coordinate values.
+///
+/// For each structured axis (I, J, K), computes the dominant physical direction
+/// (the coordinate axis with the largest delta) and flips the structured axis
+/// if its dominant coordinate decreases.
 pub fn standardize_block_orientation(block: &Block) -> Block {
     let mut x = block.x.clone();
     let mut y = block.y.clone();
@@ -237,24 +250,37 @@ pub fn standardize_block_orientation(block: &Block) -> Block {
     let center_j = block.jmax / 2;
     let center_k = block.kmax / 2;
 
+    // For each structured axis, find the dominant physical direction and check sign
     if block.imax > 1 {
-        let delta =
-            block.x_at(block.imax - 1, center_j, center_k) - block.x_at(0, center_j, center_k);
-        if delta < 0.0 {
+        let dx = block.x_at(block.imax - 1, center_j, center_k) - block.x_at(0, center_j, center_k);
+        let dy = block.y_at(block.imax - 1, center_j, center_k) - block.y_at(0, center_j, center_k);
+        let dz = block.z_at(block.imax - 1, center_j, center_k) - block.z_at(0, center_j, center_k);
+        let dominant = if dx.abs() >= dy.abs() && dx.abs() >= dz.abs() { dx }
+                       else if dy.abs() >= dz.abs() { dy }
+                       else { dz };
+        if dominant < 0.0 {
             flip_block_axis(&mut x, &mut y, &mut z, dims, 0);
         }
     }
     if block.jmax > 1 {
-        let delta =
-            block.y_at(center_i, block.jmax - 1, center_k) - block.y_at(center_i, 0, center_k);
-        if delta < 0.0 {
+        let dx = block.x_at(center_i, block.jmax - 1, center_k) - block.x_at(center_i, 0, center_k);
+        let dy = block.y_at(center_i, block.jmax - 1, center_k) - block.y_at(center_i, 0, center_k);
+        let dz = block.z_at(center_i, block.jmax - 1, center_k) - block.z_at(center_i, 0, center_k);
+        let dominant = if dx.abs() >= dy.abs() && dx.abs() >= dz.abs() { dx }
+                       else if dy.abs() >= dz.abs() { dy }
+                       else { dz };
+        if dominant < 0.0 {
             flip_block_axis(&mut x, &mut y, &mut z, dims, 1);
         }
     }
     if block.kmax > 1 {
-        let delta =
-            block.z_at(center_i, center_j, block.kmax - 1) - block.z_at(center_i, center_j, 0);
-        if delta < 0.0 {
+        let dx = block.x_at(center_i, center_j, block.kmax - 1) - block.x_at(center_i, center_j, 0);
+        let dy = block.y_at(center_i, center_j, block.kmax - 1) - block.y_at(center_i, center_j, 0);
+        let dz = block.z_at(center_i, center_j, block.kmax - 1) - block.z_at(center_i, center_j, 0);
+        let dominant = if dx.abs() >= dy.abs() && dx.abs() >= dz.abs() { dx }
+                       else if dy.abs() >= dz.abs() { dy }
+                       else { dz };
+        if dominant < 0.0 {
             flip_block_axis(&mut x, &mut y, &mut z, dims, 2);
         }
     }
@@ -314,14 +340,25 @@ fn flip_block_axis(
     }
 }
 
-/// Simple collinearity test using the cross product.
+/// Collinearity test using the cross product with relative tolerance.
+///
+/// Two vectors are considered collinear when `|v1 × v2| / (|v1| * |v2|)` is
+/// below a small threshold (i.e., sin(angle) ≈ 0).
 pub fn check_collinearity(v1: [Float; 3], v2: [Float; 3]) -> bool {
     let cross = [
         v1[1] * v2[2] - v1[2] * v2[1],
         v1[2] * v2[0] - v1[0] * v2[2],
         v1[0] * v2[1] - v1[1] * v2[0],
     ];
-    cross.iter().all(|c| c.abs() <= Float::EPSILON)
+    let cross_mag = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+    let mag1 = (v1[0] * v1[0] + v1[1] * v1[1] + v1[2] * v1[2]).sqrt();
+    let mag2 = (v2[0] * v2[0] + v2[1] * v2[1] + v2[2] * v2[2]).sqrt();
+    let denom = mag1 * mag2;
+    if denom < Float::EPSILON {
+        return true; // zero-length vectors are trivially collinear
+    }
+    // sin(angle) < COLLINEARITY_SIN_THRESHOLD ≈ collinear
+    cross_mag / denom < COLLINEARITY_SIN_THRESHOLD
 }
 
 /// Compute outward normals for the six faces of a block.

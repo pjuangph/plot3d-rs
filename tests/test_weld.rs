@@ -146,10 +146,13 @@ fn weld_connectivity_and_periodicity() {
     if Path::new(CONN_PERIOD_JSON).exists() {
         let json_str = std::fs::read_to_string(CONN_PERIOD_JSON).unwrap();
         let json_data: Value = serde_json::from_str(&json_str).unwrap();
-        let all_expected = json_data["face_matches"].as_array().unwrap();
         let expected_remaining = json_data["outer_faces"].as_array().unwrap();
 
-        let python_periodic: Vec<_> = all_expected.iter().skip(3682).collect();
+        // Periodic matches are in a separate "periodic_faces" array
+        let python_periodic = json_data["periodic_faces"]
+            .as_array()
+            .map(|a| a.iter().collect::<Vec<_>>())
+            .unwrap_or_default();
         let rust_periodic_keys: HashSet<MatchKey> =
             periodic_matches.iter().map(match_key).collect();
         let python_periodic_keys: HashSet<MatchKey> =
