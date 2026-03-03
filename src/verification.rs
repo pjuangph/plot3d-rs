@@ -32,6 +32,16 @@
 //! - [`determine_plane`] — classify face pair as in-plane or cross-plane
 //! - [`verify_connectivity`] — verify connectivity face matches
 //! - [`verify_periodicity`] — verify periodic face matches with rotation
+//!
+//! # JSON Export Convention
+//!
+//! When exporting to the **diagonal (lb/ub)** JSON format:
+//!
+//! - **In-plane matches** (perm 0-3): block2's `lb`/`ub` encodes traversal
+//!   direction. `permutation_index` is set to **-1** (direction is fully
+//!   recoverable from the bounds).
+//! - **Cross-plane matches** (perm 4-7): ascending `lb`/`ub` bounds with the
+//!   actual `permutation_index`, since bounds alone cannot encode an axis swap.
 
 use crate::block::Block;
 use crate::block_face_functions::{reduce_blocks, rotate_block};
@@ -56,19 +66,24 @@ pub fn extract_canonical_grid(
     block: &Block,
     rec: &FaceRecord,
 ) -> Option<(Vec<(Float, Float, Float)>, usize, usize)> {
+    let (raw_lo, raw_hi) = rec.bounds();
+    let imax = [
+        block.imax.saturating_sub(1),
+        block.jmax.saturating_sub(1),
+        block.kmax.saturating_sub(1),
+    ];
     let lo = [
-        rec.il.min(rec.ih).min(block.imax.saturating_sub(1)),
-        rec.jl.min(rec.jh).min(block.jmax.saturating_sub(1)),
-        rec.kl.min(rec.kh).min(block.kmax.saturating_sub(1)),
+        raw_lo[0].min(imax[0]),
+        raw_lo[1].min(imax[1]),
+        raw_lo[2].min(imax[2]),
     ];
     let hi = [
-        rec.il.max(rec.ih).min(block.imax.saturating_sub(1)),
-        rec.jl.max(rec.jh).min(block.jmax.saturating_sub(1)),
-        rec.kl.max(rec.kh).min(block.kmax.saturating_sub(1)),
+        raw_hi[0].min(imax[0]),
+        raw_hi[1].min(imax[1]),
+        raw_hi[2].min(imax[2]),
     ];
 
-    // Find constant axis (where lo == hi)
-    let const_dim = (0..3).find(|&d| lo[d] == hi[d])?;
+    let const_dim = rec.constant_axis()?;
     let varying: Vec<usize> = (0..3).filter(|&d| d != const_dim).collect();
     let d0 = varying[0]; // u axis
     let d1 = varying[1]; // v axis
@@ -177,17 +192,7 @@ pub fn verify_partial_match(
 
 /// Determine if two faces are in-plane (same constant axis) or cross-plane.
 pub fn determine_plane(rec_a: &FaceRecord, rec_b: &FaceRecord) -> OrientationPlane {
-    let const_a = (0..3usize).find(|&d| {
-        let lo = [rec_a.il.min(rec_a.ih), rec_a.jl.min(rec_a.jh), rec_a.kl.min(rec_a.kh)];
-        let hi = [rec_a.il.max(rec_a.ih), rec_a.jl.max(rec_a.jh), rec_a.kl.max(rec_a.kh)];
-        lo[d] == hi[d]
-    });
-    let const_b = (0..3usize).find(|&d| {
-        let lo = [rec_b.il.min(rec_b.ih), rec_b.jl.min(rec_b.jh), rec_b.kl.min(rec_b.kh)];
-        let hi = [rec_b.il.max(rec_b.ih), rec_b.jl.max(rec_b.jh), rec_b.kl.max(rec_b.kh)];
-        lo[d] == hi[d]
-    });
-    if const_a == const_b {
+    if rec_a.constant_axis() == rec_b.constant_axis() {
         OrientationPlane::InPlane
     } else {
         OrientationPlane::CrossPlane
@@ -232,6 +237,24 @@ pub fn try_all_permutations(
 
 /// Verify connectivity face matches using permutation matrices.
 ///
+/// GCD-reduce blocks and scale face-match indices to match.
+fn prepare_reduced(
+    blocks: &[Block],
+    face_matches: &[FaceMatch],
+) -> (Vec<Block>, Vec<FaceMatch>) {
+    let gcd_to_use = compute_min_gcd(blocks);
+    let reduced_blocks = reduce_blocks(blocks, gcd_to_use);
+    let scaled_matches: Vec<FaceMatch> = face_matches
+        .iter()
+        .map(|fm| {
+            let mut sfm = fm.clone();
+            sfm.divide_indices(gcd_to_use);
+            sfm
+        })
+        .collect();
+    (reduced_blocks, scaled_matches)
+}
+
 /// For each face match:
 /// 1. GCD-reduce blocks and scale indices.
 /// 2. Extract both faces as canonical 2D grids.
@@ -246,17 +269,7 @@ pub fn verify_connectivity(
     face_matches: &[FaceMatch],
     tol: Float,
 ) -> (Vec<FaceMatch>, Vec<FaceMatch>) {
-    let gcd_to_use = compute_min_gcd(blocks);
-    let reduced_blocks = reduce_blocks(blocks, gcd_to_use);
-
-    let scaled_matches: Vec<FaceMatch> = face_matches
-        .iter()
-        .map(|fm| {
-            let mut sfm = fm.clone();
-            sfm.divide_indices(gcd_to_use);
-            sfm
-        })
-        .collect();
+    let (reduced_blocks, scaled_matches) = prepare_reduced(blocks, face_matches);
 
     let mut verified = Vec::new();
     let mut mismatched = Vec::new();
@@ -353,8 +366,7 @@ pub fn verify_periodicity(
     rotation_axis: char,
     tol: Float,
 ) -> (Vec<FaceMatch>, Vec<FaceMatch>) {
-    let gcd_to_use = compute_min_gcd(blocks);
-    let reduced_blocks = reduce_blocks(blocks, gcd_to_use);
+    let (reduced_blocks, scaled_matches) = prepare_reduced(blocks, face_matches);
 
     let rotation_matrix_pos = create_rotation_matrix(theta, rotation_axis);
     let rotation_matrix_neg = create_rotation_matrix(-theta, rotation_axis);
@@ -366,15 +378,6 @@ pub fn verify_periodicity(
     let rotated_blocks_neg: Vec<Block> = reduced_blocks
         .iter()
         .map(|b| rotate_block(b, rotation_matrix_neg))
-        .collect();
-
-    let scaled_matches: Vec<FaceMatch> = face_matches
-        .iter()
-        .map(|fm| {
-            let mut sfm = fm.clone();
-            sfm.divide_indices(gcd_to_use);
-            sfm
-        })
         .collect();
 
     let mut verified = Vec::new();

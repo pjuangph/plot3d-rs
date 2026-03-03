@@ -33,6 +33,35 @@ pub struct MatchPoint {
     pub k2: usize,
 }
 
+/// Extract `(i_lo, i_hi, j_lo, j_hi, k_lo, k_hi)` bounds from a slice of [`MatchPoint`]s.
+///
+/// When `use_block1` is true the block-1 indices (`i1/j1/k1`) are used;
+/// otherwise the block-2 indices (`i2/j2/k2`).
+pub fn match_point_bounds(
+    points: &[MatchPoint],
+    use_block1: bool,
+) -> (usize, usize, usize, usize, usize, usize) {
+    if use_block1 {
+        (
+            points.iter().map(|p| p.i1).min().unwrap(),
+            points.iter().map(|p| p.i1).max().unwrap(),
+            points.iter().map(|p| p.j1).min().unwrap(),
+            points.iter().map(|p| p.j1).max().unwrap(),
+            points.iter().map(|p| p.k1).min().unwrap(),
+            points.iter().map(|p| p.k1).max().unwrap(),
+        )
+    } else {
+        (
+            points.iter().map(|p| p.i2).min().unwrap(),
+            points.iter().map(|p| p.i2).max().unwrap(),
+            points.iter().map(|p| p.j2).min().unwrap(),
+            points.iter().map(|p| p.j2).max().unwrap(),
+            points.iter().map(|p| p.k2).min().unwrap(),
+            points.iter().map(|p| p.k2).max().unwrap(),
+        )
+    }
+}
+
 /// Compact record describing a face on a particular block.
 ///
 /// # Diagonal Convention
@@ -187,6 +216,22 @@ impl FaceRecord {
     #[inline]
     pub fn k_reversed(&self) -> bool {
         self.kl > self.kh
+    }
+
+    /// Ascending bounds: `([lo_i, lo_j, lo_k], [hi_i, hi_j, hi_k])`.
+    #[inline]
+    pub fn bounds(&self) -> ([usize; 3], [usize; 3]) {
+        (
+            [self.i_lo(), self.j_lo(), self.k_lo()],
+            [self.i_hi(), self.j_hi(), self.k_hi()],
+        )
+    }
+
+    /// Index (0, 1, or 2) of the constant axis, or `None` if no axis is constant.
+    #[inline]
+    pub fn constant_axis(&self) -> Option<usize> {
+        let (lo, hi) = self.bounds();
+        (0..3).find(|&d| lo[d] == hi[d])
     }
 
     /// Returns the sorted (ascending) pair of face dimension spans.

@@ -45,11 +45,13 @@ impl Block {
         }
     }
 
+    /// Total number of grid points (imax * jmax * kmax).
     #[inline]
     pub fn npoints(&self) -> usize {
         self.imax * self.jmax * self.kmax
     }
 
+    /// Convert (i, j, k) indices to a flat 1-D index (i-fastest ordering).
     #[inline]
     pub fn idx(&self, i: usize, j: usize, k: usize) -> usize {
         // i–j–k order (i fastest)
@@ -57,37 +59,44 @@ impl Block {
         (k * self.jmax + j) * self.imax + i
     }
 
+    /// Return (x, y, z) coordinates at grid point (i, j, k).
     #[inline]
     pub fn xyz(&self, i: usize, j: usize, k: usize) -> (Float, Float, Float) {
         let idx = self.idx(i, j, k);
         (self.x[idx], self.y[idx], self.z[idx])
     }
 
+    /// Return the x-coordinate at grid point (i, j, k).
     #[inline]
     pub fn x_at(&self, i: usize, j: usize, k: usize) -> Float {
         self.x[self.idx(i, j, k)]
     }
 
+    /// Return the y-coordinate at grid point (i, j, k).
     #[inline]
     pub fn y_at(&self, i: usize, j: usize, k: usize) -> Float {
         self.y[self.idx(i, j, k)]
     }
 
+    /// Return the z-coordinate at grid point (i, j, k).
     #[inline]
     pub fn z_at(&self, i: usize, j: usize, k: usize) -> Float {
         self.z[self.idx(i, j, k)]
     }
 
+    /// Reference to the full x-coordinate array.
     #[inline]
     pub fn x_slice(&self) -> &[Float] {
         &self.x
     }
 
+    /// Reference to the full y-coordinate array.
     #[inline]
     pub fn y_slice(&self) -> &[Float] {
         &self.y
     }
 
+    /// Reference to the full z-coordinate array.
     #[inline]
     pub fn z_slice(&self) -> &[Float] {
         &self.z

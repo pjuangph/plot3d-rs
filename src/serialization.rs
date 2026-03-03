@@ -40,10 +40,11 @@ use serde_json::{json, Value};
 
 /// Convert a [`FaceRecord`] to JSON with ascending `lo`/`hi` bounds.
 pub fn face_record_to_json(rec: &FaceRecord) -> Value {
+    let (lo, hi) = rec.bounds();
     let mut obj = json!({
         "block_index": rec.block_index,
-        "lo": [rec.il.min(rec.ih), rec.jl.min(rec.jh), rec.kl.min(rec.kh)],
-        "hi": [rec.il.max(rec.ih), rec.jl.max(rec.jh), rec.kl.max(rec.kh)],
+        "lo": lo,
+        "hi": hi,
     });
     if let Some(id) = rec.id {
         obj["id"] = json!(id);
@@ -69,10 +70,11 @@ pub fn face_match_to_json(fm: &FaceMatch) -> Value {
 
 /// Convert a [`FaceRecord`] to JSON with ascending `lb`/`ub` bounds.
 pub fn face_record_to_diagonal_json(rec: &FaceRecord) -> Value {
+    let (lo, hi) = rec.bounds();
     let mut obj = json!({
         "block_index": rec.block_index,
-        "lb": [rec.il.min(rec.ih), rec.jl.min(rec.jh), rec.kl.min(rec.kh)],
-        "ub": [rec.il.max(rec.ih), rec.jl.max(rec.jh), rec.kl.max(rec.kh)],
+        "lb": lo,
+        "ub": hi,
     });
     if let Some(id) = rec.id {
         obj["id"] = json!(id);
@@ -86,19 +88,8 @@ pub fn face_record_to_diagonal_json(rec: &FaceRecord) -> Value {
 /// - bit 0 (`u_reversed`): reverse the first varying axis
 /// - bit 1 (`v_reversed`): reverse the second varying axis
 fn face_record_to_directed_diagonal_json(rec: &FaceRecord, perm_idx: u8) -> Value {
-    let lo = [
-        rec.il.min(rec.ih),
-        rec.jl.min(rec.jh),
-        rec.kl.min(rec.kh),
-    ];
-    let hi = [
-        rec.il.max(rec.ih),
-        rec.jl.max(rec.jh),
-        rec.kl.max(rec.kh),
-    ];
-
-    // Find constant axis (where lo == hi)
-    let const_ax = (0..3usize).find(|&d| lo[d] == hi[d]);
+    let (lo, hi) = rec.bounds();
+    let const_ax = rec.constant_axis();
 
     let (lb, ub) = match const_ax {
         Some(c) => {

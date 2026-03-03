@@ -64,8 +64,8 @@ use crate::{
     block_face_functions::{
         create_face_from_diagonals, get_outer_faces, split_face, Face,
     },
-    face_record::{FaceKey, FaceMatch, FaceRecord, MatchPoint, Orientation, OrientationPlane},
-    verification::{extract_canonical_grid, try_all_permutations},
+    face_record::{match_point_bounds, FaceKey, FaceMatch, FaceRecord, MatchPoint, Orientation},
+    verification::{determine_plane, extract_canonical_grid, try_all_permutations},
     Float,
 };
 
@@ -155,24 +155,10 @@ fn is_edge(points: &[MatchPoint]) -> bool {
     if points.is_empty() {
         return false;
     }
-    let min_i1 = points.iter().map(|p| p.i1).min().unwrap();
-    let max_i1 = points.iter().map(|p| p.i1).max().unwrap();
-    let min_j1 = points.iter().map(|p| p.j1).min().unwrap();
-    let max_j1 = points.iter().map(|p| p.j1).max().unwrap();
-    let min_k1 = points.iter().map(|p| p.k1).min().unwrap();
-    let max_k1 = points.iter().map(|p| p.k1).max().unwrap();
-
-    let mut edge_matches = 0;
-    if min_i1 == max_i1 {
-        edge_matches += 1;
-    }
-    if min_j1 == max_j1 {
-        edge_matches += 1;
-    }
-    if min_k1 == max_k1 {
-        edge_matches += 1;
-    }
-    edge_matches >= 2
+    let (i_lo, i_hi, j_lo, j_hi, k_lo, k_hi) = match_point_bounds(points, true);
+    let const_count =
+        usize::from(i_lo == i_hi) + usize::from(j_lo == j_hi) + usize::from(k_lo == k_hi);
+    const_count >= 2
 }
 
 /// Filter matches so the provided key advances monotonically by 1.
@@ -259,25 +245,7 @@ fn create_split_faces(
     if points.is_empty() {
         return Vec::new();
     }
-    let (i_lo, i_hi, j_lo, j_hi, k_lo, k_hi) = if use_block1 {
-        (
-            points.iter().map(|p| p.i1).min().unwrap(),
-            points.iter().map(|p| p.i1).max().unwrap(),
-            points.iter().map(|p| p.j1).min().unwrap(),
-            points.iter().map(|p| p.j1).max().unwrap(),
-            points.iter().map(|p| p.k1).min().unwrap(),
-            points.iter().map(|p| p.k1).max().unwrap(),
-        )
-    } else {
-        (
-            points.iter().map(|p| p.i2).min().unwrap(),
-            points.iter().map(|p| p.i2).max().unwrap(),
-            points.iter().map(|p| p.j2).min().unwrap(),
-            points.iter().map(|p| p.j2).max().unwrap(),
-            points.iter().map(|p| p.k2).min().unwrap(),
-            points.iter().map(|p| p.k2).max().unwrap(),
-        )
-    };
+    let (i_lo, i_hi, j_lo, j_hi, k_lo, k_hi) = match_point_bounds(points, use_block1);
     let degeneracy =
         usize::from(i_lo == i_hi) + usize::from(j_lo == j_hi) + usize::from(k_lo == k_hi);
     if degeneracy != 1 {
@@ -756,24 +724,14 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
                 find_matching_blocks(&blocks[i], &blocks[j], left, right, DEFAULT_TOL);
             for points in match_points.drain(..) {
                 phase2_changed = true;
+                let (i1lo, i1hi, j1lo, j1hi, k1lo, k1hi) = match_point_bounds(&points, true);
                 let mut face1 = create_face_from_diagonals(
-                    &blocks[i],
-                    points.iter().map(|p| p.i1).min().unwrap(),
-                    points.iter().map(|p| p.j1).min().unwrap(),
-                    points.iter().map(|p| p.k1).min().unwrap(),
-                    points.iter().map(|p| p.i1).max().unwrap(),
-                    points.iter().map(|p| p.j1).max().unwrap(),
-                    points.iter().map(|p| p.k1).max().unwrap(),
+                    &blocks[i], i1lo, j1lo, k1lo, i1hi, j1hi, k1hi,
                 );
                 face1.set_block_index(i);
+                let (i2lo, i2hi, j2lo, j2hi, k2lo, k2hi) = match_point_bounds(&points, false);
                 let mut face2 = create_face_from_diagonals(
-                    &blocks[j],
-                    points.iter().map(|p| p.i2).min().unwrap(),
-                    points.iter().map(|p| p.j2).min().unwrap(),
-                    points.iter().map(|p| p.k2).min().unwrap(),
-                    points.iter().map(|p| p.i2).max().unwrap(),
-                    points.iter().map(|p| p.j2).max().unwrap(),
-                    points.iter().map(|p| p.k2).max().unwrap(),
+                    &blocks[j], i2lo, j2lo, k2lo, i2hi, j2hi, k2hi,
                 );
                 face2.set_block_index(j);
                 matches_to_remove.insert(face1.index_key());
@@ -1127,22 +1085,7 @@ pub fn align_face_orientations(
         // Try all 8 permutation matrices to find the matching orientation
         if let Some(perm_idx) = try_all_permutations(&pts_a, nu_a, nv_a, &pts_b, nu_b, nv_b, tol) {
             let mut fm_out = fm.clone();
-            // Determine plane type from constant axes
-            let const_a = (0..3usize).find(|&d| {
-                let lo = [b1.il.min(b1.ih), b1.jl.min(b1.jh), b1.kl.min(b1.kh)];
-                let hi = [b1.il.max(b1.ih), b1.jl.max(b1.jh), b1.kl.max(b1.kh)];
-                lo[d] == hi[d]
-            });
-            let const_b = (0..3usize).find(|&d| {
-                let lo = [b2.il.min(b2.ih), b2.jl.min(b2.jh), b2.kl.min(b2.kh)];
-                let hi = [b2.il.max(b2.ih), b2.jl.max(b2.jh), b2.kl.max(b2.kh)];
-                lo[d] == hi[d]
-            });
-            let plane = if const_a == const_b {
-                OrientationPlane::InPlane
-            } else {
-                OrientationPlane::CrossPlane
-            };
+            let plane = determine_plane(b1, b2);
             fm_out.orientation = Some(Orientation {
                 permutation_index: perm_idx,
                 plane,
