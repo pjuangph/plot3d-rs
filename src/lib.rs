@@ -108,7 +108,15 @@ pub use rotational_periodicity::{
     faces_support_direction, linear_real_transform, periodicity_check_with_points,
     rotate_block_with_matrix, rotated_periodicity, rotational_periodicity,
 };
-pub use verification::{verify_connectivity, verify_periodicity};
+pub mod serialization;
+pub use serialization::{
+    face_match_to_json, face_match_to_diagonal_json, face_record_to_json,
+    face_record_to_diagonal_json, permutation_matrices_json,
+};
+pub use verification::{
+    apply_permutation, determine_plane, extract_canonical_grid, try_all_permutations,
+    verify_connectivity, verify_match, verify_partial_match, verify_periodicity,
+};
 pub use split_block::{split_blocks, SplitDirection};
 pub use translational_periodicity::translational_periodicity;
 pub use utils::{apply_rotation, compute_min_gcd, Endian};

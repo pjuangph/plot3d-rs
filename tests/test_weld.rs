@@ -12,8 +12,11 @@ use std::path::Path;
 use serde_json::Value;
 
 use plot3d::{
-    connectivity_fast, read_plot3d_ascii, translational_periodicity, verify_connectivity,
-    FaceMatch, FaceRecord,
+    apply_permutation, connectivity_fast, determine_plane, extract_canonical_grid,
+    face_match_to_diagonal_json, face_match_to_json, face_record_to_diagonal_json,
+    face_record_to_json, permutation_matrices_json, read_plot3d_ascii,
+    translational_periodicity, try_all_permutations, verify_connectivity, verify_match,
+    verify_partial_match, FaceMatch, FaceRecord,
 };
 
 const MESH_PATH: &str = "/Volumes/T7/WELD/weld_ascii.xyz";
@@ -225,6 +228,82 @@ fn weld_connectivity_and_periodicity() {
     println!("  Remaining on z-min: {on_zmin}, z-max: {on_zmax}");
     assert_eq!(on_zmin, 0, "Found {on_zmin} unpaired faces on z-min boundary");
     assert_eq!(on_zmax, 0, "Found {on_zmax} unpaired faces on z-max boundary");
+
+    // ── Step 8: Test new helper functions on a sample verified match ──
+    println!("Testing extract_canonical_grid + apply_permutation + verify_match...");
+    if !verified.is_empty() {
+        let sample = &verified[0];
+        let (pts_a, nu_a, nv_a) =
+            extract_canonical_grid(&blocks[sample.block1.block_index], &sample.block1).unwrap();
+        let (pts_b, nu_b, nv_b) =
+            extract_canonical_grid(&blocks[sample.block2.block_index], &sample.block2).unwrap();
+
+        let perm_idx = try_all_permutations(&pts_a, nu_a, nv_a, &pts_b, nu_b, nv_b, 1e-6);
+        assert!(
+            perm_idx.is_some(),
+            "Should find a valid permutation for a verified match"
+        );
+        let perm = perm_idx.unwrap();
+
+        let (permuted, out_nu, out_nv) = apply_permutation(&pts_b, nu_b, nv_b, perm);
+        assert_eq!((out_nu, out_nv), (nu_a, nv_a), "Shape must match after permutation");
+        assert!(
+            verify_match(&pts_a, &permuted, 1e-6),
+            "Permuted grid should match"
+        );
+        println!(
+            "  Sample: block {}<->{}, perm={} OK",
+            sample.block1.block_index, sample.block2.block_index, perm
+        );
+
+        // Test verify_partial_match (should also work for full matches)
+        let (count, total) = verify_partial_match(&pts_a, &permuted, 1e-6);
+        assert_eq!(count, total, "Full match: all points should match");
+        println!("  verify_partial_match: {}/{} OK", count, total);
+
+        // Test determine_plane
+        let plane = determine_plane(&sample.block1, &sample.block2);
+        println!("  determine_plane: {:?}", plane);
+    }
+
+    // ── Step 9: Test JSON serialization functions ──
+    println!("Testing JSON serialization...");
+    if !verified.is_empty() {
+        let sample = &verified[0];
+
+        // Default format (lo/hi)
+        let json_rec = face_record_to_json(&sample.block1);
+        assert!(json_rec["block_index"].is_number());
+        assert!(json_rec["lo"].is_array());
+        assert!(json_rec["hi"].is_array());
+
+        let json_match = face_match_to_json(sample);
+        assert!(json_match["block1"].is_object());
+        assert!(json_match["block2"].is_object());
+        assert!(json_match["permutation_index"].is_number());
+
+        // Diagonal format (lb/ub)
+        let json_diag_rec = face_record_to_diagonal_json(&sample.block1);
+        assert!(json_diag_rec["block_index"].is_number());
+        assert!(json_diag_rec["lb"].is_array());
+        assert!(json_diag_rec["ub"].is_array());
+
+        let json_diag_match = face_match_to_diagonal_json(sample);
+        assert!(json_diag_match["block1"].is_object());
+        assert!(json_diag_match["block2"].is_object());
+        assert!(json_diag_match["permutation_index"].is_number());
+
+        // Permutation matrices
+        let perm_mats = permutation_matrices_json();
+        assert_eq!(perm_mats.len(), 8, "Should have 8 permutation matrices");
+
+        println!("  lo/hi JSON: {}", serde_json::to_string(&json_match).unwrap());
+        println!(
+            "  lb/ub JSON: {}",
+            serde_json::to_string(&json_diag_match).unwrap()
+        );
+        println!("  All serialization checks passed");
+    }
 
     // ── Summary ──
     println!("\n=== WELD Test Summary ===");

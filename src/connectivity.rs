@@ -8,18 +8,14 @@
 //!
 //! The [`connectivity_fast`] function detects face matches in three phases:
 //!
-//! **Phase 1 -- Full-face corner matching (O(1) per pair)**
+//! **Phase 1 -- Full-face matching using canonical grids + permutation matrices**
 //!
-//! For every pair of outer faces, the four corner vertices are compared using
-//! all 8 valid orientation permutations (4 flip combinations x 2 swap).
-//! When all four corners match within tolerance, a [`FaceMatch`] is recorded
-//! immediately. This is the fast path for 1:1 face matches.
-//!
-//! During this phase the algorithm also records the winning permutation
-//! index and whether the match is in-plane or cross-plane, storing them in
-//! the [`FaceMatch::orientation`] field as an [`Orientation`] value. This
-//! lets downstream code (e.g. solver coupling) reconstruct the exact
-//! node-to-node mapping without re-sampling block coordinates.
+//! For every pair of outer faces, corner comparison is used as a quick
+//! pre-filter. Candidate matches are then verified by extracting both
+//! faces as canonical 2D grids (ascending index order) and trying all 8
+//! [`PERMUTATION_MATRICES`] on face B. When `Face_B * permutation == Face_A`
+//! within tolerance, the match is confirmed and the winning `permutation_index`
+//! is stored in [`FaceMatch::orientation`].
 //!
 //! **Phase 2 -- Partial / split-face node-by-node matching**
 //!
@@ -68,8 +64,8 @@ use crate::{
     block_face_functions::{
         create_face_from_diagonals, get_outer_faces, split_face, Face,
     },
-    face_record::{FaceKey, FaceMatch, FaceRecord, MatchPoint, Orientation},
-    verification::{extract_face_points, try_all_permutations},
+    face_record::{FaceKey, FaceMatch, FaceRecord, MatchPoint, Orientation, OrientationPlane},
+    verification::{extract_canonical_grid, try_all_permutations},
     Float,
 };
 
@@ -342,10 +338,6 @@ pub fn get_face_intersection(
         return (Vec::new(), Vec::new(), Vec::new());
     }
 
-    // NOTE: dims consistency check removed — is_edge + filter_block_increasing
-    // already reject degenerate matches; the strict dims check was also
-    // rejecting legitimate partial-face matches on GCD-reduced grids.
-
     let split_faces1 = create_split_faces(face1, block1, &matches, true);
     let split_faces2 = create_split_faces(face2, block2, &matches, false);
     (matches, split_faces1, split_faces2)
@@ -451,15 +443,12 @@ fn build_match_points_from_orientation(
 // Phase 1: Fast full-face matching using corner comparison
 // ---------------------------------------------------------------------------
 
-/// Phase 1: Fast full-face matching using corner comparison only.
+/// Phase 1: Fast full-face matching using canonical grid + permutation matrices.
 ///
-/// For each candidate block pair, compares all face combinations using
-/// only the 4 corner vertices.  When all 4 corners match (within tol),
-/// the faces are a full match and no splitting is needed.
-///
-/// An interior-point verification step rejects false positives where
-/// corners coincidentally match (e.g. near the axis of rotation) but
-/// the face interiors are at different spatial locations.
+/// For each candidate block pair, uses corner comparison as a quick pre-filter,
+/// then verifies the match using `extract_canonical_grid` + `try_all_permutations`.
+/// Face A is the first face, Face B is multiplied by the permutation matrix,
+/// and all points are compared within tolerance.
 ///
 /// Returns `(matches, consumed_face_keys)`.
 fn find_full_face_matches(
@@ -469,6 +458,9 @@ fn find_full_face_matches(
     tol: Float,
 ) -> (Vec<FaceMatch>, HashSet<FaceKey>) {
     use crate::block_face_functions::full_face_match;
+    use crate::verification::{
+        determine_plane, extract_canonical_grid, try_all_permutations,
+    };
 
     let mut face_matches = Vec::new();
     let mut consumed: HashSet<FaceKey> = HashSet::new();
@@ -482,20 +474,45 @@ fn find_full_face_matches(
                 if consumed.contains(&face_j.index_key()) {
                     continue;
                 }
-                if let Some(orientation) = full_face_match(face_i, face_j, tol) {
-                    let points = build_match_points_from_orientation(face_i, face_j, &orientation);
+                // Quick corner pre-filter
+                if full_face_match(face_i, face_j, tol).is_none() {
+                    continue;
+                }
 
-                    // Verify interior points to reject false positives
-                    if !verify_match_interior(&blocks[i], &blocks[j], &points, tol) {
-                        continue;
-                    }
+                // Build FaceRecords for canonical grid extraction
+                let rec_a = FaceRecord::from_face(face_i);
+                let rec_b = FaceRecord::from_face(face_j);
+
+                // Extract canonical grids: Face A and Face B
+                let (pts_a, nu_a, nv_a) = match extract_canonical_grid(&blocks[i], &rec_a) {
+                    Some(g) => g,
+                    None => continue,
+                };
+                let (pts_b, nu_b, nv_b) = match extract_canonical_grid(&blocks[j], &rec_b) {
+                    Some(g) => g,
+                    None => continue,
+                };
+
+                // Face B * permutation matrix, then compare with Face A
+                if let Some(perm_idx) =
+                    try_all_permutations(&pts_a, nu_a, nv_a, &pts_b, nu_b, nv_b, tol)
+                {
+                    let plane = determine_plane(&rec_a, &rec_b);
+                    let orientation = Orientation {
+                        permutation_index: perm_idx,
+                        plane,
+                    };
+
+                    // Build match points from the verified orientation
+                    let points =
+                        build_match_points_from_orientation(face_i, face_j, &orientation);
 
                     consumed.insert(face_i.index_key());
                     consumed.insert(face_j.index_key());
 
                     face_matches.push(FaceMatch {
-                        block1: FaceRecord::from_face(face_i),
-                        block2: FaceRecord::from_face(face_j),
+                        block1: rec_a,
+                        block2: rec_b,
                         points,
                         orientation: Some(orientation),
                     });
@@ -506,38 +523,6 @@ fn find_full_face_matches(
     }
 
     (face_matches, consumed)
-}
-
-/// Verify a face match by checking ALL interior node coordinates.
-///
-/// After corner-based matching finds a potential full-face match,
-/// this function checks every interior node pair to confirm they are
-/// spatially coincident. Returns `false` if any point exceeds the
-/// tolerance, indicating a false positive.
-///
-/// At GCD-reduced resolution faces are small (typically < 1000 nodes),
-/// so exhaustive checking is fast and avoids false positives that
-/// sparse sampling could miss.
-fn verify_match_interior(
-    block1: &Block,
-    block2: &Block,
-    points: &[MatchPoint],
-    tol: Float,
-) -> bool {
-    if points.len() < 2 {
-        return true;
-    }
-
-    // Check all matched points (including corners for small faces like 2×2)
-    for p in points {
-        let (x1, y1, z1) = block1.xyz(p.i1, p.j1, p.k1);
-        let (x2, y2, z2) = block2.xyz(p.i2, p.j2, p.k2);
-        let d = ((x1 - x2).powi(2) + (y1 - y2).powi(2) + (z1 - z2).powi(2)).sqrt();
-        if d > tol {
-            return false;
-        }
-    }
-    true
 }
 
 // ---------------------------------------------------------------------------
@@ -1081,12 +1066,11 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
     (matches, formatted)
 }
 
-/// Align face2's diagonal so directed I→J→K traversal matches face1 point-by-point.
+/// Find the correct orientation for each face match using permutation matrices.
 ///
-/// Uses the 8-permutation approach (4 direct + 4 transposed) to find the
-/// correct orientation of face2 that makes every point match face1's
-/// directed traversal. This handles cross-axis matches (e.g., face1 is
-/// I-const, face2 is K-const) through the transposed permutations.
+/// Extracts canonical grids for both faces and tries all 8 permutation
+/// matrices on face B. Stores the winning `permutation_index` and plane
+/// type in [`FaceMatch::orientation`].
 ///
 /// # Arguments
 /// * `blocks` - Block array providing geometry.
@@ -1101,7 +1085,6 @@ pub fn align_face_orientations(
     face_matches: &[FaceMatch],
     tol: Float,
 ) -> (Vec<FaceMatch>, Vec<FaceMatch>) {
-    let tol2 = tol * tol;
     let mut aligned = Vec::new();
     let mut rejected = Vec::new();
 
@@ -1128,33 +1111,46 @@ pub fn align_face_orientations(
         let block1 = &blocks[b1.block_index];
         let block2 = &blocks[b2.block_index];
 
-        // Extract face1 points in directed traversal order
-        let pts1 = extract_face_points(block1, b1);
+        // Extract canonical 2D grids for both faces
+        let grid_a = match extract_canonical_grid(block1, b1) {
+            Some(g) => g,
+            None => { rejected.push(fm.clone()); continue; }
+        };
+        let grid_b = match extract_canonical_grid(block2, b2) {
+            Some(g) => g,
+            None => { rejected.push(fm.clone()); continue; }
+        };
 
-        // Check current orientation first
-        let pts2 = extract_face_points(block2, b2);
-        if pts1.len() == pts2.len()
-            && pts1.iter().zip(pts2.iter()).all(|(a, b_pt)| {
-                (a.0 - b_pt.0).powi(2) + (a.1 - b_pt.1).powi(2) + (a.2 - b_pt.2).powi(2) < tol2
-            })
-        {
-            aligned.push(fm.clone());
-            continue;
-        }
+        let (pts_a, nu_a, nv_a) = grid_a;
+        let (pts_b, nu_b, nv_b) = grid_b;
 
-        // Try all 8 permutations (4 direct + 4 transposed)
-        if let Some((perm, _perm_idx)) = try_all_permutations(&pts1, block2, b2, tol) {
+        // Try all 8 permutation matrices to find the matching orientation
+        if let Some(perm_idx) = try_all_permutations(&pts_a, nu_a, nv_a, &pts_b, nu_b, nv_b, tol) {
             let mut fm_out = fm.clone();
-            fm_out.block2.il = perm.il;
-            fm_out.block2.jl = perm.jl;
-            fm_out.block2.kl = perm.kl;
-            fm_out.block2.ih = perm.ih;
-            fm_out.block2.jh = perm.jh;
-            fm_out.block2.kh = perm.kh;
+            // Determine plane type from constant axes
+            let const_a = (0..3usize).find(|&d| {
+                let lo = [b1.il.min(b1.ih), b1.jl.min(b1.jh), b1.kl.min(b1.kh)];
+                let hi = [b1.il.max(b1.ih), b1.jl.max(b1.jh), b1.kl.max(b1.kh)];
+                lo[d] == hi[d]
+            });
+            let const_b = (0..3usize).find(|&d| {
+                let lo = [b2.il.min(b2.ih), b2.jl.min(b2.jh), b2.kl.min(b2.kh)];
+                let hi = [b2.il.max(b2.ih), b2.jl.max(b2.jh), b2.kl.max(b2.kh)];
+                lo[d] == hi[d]
+            });
+            let plane = if const_a == const_b {
+                OrientationPlane::InPlane
+            } else {
+                OrientationPlane::CrossPlane
+            };
+            fm_out.orientation = Some(Orientation {
+                permutation_index: perm_idx,
+                plane,
+            });
             aligned.push(fm_out);
         } else {
             eprintln!(
-                "  align: REJECTED block {}↔{} — no orientation matches directed traversal",
+                "  align: REJECTED block {}↔{} — no permutation matches",
                 b1.block_index, b2.block_index
             );
             rejected.push(fm.clone());
@@ -1165,11 +1161,7 @@ pub fn align_face_orientations(
     (aligned, rejected)
 }
 
-/// Derive correct lb/ub for both block1 and block2 from the full MatchPoint set.
-///
-/// Matches Python's iloc-style derivation (connectivity.py lines 747-750):
-/// - block1 lb = first MatchPoint's (i1,j1,k1), ub = last MatchPoint's (i1,j1,k1)
-/// - block2 lb = first MatchPoint's (i2,j2,k2), ub = last MatchPoint's (i2,j2,k2)
+/// Derive lb/ub for both faces from the first/last MatchPoint.
 ///
 /// The traversal order of MatchPoints encodes the orientation relationship
 /// between the two faces, which is lost if we use min/max or spatial proximity.
@@ -1213,17 +1205,11 @@ fn derive_diagonal_from_match_points(
     Some((b1, b2))
 }
 
-/// Validate and standardize face-match records using the full MatchPoint set
-/// to derive correct diagonal corners with proper axis mapping.
+/// Validate and standardize face-match records.
 ///
-/// This is the Rust equivalent of Python's `face_matches_to_dict`.
-///
-/// For matches that carry `MatchPoint` data, uses spatial proximity (XYZ
-/// distance) to find which of block2's face corners is closest to block1's
-/// lower and upper corners — exactly matching the Python algorithm.
-///
-/// For matches without `MatchPoint` data (self-matches), a spatial proximity
-/// search over block2's face corners is used as a fallback.
+/// For matches with MatchPoint data, derives diagonal corners from the
+/// first/last traversal points. For self-matches (no MatchPoint data),
+/// uses spatial proximity as a fallback.
 ///
 /// # Arguments
 /// * `blocks` - Block array providing geometry (full resolution).
