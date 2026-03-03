@@ -1,6 +1,6 @@
 """Generate PowerPoint presentation: Unverified Connectivity Root Cause Analysis.
 
-Streamlined 10-slide deck:
+Streamlined 12-slide deck:
   1. Title
   2. The Problem (lb/ub doesn't encode correct point order)
   3. 2D: How lb/ub works (text)
@@ -8,9 +8,11 @@ Streamlined 10-slide deck:
   5. From 2D to 3D diagram
   6. The Mismatch (combined traversal + mismatch diagram)
   7. The Fix (natural vs swapped diagram)
-  8. The Solution (orientation flags - text)
-  9. Python Reference (NASA Plot3D_utilities + plot3d-rs)
-  10. Summary
+  8. The 8 Permutation Matrices (table)
+  9. How Permutation Matrices Work (text)
+  10. JSON Output Formats (--diagonal flag)
+  11. Python & Rust Reference
+  12. Summary
 
 Run: /opt/homebrew/Caskroom/miniconda/base/envs/dev/bin/python create_presentation.py
 """
@@ -510,7 +512,7 @@ def make_natural_vs_swapped_diagram():
 # ══════════════════════════════════════════════════════════════════════
 # BUILD SLIDES (9 total)
 # ══════════════════════════════════════════════════════════════════════
-print("Generating presentation (10 slides)...")
+print("Generating presentation (12 slides)...")
 
 # ── Slide 1: Title ──
 add_title_slide(
@@ -585,46 +587,88 @@ add_image_slide(
     "swapped=true, v_reversed=true makes Face B's point sequence match Face A exactly."
 )
 
-# ── Slide 8: The Solution — Orientation Flags ──
-add_content_slide(
-    "The Solution: Output the Orientation Flags",
+# ── Slide 8: The 8 Permutation Matrices ──
+add_table_slide(
+    "The Solution: 8 Permutation Matrices",
+    ["Index", "Bits", "Matrix P", "Effect", "Plane"],
     [
-        "Rust's plot3d-rs already computes the correct orientation for every face match:",
-        ("Orientation { swapped: bool, u_reversed: bool, v_reversed: bool }", 1, ACCENT, 18),
-        ("8 permutations = 2 (swap) x 2 (u direction) x 2 (v direction)", 1, LIGHT_GRAY, 16),
+        ["0", "000", "[[ 1, 0],[ 0, 1]]", "identity", "in-plane"],
+        ["1", "001", "[[-1, 0],[ 0, 1]]", "flip u", "in-plane"],
+        ["2", "010", "[[ 1, 0],[ 0,-1]]", "flip v", "in-plane"],
+        ["3", "011", "[[-1, 0],[ 0,-1]]", "flip u + v", "in-plane"],
+        ["4", "100", "[[ 0, 1],[ 1, 0]]", "transpose", "cross-plane"],
+        ["5", "101", "[[ 0,-1],[ 1, 0]]", "transpose + flip u", "cross-plane"],
+        ["6", "110", "[[ 0, 1],[-1, 0]]", "transpose + flip v", "cross-plane"],
+        ["7", "111", "[[ 0,-1],[-1, 0]]", "transpose + flip u + v", "cross-plane"],
+    ],
+    col_widths=[1.0, 1.0, 3.5, 3.0, 2.0],
+    footer_text="Bit encoding: permutation_index = u_reversed | (v_reversed << 1) | (swapped << 2)",
+)
+
+# ── Slide 9: How Permutation Matrices Work ──
+add_content_slide(
+    "How Permutation Matrices Work",
+    [
+        "Both faces are extracted as canonical 2D grids (ascending index order)",
+        ("grid_a = extract_canonical_grid(block_a, face_a)  # shape (nu, nv)", 1, ACCENT, 16),
+        ("grid_b = extract_canonical_grid(block_b, face_b)  # shape (nu, nv)", 1, ACCENT, 16),
         "",
-        "The bug: orientation was silently dropped during JSON serialization",
-        ("face_match_to_json() only output block1 and block2 — not orientation", 1, RED, 16),
+        "The permutation matrix P transforms face B's grid to match face A:",
+        ("grid_b_rotated = apply_permutation(grid_b, permutation_index)", 1, GREEN, 16),
+        ("Verification: max |grid_a - grid_b_rotated| < tolerance", 1, GREEN, 16),
         "",
-        "The fix: include orientation in the JSON output",
-        ("One change in connectivity_finder/src/main.rs", 1, GREEN, 16),
-        ("if let Some(ref orient) = fm.orientation { v[\"orientation\"] = ... }", 1, GREEN, 15),
+        "Bit operations for efficient application:",
+        ("bit 0 (u_reversed): grid = grid[::-1, :]  — reverse first axis", 1, LIGHT_GRAY, 15),
+        ("bit 1 (v_reversed): grid = grid[:, ::-1]  — reverse second axis", 1, LIGHT_GRAY, 15),
+        ("bit 2 (swapped):    grid = grid.T          — transpose axes", 1, LIGHT_GRAY, 15),
         "",
-        ("With orientation flags, all 10,469 faces now pass verification", 0, GREEN, 22),
+        ("Indices 0-3 (in-plane): same constant axis, direction flips only", 0, GREEN, 18),
+        ("Indices 4-7 (cross-plane): different constant axes, loop order changes", 0, YELLOW, 18),
     ],
 )
 
-# ── Slide 9: Python Reference — Plot3D_utilities ──
+# ── Slide 10: JSON Output Formats ──
 add_content_slide(
-    "Python Reference: NASA Plot3D_utilities",
+    "JSON Output: Canonical vs Diagonal (--diagonal flag)",
     [
-        "The Python version already handles orientation correctly:",
-        ("github.com/nasa/Plot3D_utilities", 1, BLUE, 18),
+        "Canonical format (default: --diagonal off):",
+        ("Face bounds use ascending lo/hi keys", 1, ACCENT, 16),
+        ("permutation_index (0-7) on every match — orientation lives in the index", 1, ACCENT, 16),
+        ("{ \"lo\": [0,0,0], \"hi\": [0,101,33], \"permutation_index\": 3 }", 1, GREEN, 15),
         "",
-        "connectivity.py: _compute_orientation() maps face1 axes to face2 axes",
-        ("orientation = [d1_maps_to, d2_maps_to, d3_maps_to]  (1-indexed: 1=I, 2=J, 3=K)", 1, ACCENT, 15),
+        "Diagonal format (--diagonal on):",
+        ("In-plane (perm 0-3): lb/ub encodes traversal direction, permutation_index: -1", 1, YELLOW, 16),
+        ("  { \"lb\": [0,101,33], \"ub\": [0,0,0], \"permutation_index\": -1 }", 1, YELLOW, 15),
+        ("Cross-plane (perm 4-7): ascending lb/ub + actual permutation_index", 1, YELLOW, 16),
+        ("  { \"lb\": [0,0,0], \"ub\": [0,101,33], \"permutation_index\": 5 }", 1, YELLOW, 15),
         "",
-        "verify.py: _generate_permutations() tests all 8 combos (4 direct + 4 transposed)",
-        ("Same 8-permutation approach as Rust — direction is in lb/ub, swap is in orientation", 1, LIGHT_GRAY, 15),
+        "All Python scripts handle both formats transparently via _get_bounds()",
+        ("Toggle in config.yaml: output.diagonal: true/false", 1, LIGHT_GRAY, 16),
+    ],
+)
+
+# ── Slide 11: Python & Rust Reference ──
+add_content_slide(
+    "Python & Rust Reference",
+    [
+        "Python (NASA Plot3D_utilities):",
+        ("connectivity.py: _compute_orientation() maps face1 axes to face2 axes", 1, ACCENT, 16),
+        ("verify.py: _generate_permutations() tests all 8 combos (4 direct + 4 transposed)", 1, ACCENT, 16),
+        ("github.com/nasa/Plot3D_utilities", 1, BLUE, 16),
         "",
-        "Rust (plot3d-rs) mirrors the Python logic but stores orientation differently:",
+        "Rust (plot3d-rs):",
+        ("PERMUTATION_MATRICES[8]: pre-computed [[i8; 2]; 2] constants", 1, ACCENT, 16),
+        ("align_face_orientations(): classifies in-plane vs cross-plane", 1, ACCENT, 16),
+        ("verify_connectivity(): applies permutation matrix, compares point-by-point", 1, ACCENT, 16),
+        ("github.com/pjuangph/plot3d-rs", 1, BLUE, 16),
+        "",
+        "Both use the same 8-permutation approach:",
         ("Python: orientation vector [2, 1, 3] = axis mapping", 1, YELLOW, 15),
-        ("Rust: Orientation { swapped, u_reversed, v_reversed } = flags", 1, YELLOW, 15),
-        ("github.com/pjuangph/plot3d-rs", 1, BLUE, 18),
+        ("Rust: Orientation { permutation_index: u8, plane: OrientationPlane }", 1, YELLOW, 15),
     ],
 )
 
-# ── Slide 10: Summary ──
+# ── Slide 12: Summary ──
 add_content_slide(
     "Summary",
     [
@@ -634,11 +678,14 @@ add_content_slide(
         "Root cause: lb/ub encodes direction but not loop nesting order",
         ("2D: 4 diagonals — all encodable by lb/ub", 1, GREEN, 16),
         ("3D cross-plane: 8 permutations — lb/ub only encodes 4", 1, RED, 16),
-        ("The 'swapped' flag covers the other 4", 1, YELLOW, 16),
+        ("Permutation matrices encode all 8 orientations cleanly", 1, GREEN, 16),
         "",
-        "The fix: output the Orientation struct already computed by plot3d-rs",
-        ("Python ref: github.com/nasa/Plot3D_utilities", 1, BLUE, 16),
-        ("Rust ref: github.com/pjuangph/plot3d-rs", 1, BLUE, 16),
+        "Solution: permutation_index (0-7) stored with every face match",
+        ("Canonical format: lo/hi + permutation_index on all matches", 1, GREEN, 16),
+        ("Diagonal format: lb/ub directional for in-plane (perm=-1), index for cross-plane", 1, YELLOW, 16),
+        ("--diagonal flag toggles between formats", 1, LIGHT_GRAY, 16),
+        "",
+        ("With permutation matrices, all face matches now verify correctly", 0, GREEN, 22),
     ],
 )
 
