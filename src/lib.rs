@@ -108,7 +108,13 @@ pub use rotational_periodicity::{
     faces_support_direction, linear_real_transform, periodicity_check_with_points,
     rotate_block_with_matrix, rotated_periodicity, rotational_periodicity,
 };
+pub mod normals;
 pub mod serialization;
+pub use normals::{
+    compute_all_normals, compute_permutation_matrix, export_normals_json, import_normals_json,
+    index_space_normal, index_space_normal_from_bounds, validate_corner_pairing,
+    validate_permutation_matrix, FaceNormalRecord, NormalsJson,
+};
 pub use serialization::{
     face_match_to_json, face_match_to_diagonal_json, face_record_to_json,
     face_record_to_diagonal_json, permutation_matrices_json,
