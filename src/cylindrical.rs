@@ -6,6 +6,12 @@
 
 use crate::{block::Block, block_face_functions::Face, face_record::FaceRecord, Float};
 
+/// Minimum meaningful angular range; below this the sector is degenerate.
+const MIN_THETA_RANGE: Float = 1e-10;
+
+/// Floor for the absolute angular tolerance used in bounding-face detection.
+const MIN_THETA_TOL: Float = 1e-8;
+
 /// Compute angular position (theta) about the given rotation axis.
 ///
 /// Conventions match the Python `_to_theta()`:
@@ -76,11 +82,11 @@ pub fn find_angular_bounding_faces(
     let (theta_min, theta_max) = global_theta_extreme(blocks, rotation_axis);
     let theta_range = theta_max - theta_min;
 
-    if !(1e-10..=crate::PI).contains(&theta_range) {
+    if !(MIN_THETA_RANGE..=crate::PI).contains(&theta_range) {
         return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     }
 
-    let tol_abs: Float = (1e-8 as Float).max(tol_rel * theta_range);
+    let tol_abs: Float = (MIN_THETA_TOL as Float).max(tol_rel * theta_range);
     let mut lower = Vec::new();
     let mut upper = Vec::new();
 

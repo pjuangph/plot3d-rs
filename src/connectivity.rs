@@ -8,14 +8,16 @@
 //!
 //! The [`connectivity_fast`] function detects face matches in three phases:
 //!
-//! **Phase 1 — Full-face corner matching (O(1) per pair)**
+//! **Phase 1 -- Full-face matching using canonical grids + permutation matrices**
 //!
-//! For every pair of outer faces, the four corner vertices are compared using
-//! all 8 valid orientation permutations (4 flip combinations × 2 swap).
-//! When all four corners match within tolerance, a [`FaceMatch`] is recorded
-//! immediately. This is the fast path for 1:1 face matches.
+//! For every pair of outer faces, corner comparison is used as a quick
+//! pre-filter. Candidate matches are then verified by extracting both
+//! faces as canonical 2D grids (ascending index order) and trying all 8
+//! [`PERMUTATION_MATRICES`] on face B. When `Face_B * permutation == Face_A`
+//! within tolerance, the match is confirmed and the winning `permutation_index`
+//! is stored in [`FaceMatch::orientation`].
 //!
-//! **Phase 2 — Partial / split-face node-by-node matching**
+//! **Phase 2 -- Partial / split-face node-by-node matching**
 //!
 //! Remaining unmatched faces are tested for partial overlap via
 //! [`get_face_intersection`]. When a partial match is found, both faces are
@@ -24,7 +26,7 @@
 //! pool for subsequent iterations. This loop continues until no new matches
 //! are discovered during a full pass.
 //!
-//! **Phase 3 — Fresh-face validation with all-node AABB pre-checks**
+//! **Phase 3 -- Fresh-face validation with all-node AABB pre-checks**
 //!
 //! After Phase 2 converges, any remaining unmatched faces may still have
 //! partial overlaps with faces that were *already matched* in Phases 1 or 2.
@@ -33,6 +35,22 @@
 //! overlap before calling `get_face_intersection`. This catches edge cases
 //! where two corners of a sub-face lie outside the bounding diagonal of
 //! a candidate face, which the 2-corner AABB would miss.
+//!
+//! # Post-processing
+//!
+//! After matching, [`align_face_orientations`] can optionally correct the
+//! diagonal corners of `block2` in each [`FaceMatch`] so that they encode
+//! the detected orientation. This embeds the permutation directly into the
+//! `il/jl/kl` and `ih/jh/kh` fields, which is the format expected by
+//! solvers that use the GridPro/GlennHT diagonal convention.
+//!
+//! # Tolerance
+//!
+//! The default spatial tolerance used for vertex comparisons is
+//! [`DEFAULT_TOL`] (1e-6). Both [`connectivity`] and [`connectivity_fast`]
+//! accept an explicit tolerance parameter to override this default.
+//!
+//! # Verification
 //!
 //! Use [`verify_connectivity`] after running connectivity to confirm that
 //! all matched face pairs have coincident nodes.
@@ -44,9 +62,10 @@ use indicatif::{ProgressBar, ProgressStyle};
 use crate::{
     block::Block,
     block_face_functions::{
-        create_face_from_diagonals, get_outer_faces, reduce_blocks, split_face, Face,
+        create_face_from_diagonals, get_outer_faces, split_face, Face,
     },
-    face_record::{FaceKey, FaceMatch, FaceRecord, MatchPoint, Orientation},
+    face_record::{match_point_bounds, FaceKey, FaceMatch, FaceRecord, MatchPoint, Orientation},
+    verification::{determine_plane, extract_canonical_grid, try_all_permutations},
     Float,
 };
 
@@ -136,24 +155,10 @@ fn is_edge(points: &[MatchPoint]) -> bool {
     if points.is_empty() {
         return false;
     }
-    let min_i1 = points.iter().map(|p| p.i1).min().unwrap();
-    let max_i1 = points.iter().map(|p| p.i1).max().unwrap();
-    let min_j1 = points.iter().map(|p| p.j1).min().unwrap();
-    let max_j1 = points.iter().map(|p| p.j1).max().unwrap();
-    let min_k1 = points.iter().map(|p| p.k1).min().unwrap();
-    let max_k1 = points.iter().map(|p| p.k1).max().unwrap();
-
-    let mut edge_matches = 0;
-    if min_i1 == max_i1 {
-        edge_matches += 1;
-    }
-    if min_j1 == max_j1 {
-        edge_matches += 1;
-    }
-    if min_k1 == max_k1 {
-        edge_matches += 1;
-    }
-    edge_matches >= 2
+    let (i_lo, i_hi, j_lo, j_hi, k_lo, k_hi) = match_point_bounds(points, true);
+    let const_count =
+        usize::from(i_lo == i_hi) + usize::from(j_lo == j_hi) + usize::from(k_lo == k_hi);
+    const_count >= 2
 }
 
 /// Filter matches so the provided key advances monotonically by 1.
@@ -240,25 +245,7 @@ fn create_split_faces(
     if points.is_empty() {
         return Vec::new();
     }
-    let (i_lo, i_hi, j_lo, j_hi, k_lo, k_hi) = if use_block1 {
-        (
-            points.iter().map(|p| p.i1).min().unwrap(),
-            points.iter().map(|p| p.i1).max().unwrap(),
-            points.iter().map(|p| p.j1).min().unwrap(),
-            points.iter().map(|p| p.j1).max().unwrap(),
-            points.iter().map(|p| p.k1).min().unwrap(),
-            points.iter().map(|p| p.k1).max().unwrap(),
-        )
-    } else {
-        (
-            points.iter().map(|p| p.i2).min().unwrap(),
-            points.iter().map(|p| p.i2).max().unwrap(),
-            points.iter().map(|p| p.j2).min().unwrap(),
-            points.iter().map(|p| p.j2).max().unwrap(),
-            points.iter().map(|p| p.k2).min().unwrap(),
-            points.iter().map(|p| p.k2).max().unwrap(),
-        )
-    };
+    let (i_lo, i_hi, j_lo, j_hi, k_lo, k_hi) = match_point_bounds(points, use_block1);
     let degeneracy =
         usize::from(i_lo == i_hi) + usize::from(j_lo == j_hi) + usize::from(k_lo == k_hi);
     if degeneracy != 1 {
@@ -383,18 +370,18 @@ fn build_match_points_from_orientation(
     for (u_off, &u1) in u1_vals.iter().enumerate() {
         for (v_off, &v1) in v1_vals.iter().enumerate() {
             // Apply orientation mapping to get face2's (u, v) offsets
-            let (u2_off, v2_off) = if orientation.swapped {
+            let (u2_off, v2_off) = if orientation.swapped() {
                 (v_off, u_off)
             } else {
                 (u_off, v_off)
             };
 
-            let u2_idx = if orientation.u_reversed {
+            let u2_idx = if orientation.u_reversed() {
                 u2_vals.len().saturating_sub(1).saturating_sub(u2_off)
             } else {
                 u2_off
             };
-            let v2_idx = if orientation.v_reversed {
+            let v2_idx = if orientation.v_reversed() {
                 v2_vals.len().saturating_sub(1).saturating_sub(v2_off)
             } else {
                 v2_off
@@ -424,15 +411,12 @@ fn build_match_points_from_orientation(
 // Phase 1: Fast full-face matching using corner comparison
 // ---------------------------------------------------------------------------
 
-/// Phase 1: Fast full-face matching using corner comparison only.
+/// Phase 1: Fast full-face matching using canonical grid + permutation matrices.
 ///
-/// For each candidate block pair, compares all face combinations using
-/// only the 4 corner vertices.  When all 4 corners match (within tol),
-/// the faces are a full match and no splitting is needed.
-///
-/// An interior-point verification step rejects false positives where
-/// corners coincidentally match (e.g. near the axis of rotation) but
-/// the face interiors are at different spatial locations.
+/// For each candidate block pair, uses corner comparison as a quick pre-filter,
+/// then verifies the match using `extract_canonical_grid` + `try_all_permutations`.
+/// Face A is the first face, Face B is multiplied by the permutation matrix,
+/// and all points are compared within tolerance.
 ///
 /// Returns `(matches, consumed_face_keys)`.
 fn find_full_face_matches(
@@ -442,6 +426,9 @@ fn find_full_face_matches(
     tol: Float,
 ) -> (Vec<FaceMatch>, HashSet<FaceKey>) {
     use crate::block_face_functions::full_face_match;
+    use crate::verification::{
+        determine_plane, extract_canonical_grid, try_all_permutations,
+    };
 
     let mut face_matches = Vec::new();
     let mut consumed: HashSet<FaceKey> = HashSet::new();
@@ -455,20 +442,45 @@ fn find_full_face_matches(
                 if consumed.contains(&face_j.index_key()) {
                     continue;
                 }
-                if let Some(orientation) = full_face_match(face_i, face_j, tol) {
-                    let points = build_match_points_from_orientation(face_i, face_j, &orientation);
+                // Quick corner pre-filter
+                if full_face_match(face_i, face_j, tol).is_none() {
+                    continue;
+                }
 
-                    // Verify interior points to reject false positives
-                    if !verify_match_interior(&blocks[i], &blocks[j], &points, tol) {
-                        continue;
-                    }
+                // Build FaceRecords for canonical grid extraction
+                let rec_a = FaceRecord::from_face(face_i);
+                let rec_b = FaceRecord::from_face(face_j);
+
+                // Extract canonical grids: Face A and Face B
+                let (pts_a, nu_a, nv_a) = match extract_canonical_grid(&blocks[i], &rec_a) {
+                    Some(g) => g,
+                    None => continue,
+                };
+                let (pts_b, nu_b, nv_b) = match extract_canonical_grid(&blocks[j], &rec_b) {
+                    Some(g) => g,
+                    None => continue,
+                };
+
+                // Face B * permutation matrix, then compare with Face A
+                if let Some(perm_idx) =
+                    try_all_permutations(&pts_a, nu_a, nv_a, &pts_b, nu_b, nv_b, tol)
+                {
+                    let plane = determine_plane(&rec_a, &rec_b);
+                    let orientation = Orientation {
+                        permutation_index: perm_idx,
+                        plane,
+                    };
+
+                    // Build match points from the verified orientation
+                    let points =
+                        build_match_points_from_orientation(face_i, face_j, &orientation);
 
                     consumed.insert(face_i.index_key());
                     consumed.insert(face_j.index_key());
 
                     face_matches.push(FaceMatch {
-                        block1: FaceRecord::from_face(face_i),
-                        block2: FaceRecord::from_face(face_j),
+                        block1: rec_a,
+                        block2: rec_b,
                         points,
                         orientation: Some(orientation),
                     });
@@ -479,38 +491,6 @@ fn find_full_face_matches(
     }
 
     (face_matches, consumed)
-}
-
-/// Verify a face match by checking ALL interior node coordinates.
-///
-/// After corner-based matching finds a potential full-face match,
-/// this function checks every interior node pair to confirm they are
-/// spatially coincident. Returns `false` if any point exceeds the
-/// tolerance, indicating a false positive.
-///
-/// At GCD-reduced resolution faces are small (typically < 1000 nodes),
-/// so exhaustive checking is fast and avoids false positives that
-/// sparse sampling could miss.
-fn verify_match_interior(
-    block1: &Block,
-    block2: &Block,
-    points: &[MatchPoint],
-    tol: Float,
-) -> bool {
-    if points.len() <= 4 {
-        return true;
-    }
-
-    // Check every interior point (skip first and last which are corners)
-    for p in &points[1..points.len() - 1] {
-        let (x1, y1, z1) = block1.xyz(p.i1, p.j1, p.k1);
-        let (x2, y2, z2) = block2.xyz(p.i2, p.j2, p.k2);
-        let d = ((x1 - x2).powi(2) + (y1 - y2).powi(2) + (z1 - z2).powi(2)).sqrt();
-        if d > tol {
-            return false;
-        }
-    }
-    true
 }
 
 // ---------------------------------------------------------------------------
@@ -673,19 +653,16 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
     use rayon::prelude::*;
 
     // Parallelize outer face extraction per block.
-    // Include degenerate faces (where opposite sides coincide) so that
-    // thin blocks can still participate in inter-block matching.
+    // Extract outer faces for each block. Degenerate face pairs (where
+    // opposite sides coincide) are NOT added to the inter-block pool —
+    // they are handled as self-matches later in this function (lines 856+).
+    // This matches the Python behavior where get_outer_faces returns
+    // (non_matching, matching) and only non_matching enters the pool.
     let mut block_outer_faces: Vec<Vec<Face>> = blocks
         .par_iter()
         .enumerate()
         .map(|(idx, block)| {
-            let (mut faces, degenerate_pairs) = get_outer_faces(block);
-            // Re-add degenerate faces to the pool — they still need to match
-            // with adjacent blocks even though they coincide on this block.
-            for (face_a, face_b) in degenerate_pairs {
-                faces.push(face_a);
-                faces.push(face_b);
-            }
+            let (faces, _degenerate_pairs) = get_outer_faces(block);
             faces
                 .into_iter()
                 .map(|mut f| {
@@ -747,24 +724,14 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
                 find_matching_blocks(&blocks[i], &blocks[j], left, right, DEFAULT_TOL);
             for points in match_points.drain(..) {
                 phase2_changed = true;
+                let (i1lo, i1hi, j1lo, j1hi, k1lo, k1hi) = match_point_bounds(&points, true);
                 let mut face1 = create_face_from_diagonals(
-                    &blocks[i],
-                    points.iter().map(|p| p.i1).min().unwrap(),
-                    points.iter().map(|p| p.j1).min().unwrap(),
-                    points.iter().map(|p| p.k1).min().unwrap(),
-                    points.iter().map(|p| p.i1).max().unwrap(),
-                    points.iter().map(|p| p.j1).max().unwrap(),
-                    points.iter().map(|p| p.k1).max().unwrap(),
+                    &blocks[i], i1lo, j1lo, k1lo, i1hi, j1hi, k1hi,
                 );
                 face1.set_block_index(i);
+                let (i2lo, i2hi, j2lo, j2hi, k2lo, k2hi) = match_point_bounds(&points, false);
                 let mut face2 = create_face_from_diagonals(
-                    &blocks[j],
-                    points.iter().map(|p| p.i2).min().unwrap(),
-                    points.iter().map(|p| p.j2).min().unwrap(),
-                    points.iter().map(|p| p.k2).min().unwrap(),
-                    points.iter().map(|p| p.i2).max().unwrap(),
-                    points.iter().map(|p| p.j2).max().unwrap(),
-                    points.iter().map(|p| p.k2).max().unwrap(),
+                    &blocks[j], i2lo, j2lo, k2lo, i2hi, j2hi, k2hi,
                 );
                 face2.set_block_index(j);
                 matches_to_remove.insert(face1.index_key());
@@ -1057,44 +1024,29 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
     (matches, formatted)
 }
 
-/// Verify that face-match diagonal corners are spatially consistent.
+/// Find the correct orientation for each face match using permutation matrices.
 ///
-/// For each match, checks that block1's lower/upper corner coordinates align
-/// with block2's lower/upper corners (within tolerance). When the stored
-/// diagonal does not match, all permutations of block2's face corners are
-/// tried. If a valid permutation is found the match is corrected; otherwise
-/// it is classified as mismatched.
-///
-/// Uses GCD reduction (same as [`connectivity_fast`]) for efficient lookups.
+/// Extracts canonical grids for both faces and tries all 8 permutation
+/// matrices on face B. Stores the winning `permutation_index` and plane
+/// type in [`FaceMatch::orientation`].
 ///
 /// # Arguments
-/// * `blocks` - Full-resolution blocks.
-/// * `face_matches` - Face matches to verify (typically from [`connectivity_fast`]).
-/// * `tol` - Euclidean distance tolerance for corner matching.
+/// * `blocks` - Block array providing geometry.
+/// * `face_matches` - Verified face matches (from `verify_connectivity`).
+/// * `tol` - Euclidean distance tolerance.
 ///
 /// # Returns
-/// `(verified, mismatched)` where `verified` contains corrected matches and
-/// `mismatched` contains matches that could not be verified.
-pub fn verify_connectivity(
+/// `(aligned, rejected)` — aligned matches with corrected block2 diagonals,
+/// and rejected matches where no orientation produces point-by-point equality.
+pub fn align_face_orientations(
     blocks: &[Block],
     face_matches: &[FaceMatch],
     tol: Float,
 ) -> (Vec<FaceMatch>, Vec<FaceMatch>) {
-    // Compute GCD and reduce blocks
-    let gcd_to_use = crate::utils::compute_min_gcd(blocks);
+    let mut aligned = Vec::new();
+    let mut rejected = Vec::new();
 
-    let reduced = reduce_blocks(blocks, gcd_to_use);
-
-    // Scale down face_match indices by GCD
-    let mut scaled_matches: Vec<FaceMatch> = face_matches.to_vec();
-    for fm in &mut scaled_matches {
-        fm.divide_indices(gcd_to_use);
-    }
-
-    let mut verified = Vec::new();
-    let mut mismatched = Vec::new();
-
-    let pb = ProgressBar::new(scaled_matches.len() as u64);
+    let pb = ProgressBar::new(face_matches.len() as u64);
     pb.set_style(
         ProgressStyle::with_template(
             "{msg} [{bar:40.cyan/blue}] {pos}/{len} matches ({eta} remaining)",
@@ -1102,166 +1054,122 @@ pub fn verify_connectivity(
         .unwrap()
         .progress_chars("=>-"),
     );
-    pb.set_message("Verify connectivity");
+    pb.set_message("Align orientations");
 
-    for (idx, fm) in scaled_matches.iter().enumerate() {
+    for fm in face_matches {
         pb.inc(1);
         let b1 = &fm.block1;
         let b2 = &fm.block2;
 
-        if b1.block_index >= reduced.len() || b2.block_index >= reduced.len() {
-            mismatched.push(face_matches[idx].clone());
+        if b1.block_index >= blocks.len() || b2.block_index >= blocks.len() {
+            rejected.push(fm.clone());
             continue;
         }
 
-        let block1 = &reduced[b1.block_index];
-        let block2 = &reduced[b2.block_index];
+        let block1 = &blocks[b1.block_index];
+        let block2 = &blocks[b2.block_index];
 
-        // Fast path: if orientation is known from Phase 1, just verify stored diagonal
-        if fm.orientation.is_some() {
-            let (x1_l, y1_l, z1_l) = block1.xyz(b1.il, b1.jl, b1.kl);
-            let (x1_u, y1_u, z1_u) = block1.xyz(b1.ih, b1.jh, b1.kh);
-            let (x2_l, y2_l, z2_l) = block2.xyz(b2.il, b2.jl, b2.kl);
-            let (x2_u, y2_u, z2_u) = block2.xyz(b2.ih, b2.jh, b2.kh);
+        // Extract canonical 2D grids for both faces
+        let grid_a = match extract_canonical_grid(block1, b1) {
+            Some(g) => g,
+            None => { rejected.push(fm.clone()); continue; }
+        };
+        let grid_b = match extract_canonical_grid(block2, b2) {
+            Some(g) => g,
+            None => { rejected.push(fm.clone()); continue; }
+        };
 
-            let d_lower =
-                ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
-            let d_upper =
-                ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
+        let (pts_a, nu_a, nv_a) = grid_a;
+        let (pts_b, nu_b, nv_b) = grid_b;
 
-            if d_lower < tol && d_upper < tol {
-                verified.push(face_matches[idx].clone());
-            } else {
-                // Orientation was set but diagonal doesn't verify — still accept
-                // as the orientation was confirmed at detection time
-                verified.push(face_matches[idx].clone());
-            }
-            continue;
-        }
-
-        // Slow path: no orientation — check stored diagonal then try permutations
-        let (x1_l, y1_l, z1_l) = block1.xyz(b1.il, b1.jl, b1.kl);
-        let (x1_u, y1_u, z1_u) = block1.xyz(b1.ih, b1.jh, b1.kh);
-
-        let (x2_l, y2_l, z2_l) = block2.xyz(b2.il, b2.jl, b2.kl);
-        let (x2_u, y2_u, z2_u) = block2.xyz(b2.ih, b2.jh, b2.kh);
-
-        let d_lower =
-            ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
-        let d_upper =
-            ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
-
-        if d_lower < tol && d_upper < tol {
-            verified.push(face_matches[idx].clone());
-            continue;
-        }
-
-        // Enumerate unique corners of block2's face
-        let i_vals = [b2.il, b2.ih];
-        let j_vals = [b2.jl, b2.jh];
-        let k_vals = [b2.kl, b2.kh];
-
-        let mut unique_corners: Vec<(usize, usize, usize)> = Vec::new();
-        let mut seen = HashSet::new();
-        for &i in &i_vals {
-            for &j in &j_vals {
-                for &k in &k_vals {
-                    if seen.insert((i, j, k)) {
-                        unique_corners.push((i, j, k));
-                    }
-                }
-            }
-        }
-
-        // Try all permutations of block2's corners
-        let mut found = false;
-        for &(il, jl, kl) in &unique_corners {
-            for &(iu, ju, ku) in &unique_corners {
-                if (il, jl, kl) == (iu, ju, ku) {
-                    continue;
-                }
-
-                let (x2_l, y2_l, z2_l) = block2.xyz(il, jl, kl);
-                let (x2_u, y2_u, z2_u) = block2.xyz(iu, ju, ku);
-
-                let dl =
-                    ((x2_l - x1_l).powi(2) + (y2_l - y1_l).powi(2) + (z2_l - z1_l).powi(2)).sqrt();
-                let du =
-                    ((x2_u - x1_u).powi(2) + (y2_u - y1_u).powi(2) + (z2_u - z1_u).powi(2)).sqrt();
-
-                if dl < tol && du < tol {
-                    let mut corrected = face_matches[idx].clone();
-                    corrected.block2.il = il * gcd_to_use;
-                    corrected.block2.jl = jl * gcd_to_use;
-                    corrected.block2.kl = kl * gcd_to_use;
-                    corrected.block2.ih = iu * gcd_to_use;
-                    corrected.block2.jh = ju * gcd_to_use;
-                    corrected.block2.kh = ku * gcd_to_use;
-                    verified.push(corrected);
-                    found = true;
-                    break;
-                }
-            }
-            if found {
-                break;
-            }
-        }
-
-        if !found {
-            eprintln!("verify_connectivity: MISMATCH at face_match index {}", idx);
+        // Try all 8 permutation matrices to find the matching orientation
+        if let Some(perm_idx) = try_all_permutations(&pts_a, nu_a, nv_a, &pts_b, nu_b, nv_b, tol) {
+            let mut fm_out = fm.clone();
+            let plane = determine_plane(b1, b2);
+            fm_out.orientation = Some(Orientation {
+                permutation_index: perm_idx,
+                plane,
+            });
+            aligned.push(fm_out);
+        } else {
             eprintln!(
-                "  block1 (block_index={}): lower=({},{},{}) upper=({},{},{})",
-                face_matches[idx].block1.block_index,
-                face_matches[idx].block1.il,
-                face_matches[idx].block1.jl,
-                face_matches[idx].block1.kl,
-                face_matches[idx].block1.ih,
-                face_matches[idx].block1.jh,
-                face_matches[idx].block1.kh,
+                "  align: REJECTED block {}↔{} — no permutation matches",
+                b1.block_index, b2.block_index
             );
-            eprintln!(
-                "  block2 (block_index={}): lower=({},{},{}) upper=({},{},{})",
-                face_matches[idx].block2.block_index,
-                face_matches[idx].block2.il,
-                face_matches[idx].block2.jl,
-                face_matches[idx].block2.kl,
-                face_matches[idx].block2.ih,
-                face_matches[idx].block2.jh,
-                face_matches[idx].block2.kh,
-            );
-            mismatched.push(face_matches[idx].clone());
+            rejected.push(fm.clone());
         }
     }
-    pb.finish_and_clear();
 
-    (verified, mismatched)
+    pb.finish_with_message("Align orientations done");
+    (aligned, rejected)
 }
 
-/// Validate and standardize face-match records by ensuring block2's diagonal
-/// corners are ordered to match the closest spatial correspondence with block1.
+/// Derive lb/ub for both faces from the first/last MatchPoint.
 ///
-/// This is the Rust equivalent of Python's `face_matches_to_dict`.
+/// The traversal order of MatchPoints encodes the orientation relationship
+/// between the two faces, which is lost if we use min/max or spatial proximity.
+fn derive_diagonal_from_match_points(
+    fm: &FaceMatch,
+    gcd: usize,
+) -> Option<(FaceRecord, FaceRecord)> {
+    let points = &fm.points;
+    if points.is_empty() {
+        return None;
+    }
+
+    let first = &points[0];
+    let last = &points[points.len() - 1];
+
+    let b1 = FaceRecord {
+        block_index: fm.block1.block_index,
+        il: first.i1 * gcd,
+        jl: first.j1 * gcd,
+        kl: first.k1 * gcd,
+        ih: last.i1 * gcd,
+        jh: last.j1 * gcd,
+        kh: last.k1 * gcd,
+        id: fm.block1.id,
+        u_physical: None,
+        v_physical: None,
+    };
+    let b2 = FaceRecord {
+        block_index: fm.block2.block_index,
+        il: first.i2 * gcd,
+        jl: first.j2 * gcd,
+        kl: first.k2 * gcd,
+        ih: last.i2 * gcd,
+        jh: last.j2 * gcd,
+        kh: last.k2 * gcd,
+        id: fm.block2.id,
+        u_physical: None,
+        v_physical: None,
+    };
+
+    Some((b1, b2))
+}
+
+/// Validate and standardize face-match records.
 ///
-/// For matches that carry `MatchPoint` data (Phase 2/3), the actual node-to-node
-/// correspondence is used to determine the correct corner mapping. This avoids
-/// the pitfall where `from_match_points` computes min/max per axis independently,
-/// creating synthetic bounding-box corners that may not be actual matched nodes.
-///
-/// For matches without `MatchPoint` data (self-matches) or Phase 1 matches with
-/// orientation, a spatial proximity search over block2's face corners is used.
+/// For matches with MatchPoint data, derives diagonal corners from the
+/// first/last traversal points. For self-matches (no MatchPoint data),
+/// uses spatial proximity as a fallback.
 ///
 /// # Arguments
-/// * `blocks` - Block array providing geometry.
+/// * `blocks` - Block array providing geometry (full resolution).
 /// * `face_matches` - Matches to validate.
 ///
 /// # Returns
-/// Validated face matches with corrected block2 diagonal indices.
+/// Validated face matches with corrected diagonal indices.
 pub fn face_matches_to_dict(blocks: &[Block], face_matches: &[FaceMatch]) -> Vec<FaceMatch> {
     // GCD factor: MatchPoint indices are on the reduced grid while FaceRecord
     // indices have already been scaled up by this factor.
     let gcd = crate::utils::compute_min_gcd(blocks);
 
-    face_matches
+    let mut matched_count = 0usize;
+    let mut empty_count = 0usize;
+    let mut spatial_count = 0usize;
+
+    let result: Vec<FaceMatch> = face_matches
         .iter()
         .filter_map(|fm| {
             let b1 = &fm.block1;
@@ -1272,61 +1180,19 @@ pub fn face_matches_to_dict(blocks: &[Block], face_matches: &[FaceMatch]) -> Vec
 
             let mut result = fm.clone();
 
-            // Phase 2/3 matches (no orientation) with MatchPoint data:
-            // Use actual node-to-node correspondence to find diagonal corners.
-            // `from_match_points` computes independent min/max per axis, which
-            // may create synthetic bounding-box corners that are not actual
-            // matched nodes. Using MatchPoints avoids this.
-            if fm.orientation.is_none() && !fm.points.is_empty() {
-                // Find the MatchPoint whose block1 position (on the full grid)
-                // is closest to block1's current lower corner.
-                let (x1_l, y1_l, z1_l) = block1.xyz(b1.il, b1.jl, b1.kl);
-                let lower_pt = fm
-                    .points
-                    .iter()
-                    .min_by(|a, b| {
-                        let (xa, ya, za) = block1.xyz(a.i1 * gcd, a.j1 * gcd, a.k1 * gcd);
-                        let da =
-                            (xa - x1_l).powi(2) + (ya - y1_l).powi(2) + (za - z1_l).powi(2);
-                        let (xb, yb, zb) = block1.xyz(b.i1 * gcd, b.j1 * gcd, b.k1 * gcd);
-                        let db =
-                            (xb - x1_l).powi(2) + (yb - y1_l).powi(2) + (zb - z1_l).powi(2);
-                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .unwrap();
-
-                // Same for upper corner.
-                let (x1_u, y1_u, z1_u) = block1.xyz(b1.ih, b1.jh, b1.kh);
-                let upper_pt = fm
-                    .points
-                    .iter()
-                    .min_by(|a, b| {
-                        let (xa, ya, za) = block1.xyz(a.i1 * gcd, a.j1 * gcd, a.k1 * gcd);
-                        let da =
-                            (xa - x1_u).powi(2) + (ya - y1_u).powi(2) + (za - z1_u).powi(2);
-                        let (xb, yb, zb) = block1.xyz(b.i1 * gcd, b.j1 * gcd, b.k1 * gcd);
-                        let db =
-                            (xb - x1_u).powi(2) + (yb - y1_u).powi(2) + (zb - z1_u).powi(2);
-                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .unwrap();
-
-                // Use actual MatchPoint indices (scaled to full grid).
-                result.block1.il = lower_pt.i1 * gcd;
-                result.block1.jl = lower_pt.j1 * gcd;
-                result.block1.kl = lower_pt.k1 * gcd;
-                result.block1.ih = upper_pt.i1 * gcd;
-                result.block1.jh = upper_pt.j1 * gcd;
-                result.block1.kh = upper_pt.k1 * gcd;
-
-                result.block2.il = lower_pt.i2 * gcd;
-                result.block2.jl = lower_pt.j2 * gcd;
-                result.block2.kl = lower_pt.k2 * gcd;
-                result.block2.ih = upper_pt.i2 * gcd;
-                result.block2.jh = upper_pt.j2 * gcd;
-                result.block2.kh = upper_pt.k2 * gcd;
+            if !fm.points.is_empty() {
+                // Has MatchPoint data — use spatial proximity derivation
+                if let Some((b1_new, b2_new)) =
+                    derive_diagonal_from_match_points(fm, gcd)
+                {
+                    result.block1 = b1_new;
+                    result.block2 = b2_new;
+                    matched_count += 1;
+                } else {
+                    empty_count += 1;
+                }
             } else {
-                // Phase 1 (has orientation) or no MatchPoints: spatial search
+                // No MatchPoints (self-matches): spatial search
                 // over block2's bounding-box corners.
                 let (x1_l, y1_l, z1_l) = block1.xyz(b1.il, b1.jl, b1.kl);
 
@@ -1373,9 +1239,17 @@ pub fn face_matches_to_dict(blocks: &[Block], face_matches: &[FaceMatch]) -> Vec
                 result.block2.ih = best_upper.1;
                 result.block2.jh = best_upper.2;
                 result.block2.kh = best_upper.3;
+
+                spatial_count += 1;
             }
 
             Some(result)
         })
-        .collect()
+        .collect();
+
+    eprintln!(
+        "  face_matches_to_dict: {} matched, {} empty, {} spatial",
+        matched_count, empty_count, spatial_count
+    );
+    result
 }

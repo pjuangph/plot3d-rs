@@ -45,11 +45,13 @@ impl Block {
         }
     }
 
+    /// Total number of grid points (imax * jmax * kmax).
     #[inline]
     pub fn npoints(&self) -> usize {
         self.imax * self.jmax * self.kmax
     }
 
+    /// Convert (i, j, k) indices to a flat 1-D index (i-fastest ordering).
     #[inline]
     pub fn idx(&self, i: usize, j: usize, k: usize) -> usize {
         // i–j–k order (i fastest)
@@ -57,40 +59,57 @@ impl Block {
         (k * self.jmax + j) * self.imax + i
     }
 
+    /// Return (x, y, z) coordinates at grid point (i, j, k).
     #[inline]
     pub fn xyz(&self, i: usize, j: usize, k: usize) -> (Float, Float, Float) {
         let idx = self.idx(i, j, k);
         (self.x[idx], self.y[idx], self.z[idx])
     }
 
+    /// Return the x-coordinate at grid point (i, j, k).
     #[inline]
     pub fn x_at(&self, i: usize, j: usize, k: usize) -> Float {
         self.x[self.idx(i, j, k)]
     }
 
+    /// Return the y-coordinate at grid point (i, j, k).
     #[inline]
     pub fn y_at(&self, i: usize, j: usize, k: usize) -> Float {
         self.y[self.idx(i, j, k)]
     }
 
+    /// Return the z-coordinate at grid point (i, j, k).
     #[inline]
     pub fn z_at(&self, i: usize, j: usize, k: usize) -> Float {
         self.z[self.idx(i, j, k)]
     }
 
+    /// Reference to the full x-coordinate array.
     #[inline]
     pub fn x_slice(&self) -> &[Float] {
         &self.x
     }
 
+    /// Reference to the full y-coordinate array.
     #[inline]
     pub fn y_slice(&self) -> &[Float] {
         &self.y
     }
 
+    /// Reference to the full z-coordinate array.
     #[inline]
     pub fn z_slice(&self) -> &[Float] {
         &self.z
+    }
+
+    /// Coordinate slice by axis index: 0=x, 1=y, 2=z.
+    #[inline]
+    pub fn axis_slice(&self, axis_idx: usize) -> &[Float] {
+        match axis_idx {
+            0 => &self.x,
+            1 => &self.y,
+            _ => &self.z,
+        }
     }
 
     #[inline]
@@ -164,19 +183,24 @@ impl Block {
         new
     }
 
-    /// Convert to cylindrical coordinates (rotation axis = X).
+    /// Convert to cylindrical coordinates about the given rotation axis.
     ///
-    /// Returns `(r, theta)` where `r = sqrt(z^2 + y^2)` and `theta = atan2(y, z)`.
+    /// Returns `(r, theta)` where `r` and `theta` are computed in the plane
+    /// perpendicular to the rotation axis.
     /// Each vector has `npoints()` elements in the same index order as `x/y/z`.
-    pub fn cylindrical(&self) -> (Vec<Float>, Vec<Float>) {
+    pub fn cylindrical(&self, rotation_axis: char) -> (Vec<Float>, Vec<Float>) {
         let n = self.npoints();
         let mut r = Vec::with_capacity(n);
         let mut theta = Vec::with_capacity(n);
         for idx in 0..n {
-            let yi = self.y[idx];
-            let zi = self.z[idx];
-            r.push((zi * zi + yi * yi).sqrt());
-            theta.push(yi.atan2(zi));
+            let (a, b) = match rotation_axis.to_ascii_lowercase() {
+                'x' => (self.y[idx], self.z[idx]),
+                'y' => (self.z[idx], self.x[idx]),
+                'z' => (self.x[idx], self.y[idx]),
+                _ => (self.y[idx], self.z[idx]), // default to x-axis
+            };
+            r.push((a * a + b * b).sqrt());
+            theta.push(a.atan2(b));
         }
         (r, theta)
     }

@@ -19,6 +19,30 @@
 //!
 //! Use the normalized accessors `i_lo()/i_hi()` when you need min/max values
 //! for range iteration or face reconstruction.
+//!
+//! # Orientation & Permutation System
+//!
+//! When two block faces meet at an interface, their parametric (u, v)
+//! coordinate systems may be flipped, transposed, or both. The crate
+//! encodes all 8 valid orientations as a 3-bit index:
+//!
+//! ```text
+//! permutation_index = u_reversed | (v_reversed << 1) | (swapped << 2)
+//! ```
+//!
+//! The constant [`PERMUTATION_MATRICES`] holds the corresponding 2x2
+//! matrices (one per index, 0 through 7). Each matrix transforms face2's
+//! parametric coordinates to align with face1's.
+//!
+//! [`Orientation`] stores the index together with an [`OrientationPlane`]
+//! tag indicating whether the match is **in-plane** (same constant axis)
+//! or **cross-plane** (different constant axes, requiring a swap). The
+//! connectivity pipeline populates `FaceMatch::orientation` automatically
+//! so downstream code can reconstruct the exact node-to-node mapping
+//! without re-sampling block coordinates.
+//!
+//! See the `face_record` module documentation for the full table and
+//! usage examples.
 
 /// Floating-point precision type used throughout the crate.
 /// Defaults to `f64`; enable the `f32` Cargo feature for single precision.
@@ -50,6 +74,7 @@ pub mod rotational_periodicity;
 pub mod split_block;
 pub mod translational_periodicity;
 pub mod utils;
+pub mod verification;
 pub mod write;
 
 pub use block::{Block, FaceData};
@@ -63,14 +88,14 @@ pub use block_face_functions::{
     reduce_blocks, rotate_block, Face,
 };
 pub use connectivity::{
-    connectivity, connectivity_fast, face_matches_to_dict, get_face_intersection,
-    verify_connectivity,
+    align_face_orientations, connectivity, connectivity_fast, face_matches_to_dict,
+    get_face_intersection,
 };
 pub use cylindrical::{find_angular_bounding_faces, to_radius, to_theta};
 pub use differencing::{find_edges, find_face_edges, BlockDiff, FaceDiff};
 pub use face_record::{
     FaceKey, FaceMatch, FaceMatchPrinter, FaceRecord, FaceRecordTraits, MatchPoint, Orientation,
-    PeriodicPair,
+    OrientationPlane, PERMUTATION_MATRICES, PeriodicPair,
 };
 pub use graph::{build_weighted_graph_from_face_matches, write_ddcmp, BlockGraph, WeightAggregate};
 pub use merge_blocks::{
@@ -81,9 +106,18 @@ pub use read::{read_ap_nasa, read_plot3d_ascii, read_plot3d_binary, BinaryFormat
 pub use rotational_periodicity::{
     count_rotated_corners_on_face, create_rotation_matrix, faces_support_any,
     faces_support_direction, linear_real_transform, periodicity_check_with_points,
-    rotate_block_with_matrix, rotated_periodicity, rotational_periodicity, verify_periodicity,
+    rotate_block_with_matrix, rotated_periodicity, rotational_periodicity,
+};
+pub mod serialization;
+pub use serialization::{
+    face_match_to_json, face_match_to_diagonal_json, face_record_to_json,
+    face_record_to_diagonal_json, permutation_matrices_json,
+};
+pub use verification::{
+    apply_permutation, determine_plane, extract_canonical_grid, try_all_permutations,
+    verify_connectivity, verify_match, verify_partial_match, verify_periodicity,
 };
 pub use split_block::{split_blocks, SplitDirection};
 pub use translational_periodicity::translational_periodicity;
-pub use utils::{apply_rotation, Endian};
+pub use utils::{apply_rotation, compute_min_gcd, Endian};
 pub use write::write_plot3d;

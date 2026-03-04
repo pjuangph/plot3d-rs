@@ -1,6 +1,6 @@
 [package]
 name = "plot3d"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 license = "MIT"
 description = "Utilities for reading, writing, and manipulating NASA PLOT3D structured grids."
@@ -13,6 +13,7 @@ path = "src/lib.rs"
 byteorder = "1.5"
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 metis-rs = { version = "0.1", optional = true }
 
 # for tests (download)
@@ -27,4 +28,3 @@ metis-partition = ["metis-rs"]
 
 [dev-dependencies]
 tempfile = "3.10"
-serde_json = "1.0"

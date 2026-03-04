@@ -451,23 +451,23 @@ pub(crate) fn match_edges(
         .map(|p| apply_rotation(*p, rotation_matrix))
         .collect();
 
-    // Find longest contiguous run of point-to-point matches
-    let mut best_len = 0usize;
-    let mut cur_len = 0usize;
+    // Count how many points from each edge have a match in the other
+    // (order-independent — handles reversed edge traversal)
+    let a_matched = rotated_a
+        .iter()
+        .filter(|ra| edge_b.coords.iter().any(|pb| distance3(**ra, *pb) <= tol))
+        .count();
+    let b_matched = edge_b
+        .coords
+        .iter()
+        .filter(|pb| rotated_a.iter().any(|ra| distance3(*ra, **pb) <= tol))
+        .count();
 
-    for ra in &rotated_a {
-        let has_match = edge_b.coords.iter().any(|pb| distance3(*ra, *pb) <= tol);
-        if has_match {
-            cur_len += 1;
-            best_len = best_len.max(cur_len);
-        } else {
-            cur_len = 0;
-        }
-    }
+    let matched = a_matched.min(b_matched);
 
-    if best_len < 2 {
+    if matched < 2 {
         EdgeMatchResult::None
-    } else if best_len == rotated_a.len() && best_len == edge_b.coords.len() {
+    } else if a_matched == rotated_a.len() && b_matched == edge_b.coords.len() {
         EdgeMatchResult::Full
     } else {
         EdgeMatchResult::Partial

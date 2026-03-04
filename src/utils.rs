@@ -133,10 +133,10 @@ impl Endian {
     pub fn read_f64_slice(buf: &[u8], e: Endian) -> Vec<f64> {
         let mut out = vec![0f64; buf.len() / 8];
         for (i, chunk) in buf.chunks_exact(8).enumerate() {
-            let top = Self::read_u32(&chunk[0..4], e) as u64;
-            let bot = Self::read_u32(&chunk[4..8], e) as u64;
-            // join two u32 as u64 with endianness already respected
-            let bits = (top << 32) | bot;
+            let bits = match e {
+                Endian::Little => LittleEndian::read_u64(chunk),
+                Endian::Big => BigEndian::read_u64(chunk),
+            };
             out[i] = f64::from_bits(bits);
         }
         out
@@ -145,14 +145,10 @@ impl Endian {
         let mut out = vec![0u8; v.len() * 8];
         for (i, f) in v.iter().enumerate() {
             let bits = f.to_bits();
-            let top = (bits >> 32) as u32;
-            let bot = (bits & 0xFFFF_FFFF) as u32;
-            let mut a = [0u8; 4];
-            let mut b = [0u8; 4];
-            Self::write_u32(&mut a, top, e);
-            Self::write_u32(&mut b, bot, e);
-            out[i * 8..i * 8 + 4].copy_from_slice(&a);
-            out[i * 8 + 4..i * 8 + 8].copy_from_slice(&b);
+            match e {
+                Endian::Little => LittleEndian::write_u64(&mut out[i * 8..i * 8 + 8], bits),
+                Endian::Big => BigEndian::write_u64(&mut out[i * 8..i * 8 + 8], bits),
+            }
         }
         out
     }
