@@ -266,31 +266,30 @@ impl FaceRecord {
 
         // Identify u and v varying axes
         // Convention: for K-const → u=I, v=J; for J-const → u=I, v=K; for I-const → u=J, v=K
-        let (u_min_ijk, u_max_ijk, v_min_ijk, v_max_ijk) =
-            if k_const || !i_const && !j_const {
-                // K-constant (or all varying, default to K-const convention)
-                (
-                    (ilo, jlo, klo),
-                    (ihi, jlo, klo),
-                    (ilo, jlo, klo),
-                    (ilo, jhi, klo),
-                )
-            } else if j_const {
-                (
-                    (ilo, jlo, klo),
-                    (ihi, jlo, klo),
-                    (ilo, jlo, klo),
-                    (ilo, jlo, khi),
-                )
-            } else {
-                // I-constant
-                (
-                    (ilo, jlo, klo),
-                    (ilo, jhi, klo),
-                    (ilo, jlo, klo),
-                    (ilo, jlo, khi),
-                )
-            };
+        let (u_min_ijk, u_max_ijk, v_min_ijk, v_max_ijk) = if k_const || !i_const && !j_const {
+            // K-constant (or all varying, default to K-const convention)
+            (
+                (ilo, jlo, klo),
+                (ihi, jlo, klo),
+                (ilo, jlo, klo),
+                (ilo, jhi, klo),
+            )
+        } else if j_const {
+            (
+                (ilo, jlo, klo),
+                (ihi, jlo, klo),
+                (ilo, jlo, klo),
+                (ilo, jlo, khi),
+            )
+        } else {
+            // I-constant
+            (
+                (ilo, jlo, klo),
+                (ilo, jhi, klo),
+                (ilo, jlo, klo),
+                (ilo, jlo, khi),
+            )
+        };
 
         // Sample block coordinates
         let (ux0, uy0, uz0) = block.xyz(u_min_ijk.0, u_min_ijk.1, u_min_ijk.2);
@@ -450,14 +449,14 @@ impl FaceRecordTraits for Vec<FaceRecord> {
 /// assert_eq!(PERMUTATION_MATRICES.len(), 8);
 /// ```
 pub const PERMUTATION_MATRICES: [[[i8; 2]; 2]; 8] = [
-    [[ 1,  0], [ 0,  1]],  // 0: identity
-    [[-1,  0], [ 0,  1]],  // 1: u reversed
-    [[ 1,  0], [ 0, -1]],  // 2: v reversed
-    [[-1,  0], [ 0, -1]],  // 3: both reversed
-    [[ 0,  1], [ 1,  0]],  // 4: swapped
-    [[ 0, -1], [ 1,  0]],  // 5: swap + u reversed
-    [[ 0,  1], [-1,  0]],  // 6: swap + v reversed
-    [[ 0, -1], [-1,  0]],  // 7: swap + both reversed
+    [[1, 0], [0, 1]],   // 0: identity
+    [[-1, 0], [0, 1]],  // 1: u reversed
+    [[1, 0], [0, -1]],  // 2: v reversed
+    [[-1, 0], [0, -1]], // 3: both reversed
+    [[0, 1], [1, 0]],   // 4: swapped
+    [[0, -1], [1, 0]],  // 5: swap + u reversed
+    [[0, 1], [-1, 0]],  // 6: swap + v reversed
+    [[0, -1], [-1, 0]], // 7: swap + both reversed
 ];
 
 /// Whether a face match is in-plane or cross-plane.
@@ -536,9 +535,17 @@ pub struct Orientation {
 
 impl Orientation {
     /// Construct from the legacy boolean flags.
-    pub fn from_flags(u_reversed: bool, v_reversed: bool, swapped: bool, plane: OrientationPlane) -> Self {
+    pub fn from_flags(
+        u_reversed: bool,
+        v_reversed: bool,
+        swapped: bool,
+        plane: OrientationPlane,
+    ) -> Self {
         let index = (u_reversed as u8) | ((v_reversed as u8) << 1) | ((swapped as u8) << 2);
-        Self { permutation_index: index, plane }
+        Self {
+            permutation_index: index,
+            plane,
+        }
     }
 
     /// Whether block2's u-axis is reversed relative to block1's.

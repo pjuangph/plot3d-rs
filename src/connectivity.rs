@@ -61,9 +61,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::{
     block::Block,
-    block_face_functions::{
-        create_face_from_diagonals, get_outer_faces, split_face, Face,
-    },
+    block_face_functions::{create_face_from_diagonals, get_outer_faces, split_face, Face},
     face_record::{match_point_bounds, FaceKey, FaceMatch, FaceRecord, MatchPoint, Orientation},
     verification::{determine_plane, extract_canonical_grid, try_all_permutations},
     Float,
@@ -129,11 +127,7 @@ fn face_nodes(face: &Face, block: &Block) -> Vec<FaceNode> {
 ///
 /// Returns the first node that meets the tolerance, preferring the closest
 /// distance. When no node matches, `None` is returned.
-fn find_closest_node(
-    nodes: &[FaceNode],
-    target: [Float; 3],
-    tol: Float,
-) -> Option<&FaceNode> {
+fn find_closest_node(nodes: &[FaceNode], target: [Float; 3], tol: Float) -> Option<&FaceNode> {
     let mut best: Option<(&FaceNode, Float)> = None;
     for node in nodes {
         let dx = node.coord[0] - target[0];
@@ -426,9 +420,7 @@ fn find_full_face_matches(
     tol: Float,
 ) -> (Vec<FaceMatch>, HashSet<FaceKey>) {
     use crate::block_face_functions::full_face_match;
-    use crate::verification::{
-        determine_plane, extract_canonical_grid, try_all_permutations,
-    };
+    use crate::verification::{determine_plane, extract_canonical_grid, try_all_permutations};
 
     let mut face_matches = Vec::new();
     let mut consumed: HashSet<FaceKey> = HashSet::new();
@@ -472,8 +464,7 @@ fn find_full_face_matches(
                     };
 
                     // Build match points from the verified orientation
-                    let points =
-                        build_match_points_from_orientation(face_i, face_j, &orientation);
+                    let points = build_match_points_from_orientation(face_i, face_j, &orientation);
 
                     consumed.insert(face_i.index_key());
                     consumed.insert(face_j.index_key());
@@ -725,14 +716,12 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
             for points in match_points.drain(..) {
                 phase2_changed = true;
                 let (i1lo, i1hi, j1lo, j1hi, k1lo, k1hi) = match_point_bounds(&points, true);
-                let mut face1 = create_face_from_diagonals(
-                    &blocks[i], i1lo, j1lo, k1lo, i1hi, j1hi, k1hi,
-                );
+                let mut face1 =
+                    create_face_from_diagonals(&blocks[i], i1lo, j1lo, k1lo, i1hi, j1hi, k1hi);
                 face1.set_block_index(i);
                 let (i2lo, i2hi, j2lo, j2hi, k2lo, k2hi) = match_point_bounds(&points, false);
-                let mut face2 = create_face_from_diagonals(
-                    &blocks[j], i2lo, j2lo, k2lo, i2hi, j2hi, k2hi,
-                );
+                let mut face2 =
+                    create_face_from_diagonals(&blocks[j], i2lo, j2lo, k2lo, i2hi, j2hi, k2hi);
                 face2.set_block_index(j);
                 matches_to_remove.insert(face1.index_key());
                 matches_to_remove.insert(face2.index_key());
@@ -1072,11 +1061,17 @@ pub fn align_face_orientations(
         // Extract canonical 2D grids for both faces
         let grid_a = match extract_canonical_grid(block1, b1) {
             Some(g) => g,
-            None => { rejected.push(fm.clone()); continue; }
+            None => {
+                rejected.push(fm.clone());
+                continue;
+            }
         };
         let grid_b = match extract_canonical_grid(block2, b2) {
             Some(g) => g,
-            None => { rejected.push(fm.clone()); continue; }
+            None => {
+                rejected.push(fm.clone());
+                continue;
+            }
         };
 
         let (pts_a, nu_a, nv_a) = grid_a;
@@ -1148,11 +1143,22 @@ fn derive_diagonal_from_match_points(
     Some((b1, b2))
 }
 
-/// Validate and standardize face-match records.
+/// Establish diagonal correspondence for face-match records.
 ///
-/// For matches with MatchPoint data, derives diagonal corners from the
-/// first/last traversal points. For self-matches (no MatchPoint data),
-/// uses spatial proximity as a fallback.
+/// Two paths depending on match origin:
+///
+/// **Phase 2/3 matches** (have MatchPoint data): Derives diagonal corners
+/// from the first/last MatchPoint traversal indices. MatchPoint indices
+/// live on the GCD-reduced grid, so they are scaled up by the mesh GCD
+/// factor to produce full-resolution `FaceRecord` indices.
+///
+/// **Phase 1 / self-matches** (no MatchPoint data): Falls back to spatial
+/// proximity search over block2's bounding-box corners to find the corner
+/// nearest block1's lower-bound corner.
+///
+/// The resulting matches carry oriented `il/jl/kl` and `ih/jh/kh` corners
+/// suitable for downstream verification via [`crate::verification::verify_connectivity`],
+/// which uses all 8 permutation matrices to determine the correct orientation.
 ///
 /// # Arguments
 /// * `blocks` - Block array providing geometry (full resolution).
@@ -1182,9 +1188,7 @@ pub fn face_matches_to_dict(blocks: &[Block], face_matches: &[FaceMatch]) -> Vec
 
             if !fm.points.is_empty() {
                 // Has MatchPoint data — use spatial proximity derivation
-                if let Some((b1_new, b2_new)) =
-                    derive_diagonal_from_match_points(fm, gcd)
-                {
+                if let Some((b1_new, b2_new)) = derive_diagonal_from_match_points(fm, gcd) {
                     result.block1 = b1_new;
                     result.block2 = b2_new;
                     matched_count += 1;
@@ -1205,10 +1209,9 @@ pub fn face_matches_to_dict(blocks: &[Block], face_matches: &[FaceMatch]) -> Vec
                     for &j in &j_vals {
                         for &k in &k_vals {
                             let (x2, y2, z2) = block2.xyz(i, j, k);
-                            let d = ((x2 - x1_l).powi(2)
-                                + (y2 - y1_l).powi(2)
-                                + (z2 - z1_l).powi(2))
-                            .sqrt();
+                            let d =
+                                ((x2 - x1_l).powi(2) + (y2 - y1_l).powi(2) + (z2 - z1_l).powi(2))
+                                    .sqrt();
                             if d < best_lower.0 {
                                 best_lower = (d, i, j, k);
                             }
@@ -1226,10 +1229,9 @@ pub fn face_matches_to_dict(blocks: &[Block], face_matches: &[FaceMatch]) -> Vec
                     for &j in &j_vals {
                         for &k in &k_vals {
                             let (x2, y2, z2) = block2.xyz(i, j, k);
-                            let d = ((x2 - x1_u).powi(2)
-                                + (y2 - y1_u).powi(2)
-                                + (z2 - z1_u).powi(2))
-                            .sqrt();
+                            let d =
+                                ((x2 - x1_u).powi(2) + (y2 - y1_u).powi(2) + (z2 - z1_u).powi(2))
+                                    .sqrt();
                             if d < best_upper.0 {
                                 best_upper = (d, i, j, k);
                             }

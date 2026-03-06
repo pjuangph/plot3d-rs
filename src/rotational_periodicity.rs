@@ -53,7 +53,9 @@ use crate::{
     },
     connectivity::get_face_intersection,
     face_pool::{count_edge_matches, extract_face_edges, FacePool},
-    face_record::{FaceKey, FaceMatch, FaceRecord, MatchPoint, Orientation, OrientationPlane, PeriodicPair},
+    face_record::{
+        FaceKey, FaceMatch, FaceRecord, MatchPoint, Orientation, OrientationPlane, PeriodicPair,
+    },
     utils::{apply_rotation, compute_min_gcd, distance3},
     Float,
 };
@@ -652,7 +654,7 @@ fn ordered_pair(a: FaceKey, b: FaceKey) -> (FaceKey, FaceKey) {
 ///
 /// # Returns
 /// `true` when both faces hold constant indices along `direction`.
-pub fn faces_support_direction(face_a: &Face, face_b: &Face, direction: &str) -> bool {
+fn faces_support_direction(face_a: &Face, face_b: &Face, direction: &str) -> bool {
     let dir = direction.trim().to_ascii_lowercase();
     match dir.as_str() {
         "i" => face_a.imin() == face_a.imax() && face_b.imin() == face_b.imax(),
@@ -670,7 +672,7 @@ pub fn faces_support_direction(face_a: &Face, face_b: &Face, direction: &str) ->
 ///
 /// # Returns
 /// `true` when the faces are planar along a shared axis.
-pub fn faces_support_any(face_a: &Face, face_b: &Face) -> bool {
+fn faces_support_any(face_a: &Face, face_b: &Face) -> bool {
     let a_planar = face_a.imin() == face_a.imax()
         || face_a.jmin() == face_a.jmax()
         || face_a.kmin() == face_a.kmax();
@@ -734,8 +736,12 @@ fn try_split_match(
             let last = &match_points[match_points.len() - 1];
             FaceRecord {
                 block_index: pair_faces[0].block_index().unwrap_or(usize::MAX),
-                il: first.i1, jl: first.j1, kl: first.k1,
-                ih: last.i1, jh: last.j1, kh: last.k1,
+                il: first.i1,
+                jl: first.j1,
+                kl: first.k1,
+                ih: last.i1,
+                jh: last.j1,
+                kh: last.k1,
                 id: pair_faces[0].id(),
                 u_physical: None,
                 v_physical: None,
@@ -748,8 +754,12 @@ fn try_split_match(
             let last = &match_points[match_points.len() - 1];
             FaceRecord {
                 block_index: pair_faces[1].block_index().unwrap_or(usize::MAX),
-                il: first.i2, jl: first.j2, kl: first.k2,
-                ih: last.i2, jh: last.j2, kh: last.k2,
+                il: first.i2,
+                jl: first.j2,
+                kl: first.k2,
+                ih: last.i2,
+                jh: last.j2,
+                kh: last.k2,
                 id: pair_faces[1].id(),
                 u_physical: None,
                 v_physical: None,
@@ -830,7 +840,7 @@ fn collect_removal_keys(face_a: &Face, face_b: &Face, pair_faces: &[Face]) -> Ve
 ///
 /// # Returns
 /// `Some((matched_faces, match_points, splits))` when overlap exists.
-pub fn periodicity_check_with_points(
+fn periodicity_check_with_points(
     face1: &Face,
     face2: &Face,
     block1: &Block,
@@ -999,7 +1009,11 @@ fn infer_orientation_from_match_points(
             u_reversed,
             v_reversed,
             true,
-            if axis1 == axis2 { OrientationPlane::InPlane } else { OrientationPlane::CrossPlane },
+            if axis1 == axis2 {
+                OrientationPlane::InPlane
+            } else {
+                OrientationPlane::CrossPlane
+            },
         ))
     } else {
         let u_reversed = du1 != 0 && du2 != 0 && (du1.signum() != du2.signum());
@@ -1014,13 +1028,17 @@ fn infer_orientation_from_match_points(
             u_reversed,
             v_reversed,
             false,
-            if axis1 == axis2 { OrientationPlane::InPlane } else { OrientationPlane::CrossPlane },
+            if axis1 == axis2 {
+                OrientationPlane::InPlane
+            } else {
+                OrientationPlane::CrossPlane
+            },
         ))
     }
 }
 
 /// Count how many of face_a's corners (after rotation) land near grid points of face_b.
-pub fn count_rotated_corners_on_face(
+fn count_rotated_corners_on_face(
     face_a: &Face,
     face_b: &Face,
     block_b: &Block,
@@ -1080,87 +1098,3 @@ pub fn count_rotated_corners_on_face(
     }
     count
 }
-
-/// Compute the rotation angle and matrix from `face1` to `face2`.
-///
-/// This assumes the rotation axis is the x-direction, which is suitable
-/// for faces within the same turbomachinery passage.
-///
-/// Reference: Linear Real Transforms from GlennHT (`M_ccMBMesh.F`, `computeLRT`).
-///
-/// # Arguments
-/// * `face1` - Source face.
-/// * `face2` - Target face.
-///
-/// # Returns
-/// `(angle_radians, rotation_matrix_3x3)`. Returns `(0.0, zeros)` when the
-/// faces are already aligned.
-pub fn linear_real_transform(face1: &Face, face2: &Face) -> (Float, [[Float; 3]; 3]) {
-    let zero_matrix = [[0.0; 3]; 3];
-
-    let (lower1, upper1) = match face1.get_corners() {
-        Some(c) => c,
-        None => return (0.0, zero_matrix),
-    };
-    let (lower2, upper2) = match face2.get_corners() {
-        Some(c) => c,
-        None => return (0.0, zero_matrix),
-    };
-
-    // Diagonal vectors
-    let d_to = [
-        upper1[0] - lower1[0],
-        upper1[1] - lower1[1],
-        upper1[2] - lower1[2],
-    ];
-    let d_from = [
-        upper2[0] - lower2[0],
-        upper2[1] - lower2[1],
-        upper2[2] - lower2[2],
-    ];
-
-    let ld_to = (d_to[0] * d_to[0] + d_to[1] * d_to[1] + d_to[2] * d_to[2]).sqrt();
-    let ld_from = (d_from[0] * d_from[0] + d_from[1] * d_from[1] + d_from[2] * d_from[2]).sqrt();
-
-    if ld_to < 1e-15 || ld_from < 1e-15 {
-        return (0.0, zero_matrix);
-    }
-
-    let n_to = [d_to[0] / ld_to, d_to[1] / ld_to, d_to[2] / ld_to];
-    let n_from = [
-        d_from[0] / ld_from,
-        d_from[1] / ld_from,
-        d_from[2] / ld_from,
-    ];
-
-    let dot = n_to[0] * n_from[0] + n_to[1] * n_from[1] + n_to[2] * n_from[2];
-
-    if (dot - 1.0).abs() < 1e-10 {
-        // No rotation needed
-        return (0.0, zero_matrix);
-    }
-
-    // Compute angle from y,z components (rotation about x-axis)
-    let denom_to = (n_to[1] * n_to[1] + n_to[2] * n_to[2]).sqrt();
-    let denom_from = (n_from[1] * n_from[1] + n_from[2] * n_from[2]).sqrt();
-
-    if denom_to < 1e-15 || denom_from < 1e-15 {
-        return (0.0, zero_matrix);
-    }
-
-    let cos_ang = (n_to[1] * n_from[1] + n_to[2] * n_from[2]) / (denom_to * denom_from);
-    let sin_ang = (n_to[2] * n_from[1] - n_to[1] * n_from[2]) / (denom_to * denom_from);
-    let mut ang = cos_ang.clamp(-1.0, 1.0).acos();
-    if sin_ang < 0.0 {
-        ang = -ang;
-    }
-
-    let rotation_matrix = [
-        [1.0, 0.0, 0.0],
-        [0.0, cos_ang, -sin_ang],
-        [0.0, sin_ang, cos_ang],
-    ];
-
-    (ang, rotation_matrix)
-}
-
