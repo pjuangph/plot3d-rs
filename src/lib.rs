@@ -30,9 +30,29 @@
 //! permutation_index = u_reversed | (v_reversed << 1) | (swapped << 2)
 //! ```
 //!
-//! The constant [`PERMUTATION_MATRICES`] holds the corresponding 2x2
+//! The constant [`PERMUTATION_MATRICES`] holds the corresponding 2×2
 //! matrices (one per index, 0 through 7). Each matrix transforms face2's
 //! parametric coordinates to align with face1's.
+//!
+//! | Index | Binary | u_rev | v_rev | swap | Matrix | Effect |
+//! |:-----:|:------:|:-----:|:-----:|:----:|:------:|:------:|
+//! | 0 | `000` | no | no | no | `[[ 1, 0],[ 0, 1]]` | identity |
+//! | 1 | `001` | yes | no | no | `[[-1, 0],[ 0, 1]]` | flip u |
+//! | 2 | `010` | no | yes | no | `[[ 1, 0],[ 0,-1]]` | flip v |
+//! | 3 | `011` | yes | yes | no | `[[-1, 0],[ 0,-1]]` | flip both |
+//! | 4 | `100` | no | no | yes | `[[ 0, 1],[ 1, 0]]` | transpose |
+//! | 5 | `101` | yes | no | yes | `[[ 0,-1],[ 1, 0]]` | transpose + flip u |
+//! | 6 | `110` | no | yes | yes | `[[ 0, 1],[-1, 0]]` | transpose + flip v |
+//! | 7 | `111` | yes | yes | yes | `[[ 0,-1],[-1, 0]]` | transpose + both |
+//!
+//! The `u` and `v` names are abstract parametric axes that map to concrete
+//! i/j/k axes depending on which axis is constant on the face:
+//!
+//! | Constant axis | u (outer loop) | v (inner loop) |
+//! |:-------------:|:--------------:|:--------------:|
+//! | I-constant | j | k |
+//! | J-constant | i | k |
+//! | K-constant | i | j |
 //!
 //! [`Orientation`] stores the index together with an [`OrientationPlane`]
 //! tag indicating whether the match is **in-plane** (same constant axis)
@@ -41,8 +61,60 @@
 //! so downstream code can reconstruct the exact node-to-node mapping
 //! without re-sampling block coordinates.
 //!
-//! See the `face_record` module documentation for the full table and
-//! usage examples.
+//! # Verification Pipeline
+//!
+//! After computing connectivity or periodicity, use the verification
+//! functions in the [`verification`] module:
+//!
+//! 1. [`verify_connectivity`] — extracts a canonical 2D grid from each
+//!    face pair, tries all 8 permutation matrices, and picks the one
+//!    that aligns nodes point-by-point within tolerance. Sets
+//!    [`Orientation`] on each verified match.
+//!
+//! 2. [`verify_periodicity`] — same approach but rotates block1's face
+//!    by the periodicity angle before comparing grids.
+//!
+//! 3. [`align_face_orientations`] — for same-dimension in-plane matches,
+//!    walks all 8 diagonal orientations to find the one where directed
+//!    I→J→K traversal matches node-by-node.
+//!
+//! The recommended pipeline (as used by the `connectivity_finder` binary):
+//!
+//! ```text
+//! connectivity_fast → face_matches_to_dict → verify_connectivity
+//!   → align_face_orientations → rotated_periodicity → verify_periodicity
+//! ```
+//!
+//! # JSON Output Formats
+//!
+//! The [`serialization`] module provides two JSON output formats:
+//!
+//! **Default (`lo`/`hi`)** — ascending bounds with `permutation_index` (0-7):
+//!
+//! ```json
+//! {
+//!   "block1": { "block_index": 0, "lo": [0,0,0], "hi": [0,101,33] },
+//!   "block2": { "block_index": 30, "lo": [0,0,0], "hi": [0,101,33] },
+//!   "permutation_index": 3
+//! }
+//! ```
+//!
+//! **Diagonal (`lb`/`ub`)** — GlennHT-compatible format. In-plane matches
+//! (perm 0-3) encode direction in block2's `lb`/`ub` with
+//! `permutation_index: -1`. Cross-plane matches (perm 4-7) use ascending
+//! `lb`/`ub` with the actual `permutation_index`.
+//!
+//! ```json
+//! {
+//!   "block1": { "block_index": 0, "lb": [0,0,0], "ub": [0,101,33] },
+//!   "block2": { "block_index": 30, "lb": [0,101,33], "ub": [0,0,0] },
+//!   "permutation_index": -1
+//! }
+//! ```
+//!
+//! [`permutation_matrices_json`] embeds the full 8-matrix array in the
+//! JSON output header so consumers can reconstruct orientations without
+//! hard-coding the table.
 
 /// Floating-point precision type used throughout the crate.
 /// Defaults to `f64`; enable the `f32` Cargo feature for single precision.
