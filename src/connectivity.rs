@@ -42,7 +42,7 @@
 //! diagonal corners of `block2` in each [`FaceMatch`] so that they encode
 //! the detected orientation. This embeds the permutation directly into the
 //! `il/jl/kl` and `ih/jh/kh` fields, which is the format expected by
-//! solvers that use the GridPro/GlennHT diagonal convention.
+//! solvers that use the GridPro diagonal convention.
 //!
 //! # Tolerance
 //!

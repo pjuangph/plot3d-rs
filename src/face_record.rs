@@ -8,7 +8,7 @@
 //! be greater than `ih`, encoding that the I-axis is reversed on this face
 //! relative to the matching face on the other block.
 //!
-//! This matches the GridPro/GlennHT connectivity convention and makes it
+//! This matches the GridPro connectivity convention and makes it
 //! possible to reconstruct the orientation relationship between two matched
 //! faces from the `FaceRecord` alone, without re-sampling block coordinates.
 //!

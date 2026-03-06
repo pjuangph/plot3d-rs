@@ -1086,7 +1086,7 @@ pub fn count_rotated_corners_on_face(
 /// This assumes the rotation axis is the x-direction, which is suitable
 /// for faces within the same turbomachinery passage.
 ///
-/// Reference: Linear Real Transforms from GlennHT (`M_ccMBMesh.F`, `computeLRT`).
+/// Reference: Linear Real Transforms (`M_ccMBMesh.F`, `computeLRT`).
 ///
 /// # Arguments
 /// * `face1` - Source face.

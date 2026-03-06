@@ -2,8 +2,7 @@
 //!
 //! This module provides:
 //! - [`index_space_normal`]: Compute the topological (integer) outward normal for a face.
-//! - [`compute_permutation_matrix`]: Compute the 3×3 permutation matrix from diagonal corners
-//!   (replicates GlennHT's `new_permutation matrix` formula).
+//! - [`compute_permutation_matrix`]: Compute the 3×3 permutation matrix from diagonal corners.
 //! - [`validate_permutation_matrix`]: Validate that a FaceMatch's corner pairing produces a valid matrix.
 //! - [`export_normals_json`] / [`import_normals_json`]: Serialize face normals to/from JSON.
 
@@ -56,8 +55,7 @@ pub fn index_space_normal_from_bounds(lb: [usize; 3], ub: [usize; 3]) -> Option<
     Some(n)
 }
 
-/// Replicate GlennHT's `new_permutation matrix` formula to compute the 3×3 integer
-/// permutation matrix from spatially paired diagonal corners.
+/// Compute the 3×3 integer permutation matrix from spatially paired diagonal corners.
 ///
 /// # Arguments
 /// - `a1, b1`: Diagonal corners of face on block 1 (0-indexed).
@@ -98,7 +96,7 @@ pub fn compute_permutation_matrix(
     let face2 = (0..3).find(|&d| n2[d] != 0)?;
 
     // Step 3: pf1f2 and chirality factor s
-    // GlennHT uses 1-indexed face numbers for the exponent
+    // Uses 1-indexed face numbers for the exponent
     let pf1f2: i64 = -(n1[face1] as i64) * (n2[face2] as i64);
     let exp = (face1 + 1 + face2 + 1) as i64; // 1-indexed
     let sign = if exp % 2 == 0 { 1i64 } else { -1i64 };
@@ -161,7 +159,7 @@ fn det3x3(m: &[[i8; 3]; 3]) -> i8 {
 }
 
 /// Validate that a FaceMatch's directed diagonal corners produce a valid
-/// GlennHT permutation matrix (all-integer entries, |det| = 1).
+/// permutation matrix (all-integer entries, |det| = 1).
 ///
 /// Uses the FaceMatch's raw `il/jl/kl` and `ih/jh/kh` (which encode
 /// directed diagonal corners when properly set).

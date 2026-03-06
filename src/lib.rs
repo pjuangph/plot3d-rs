@@ -13,7 +13,7 @@
 //! I-axis is reversed on that face relative to the matching face on the
 //! other block.
 //!
-//! This matches the GridPro/GlennHT connectivity convention where
+//! This matches the GridPro connectivity convention where
 //! `IMIN,JMIN,KMIN → IMAX,JMAX,KMAX` are diagonal corners and reversed
 //! indices encode face orientation.
 //!
