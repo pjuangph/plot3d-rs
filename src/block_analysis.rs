@@ -181,7 +181,12 @@ pub fn block_connection_matrix(
                     );
 
                     let area_match = if !node_match && options.use_area_fallback {
-                        face_i.touches(face_j, 10.0, AREA_FALLBACK_PLANE_TOL, options.area_min_overlap_frac)
+                        face_i.touches(
+                            face_j,
+                            10.0,
+                            AREA_FALLBACK_PLANE_TOL,
+                            options.area_min_overlap_frac,
+                        )
                     } else {
                         false
                     };
@@ -255,9 +260,13 @@ pub fn standardize_block_orientation(block: &Block) -> Block {
         let dx = block.x_at(block.imax - 1, center_j, center_k) - block.x_at(0, center_j, center_k);
         let dy = block.y_at(block.imax - 1, center_j, center_k) - block.y_at(0, center_j, center_k);
         let dz = block.z_at(block.imax - 1, center_j, center_k) - block.z_at(0, center_j, center_k);
-        let dominant = if dx.abs() >= dy.abs() && dx.abs() >= dz.abs() { dx }
-                       else if dy.abs() >= dz.abs() { dy }
-                       else { dz };
+        let dominant = if dx.abs() >= dy.abs() && dx.abs() >= dz.abs() {
+            dx
+        } else if dy.abs() >= dz.abs() {
+            dy
+        } else {
+            dz
+        };
         if dominant < 0.0 {
             flip_block_axis(&mut x, &mut y, &mut z, dims, 0);
         }
@@ -266,9 +275,13 @@ pub fn standardize_block_orientation(block: &Block) -> Block {
         let dx = block.x_at(center_i, block.jmax - 1, center_k) - block.x_at(center_i, 0, center_k);
         let dy = block.y_at(center_i, block.jmax - 1, center_k) - block.y_at(center_i, 0, center_k);
         let dz = block.z_at(center_i, block.jmax - 1, center_k) - block.z_at(center_i, 0, center_k);
-        let dominant = if dx.abs() >= dy.abs() && dx.abs() >= dz.abs() { dx }
-                       else if dy.abs() >= dz.abs() { dy }
-                       else { dz };
+        let dominant = if dx.abs() >= dy.abs() && dx.abs() >= dz.abs() {
+            dx
+        } else if dy.abs() >= dz.abs() {
+            dy
+        } else {
+            dz
+        };
         if dominant < 0.0 {
             flip_block_axis(&mut x, &mut y, &mut z, dims, 1);
         }
@@ -277,9 +290,13 @@ pub fn standardize_block_orientation(block: &Block) -> Block {
         let dx = block.x_at(center_i, center_j, block.kmax - 1) - block.x_at(center_i, center_j, 0);
         let dy = block.y_at(center_i, center_j, block.kmax - 1) - block.y_at(center_i, center_j, 0);
         let dz = block.z_at(center_i, center_j, block.kmax - 1) - block.z_at(center_i, center_j, 0);
-        let dominant = if dx.abs() >= dy.abs() && dx.abs() >= dz.abs() { dx }
-                       else if dy.abs() >= dz.abs() { dy }
-                       else { dz };
+        let dominant = if dx.abs() >= dy.abs() && dx.abs() >= dz.abs() {
+            dx
+        } else if dy.abs() >= dz.abs() {
+            dy
+        } else {
+            dz
+        };
         if dominant < 0.0 {
             flip_block_axis(&mut x, &mut y, &mut z, dims, 2);
         }

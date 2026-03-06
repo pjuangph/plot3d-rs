@@ -238,10 +238,7 @@ pub fn try_all_permutations(
 /// Verify connectivity face matches using permutation matrices.
 ///
 /// GCD-reduce blocks and scale face-match indices to match.
-fn prepare_reduced(
-    blocks: &[Block],
-    face_matches: &[FaceMatch],
-) -> (Vec<Block>, Vec<FaceMatch>) {
+fn prepare_reduced(blocks: &[Block], face_matches: &[FaceMatch]) -> (Vec<Block>, Vec<FaceMatch>) {
     let gcd_to_use = compute_min_gcd(blocks);
     let reduced_blocks = reduce_blocks(blocks, gcd_to_use);
     let scaled_matches: Vec<FaceMatch> = face_matches
@@ -318,8 +315,7 @@ pub fn verify_connectivity(
         }
 
         // Fall back: try all 8 permutations
-        if let Some(perm_idx) = try_all_permutations(&pts_a, nu_a, nv_a, &pts_b, nu_b, nv_b, tol)
-        {
+        if let Some(perm_idx) = try_all_permutations(&pts_a, nu_a, nv_a, &pts_b, nu_b, nv_b, tol) {
             let mut corrected = face_matches[idx].clone();
             let plane = determine_plane(b1, b2);
             corrected.orientation = Some(Orientation {
@@ -333,14 +329,22 @@ pub fn verify_connectivity(
             eprintln!(
                 "  block {}: lo=({},{},{}) hi=({},{},{})",
                 orig.block1.block_index,
-                orig.block1.i_lo(), orig.block1.j_lo(), orig.block1.k_lo(),
-                orig.block1.i_hi(), orig.block1.j_hi(), orig.block1.k_hi()
+                orig.block1.i_lo(),
+                orig.block1.j_lo(),
+                orig.block1.k_lo(),
+                orig.block1.i_hi(),
+                orig.block1.j_hi(),
+                orig.block1.k_hi()
             );
             eprintln!(
                 "  block {}: lo=({},{},{}) hi=({},{},{})",
                 orig.block2.block_index,
-                orig.block2.i_lo(), orig.block2.j_lo(), orig.block2.k_lo(),
-                orig.block2.i_hi(), orig.block2.j_hi(), orig.block2.k_hi()
+                orig.block2.i_lo(),
+                orig.block2.j_lo(),
+                orig.block2.k_lo(),
+                orig.block2.i_hi(),
+                orig.block2.j_hi(),
+                orig.block2.k_hi()
             );
             mismatched.push(face_matches[idx].clone());
         }
@@ -426,8 +430,7 @@ pub fn verify_periodicity(
             // Try stored permutation_index first
             let stored_perm = sfm.orientation.as_ref().map(|o| o.permutation_index);
             if let Some(perm_idx) = stored_perm {
-                let (permuted, out_nu, out_nv) =
-                    apply_permutation(&pts_b, nu_b, nv_b, perm_idx);
+                let (permuted, out_nu, out_nv) = apply_permutation(&pts_b, nu_b, nv_b, perm_idx);
                 if out_nu == nu_a && out_nv == nv_a && verify_match(&pts_a, &permuted, tol) {
                     verified.push(face_matches[idx].clone());
                     found = true;
@@ -457,14 +460,22 @@ pub fn verify_periodicity(
             eprintln!(
                 "  block {}: lo=({},{},{}) hi=({},{},{})",
                 orig.block1.block_index,
-                orig.block1.i_lo(), orig.block1.j_lo(), orig.block1.k_lo(),
-                orig.block1.i_hi(), orig.block1.j_hi(), orig.block1.k_hi()
+                orig.block1.i_lo(),
+                orig.block1.j_lo(),
+                orig.block1.k_lo(),
+                orig.block1.i_hi(),
+                orig.block1.j_hi(),
+                orig.block1.k_hi()
             );
             eprintln!(
                 "  block {}: lo=({},{},{}) hi=({},{},{})",
                 orig.block2.block_index,
-                orig.block2.i_lo(), orig.block2.j_lo(), orig.block2.k_lo(),
-                orig.block2.i_hi(), orig.block2.j_hi(), orig.block2.k_hi()
+                orig.block2.i_lo(),
+                orig.block2.j_lo(),
+                orig.block2.k_lo(),
+                orig.block2.i_hi(),
+                orig.block2.j_hi(),
+                orig.block2.k_hi()
             );
             mismatched.push(face_matches[idx].clone());
         }

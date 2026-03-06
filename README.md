@@ -126,6 +126,69 @@ for m in &matches {
 The `Orientation` struct also provides convenience accessors:
 `u_reversed()`, `v_reversed()`, `swapped()`, and `matrix()`.
 
+## Verification Pipeline
+
+After computing connectivity or periodicity, use the verification functions in
+`verification.rs` to correct diagonal ordering and determine orientation:
+
+1. **`verify_connectivity`** — extracts a canonical 2D grid from each face pair,
+   tries all 8 permutation matrices, and picks the one that aligns nodes
+   point-by-point within tolerance. Sets `Orientation { permutation_index, plane }`
+   on each verified match.
+
+2. **`verify_periodicity`** — same approach but rotates block1's face by the
+   periodicity angle before comparing grids.
+
+3. **`align_face_orientations`** — for same-dimension in-plane matches, walks
+   all 8 diagonal orientations to find the one where directed I/J/K traversal
+   matches node-by-node. Cross-axis matches pass through trusting corner
+   verification.
+
+The `connectivity_finder` binary in the companion `grid-packed` repository
+demonstrates the full pipeline:
+connectivity_fast -> face_matches_to_dict -> verify_connectivity ->
+align_face_orientations -> rotated_periodicity -> verify_periodicity.
+
+## JSON Output Formats
+
+The `serialization` module provides two JSON output formats controlled by a
+`--diagonal` flag in the `connectivity_finder` binary:
+
+### Default format (`lo`/`hi`)
+
+Face bounds are ascending. Each match includes `permutation_index` (0-7)
+indicating which `PERMUTATION_MATRICES` entry transforms face B to match face A.
+
+```json
+{
+  "block1": { "block_index": 0, "lo": [0,0,0], "hi": [0,101,33] },
+  "block2": { "block_index": 30, "lo": [0,0,0], "hi": [0,101,33] },
+  "permutation_index": 3
+}
+```
+
+### Diagonal format (`lb`/`ub`, `--diagonal`)
+
+Designed for GlennHT compatibility:
+
+- **In-plane** matches (perm 0-3): block2's `lb`/`ub` encodes traversal
+  direction via reversed indices. `permutation_index: -1` (direction is fully
+  encoded in the bounds).
+- **Cross-plane** matches (perm 4-7): ascending `lb`/`ub` with the actual
+  `permutation_index`, since bounds alone cannot encode an axis swap.
+
+```json
+{
+  "block1": { "block_index": 0, "lb": [0,0,0], "ub": [0,101,33] },
+  "block2": { "block_index": 30, "lb": [0,101,33], "ub": [0,0,0] },
+  "permutation_index": -1
+}
+```
+
+The `permutation_matrices_json()` helper embeds the full 8-matrix array in the
+JSON output header so consumers can reconstruct orientations without
+hard-coding the table.
+
 ## Relationship to the Python Project
 
 The original Python implementation includes comprehensive notebooks, example data, and a GUI. plot3d-rs strives to remain API-compatible where possible:

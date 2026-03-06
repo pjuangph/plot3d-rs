@@ -14,9 +14,9 @@ use serde_json::Value;
 use plot3d::{
     apply_permutation, connectivity_fast, determine_plane, extract_canonical_grid,
     face_match_to_diagonal_json, face_match_to_json, face_record_to_diagonal_json,
-    face_record_to_json, permutation_matrices_json, read_plot3d_ascii,
-    translational_periodicity, try_all_permutations, verify_connectivity, verify_match,
-    verify_partial_match, FaceMatch, FaceRecord,
+    face_record_to_json, permutation_matrices_json, read_plot3d_ascii, translational_periodicity,
+    try_all_permutations, verify_connectivity, verify_match, verify_partial_match, FaceMatch,
+    FaceRecord,
 };
 
 const MESH_PATH: &str = "/Volumes/T7/WELD/weld_ascii.xyz";
@@ -24,7 +24,10 @@ const CONN_JSON: &str = "/Volumes/T7/WELD/weld_connectivity.json";
 const CONN_PERIOD_JSON: &str = "/Volumes/T7/WELD/weld_connectivity-periodicity.json";
 
 /// A canonicalised face-match key for set comparison (order-independent).
-type MatchKey = ((usize, [usize; 3], [usize; 3]), (usize, [usize; 3], [usize; 3]));
+type MatchKey = (
+    (usize, [usize; 3], [usize; 3]),
+    (usize, [usize; 3], [usize; 3]),
+);
 
 fn face_key(rec: &FaceRecord) -> (usize, [usize; 3], [usize; 3]) {
     let mut lb = [rec.il, rec.jl, rec.kl];
@@ -40,7 +43,11 @@ fn face_key(rec: &FaceRecord) -> (usize, [usize; 3], [usize; 3]) {
 fn match_key(fm: &FaceMatch) -> MatchKey {
     let a = face_key(&fm.block1);
     let b = face_key(&fm.block2);
-    if a <= b { (a, b) } else { (b, a) }
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
 }
 
 fn json_face_key(entry: &Value) -> (usize, [usize; 3], [usize; 3]) {
@@ -68,7 +75,11 @@ fn json_face_key(entry: &Value) -> (usize, [usize; 3], [usize; 3]) {
 fn json_match_key(entry: &Value) -> MatchKey {
     let a = json_face_key(&entry["block1"]);
     let b = json_face_key(&entry["block2"]);
-    if a <= b { (a, b) } else { (b, a) }
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
 }
 
 #[test]
@@ -160,7 +171,9 @@ fn weld_connectivity_and_periodicity() {
             periodic_matches.iter().map(match_key).collect();
         let python_periodic_keys: HashSet<MatchKey> =
             python_periodic.iter().map(|e| json_match_key(e)).collect();
-        let in_both = rust_periodic_keys.intersection(&python_periodic_keys).count();
+        let in_both = rust_periodic_keys
+            .intersection(&python_periodic_keys)
+            .count();
 
         println!(
             "  Python comparison: {} Python periodic, {} in both, {} only-Python, {} only-Rust",
@@ -226,8 +239,14 @@ fn weld_connectivity_and_periodicity() {
         }
     }
     println!("  Remaining on z-min: {on_zmin}, z-max: {on_zmax}");
-    assert_eq!(on_zmin, 0, "Found {on_zmin} unpaired faces on z-min boundary");
-    assert_eq!(on_zmax, 0, "Found {on_zmax} unpaired faces on z-max boundary");
+    assert_eq!(
+        on_zmin, 0,
+        "Found {on_zmin} unpaired faces on z-min boundary"
+    );
+    assert_eq!(
+        on_zmax, 0,
+        "Found {on_zmax} unpaired faces on z-max boundary"
+    );
 
     // ── Step 8: Test new helper functions on a sample verified match ──
     println!("Testing extract_canonical_grid + apply_permutation + verify_match...");
@@ -246,7 +265,11 @@ fn weld_connectivity_and_periodicity() {
         let perm = perm_idx.unwrap();
 
         let (permuted, out_nu, out_nv) = apply_permutation(&pts_b, nu_b, nv_b, perm);
-        assert_eq!((out_nu, out_nv), (nu_a, nv_a), "Shape must match after permutation");
+        assert_eq!(
+            (out_nu, out_nv),
+            (nu_a, nv_a),
+            "Shape must match after permutation"
+        );
         assert!(
             verify_match(&pts_a, &permuted, 1e-6),
             "Permuted grid should match"
@@ -297,7 +320,10 @@ fn weld_connectivity_and_periodicity() {
         let perm_mats = permutation_matrices_json();
         assert_eq!(perm_mats.len(), 8, "Should have 8 permutation matrices");
 
-        println!("  lo/hi JSON: {}", serde_json::to_string(&json_match).unwrap());
+        println!(
+            "  lo/hi JSON: {}",
+            serde_json::to_string(&json_match).unwrap()
+        );
         println!(
             "  lb/ub JSON: {}",
             serde_json::to_string(&json_diag_match).unwrap()
@@ -314,10 +340,7 @@ fn weld_connectivity_and_periodicity() {
         verified.len(),
         mismatched.len()
     );
-    println!(
-        "  Periodicity: {} z-periodic pairs",
-        periodic_matches.len()
-    );
+    println!("  Periodicity: {} z-periodic pairs", periodic_matches.len());
     println!("  Remaining outer: {}", remaining_outer.len());
     println!("  Z-boundary unpaired: 0 (all paired)");
     println!("  PASS");
