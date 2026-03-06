@@ -54,7 +54,10 @@ fn corner_index(face: &Face, i: usize, j: usize, k: usize) -> usize {
         .unwrap_or_else(|| {
             panic!(
                 "corner_index: vertex ({}, {}, {}) not found in face with {} vertices",
-                i, j, k, face.indices.len()
+                i,
+                j,
+                k,
+                face.indices.len()
             )
         })
 }
@@ -1021,14 +1024,14 @@ fn try_corner_permutations(
     // Canonical corner ordering: [0]=(u_min,v_min), [1]=(u_min,v_max),
     //                            [2]=(u_max,v_min), [3]=(u_max,v_max)
     const CORNER_PERMS: [[usize; 4]; 8] = [
-        [0, 1, 2, 3],  // 0: identity
-        [2, 3, 0, 1],  // 1: u reversed
-        [1, 0, 3, 2],  // 2: v reversed
-        [3, 2, 1, 0],  // 3: both reversed
-        [0, 2, 1, 3],  // 4: swapped
-        [2, 0, 3, 1],  // 5: swap + u_reversed
-        [1, 3, 0, 2],  // 6: swap + v_reversed
-        [3, 1, 2, 0],  // 7: swap + both
+        [0, 1, 2, 3], // 0: identity
+        [2, 3, 0, 1], // 1: u reversed
+        [1, 0, 3, 2], // 2: v reversed
+        [3, 2, 1, 0], // 3: both reversed
+        [0, 2, 1, 3], // 4: swapped
+        [2, 0, 3, 1], // 5: swap + u_reversed
+        [1, 3, 0, 2], // 6: swap + v_reversed
+        [3, 1, 2, 0], // 7: swap + both
     ];
 
     for (idx, perm) in CORNER_PERMS.iter().enumerate() {
@@ -1039,7 +1042,11 @@ fn try_corner_permutations(
         if all_match {
             return Some(Orientation {
                 permutation_index: idx as u8,
-                plane: if idx >= 4 { OrientationPlane::CrossPlane } else { OrientationPlane::InPlane },
+                plane: if idx >= 4 {
+                    OrientationPlane::CrossPlane
+                } else {
+                    OrientationPlane::InPlane
+                },
             });
         }
     }

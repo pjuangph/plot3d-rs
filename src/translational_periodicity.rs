@@ -90,9 +90,8 @@ fn compute_periodic_lb_ub_orientation(
         let mut best_idx = 0;
         let mut best_dist = Float::INFINITY;
         for (i, c) in coords2.iter().enumerate() {
-            let d = (c[0] - query[0]).powi(2)
-                + (c[1] - query[1]).powi(2)
-                + (c[2] - query[2]).powi(2);
+            let d =
+                (c[0] - query[0]).powi(2) + (c[1] - query[1]).powi(2) + (c[2] - query[2]).powi(2);
             if d < best_dist {
                 best_dist = d;
                 best_idx = i;
@@ -135,8 +134,11 @@ fn compute_periodic_lb_ub_orientation(
             // Step one index along face1 axis d1
             let mut next_idx1 = [lb1[0] as isize, lb1[1] as isize, lb1[2] as isize];
             next_idx1[d1] += step1[d1];
-            let (nx, ny, nz) =
-                blk1.xyz(next_idx1[0] as usize, next_idx1[1] as usize, next_idx1[2] as usize);
+            let (nx, ny, nz) = blk1.xyz(
+                next_idx1[0] as usize,
+                next_idx1[1] as usize,
+                next_idx1[2] as usize,
+            );
             let mut p1_next = [nx, ny, nz];
             p1_next[shift_axis] += shift_amount;
             let face2_next = indices2[nearest(&p1_next)];
@@ -220,9 +222,19 @@ fn orientation_from_orient_vec(
     let swapped = u2 != u1 || v2 != v1;
 
     // Check reversal: face1 step direction vs face2 step direction
-    let step1 = |d: usize| -> isize { if ub1[d] >= lb1[d] { 1 } else { -1 } };
+    let step1 = |d: usize| -> isize {
+        if ub1[d] >= lb1[d] {
+            1
+        } else {
+            -1
+        }
+    };
     let step2 = |d: usize| -> isize {
-        if corrected_ub2[d] >= corrected_lb2[d] { 1 } else { -1 }
+        if corrected_ub2[d] >= corrected_lb2[d] {
+            1
+        } else {
+            -1
+        }
     };
 
     let u_reversed = step1(u1) != step2(u2);
@@ -316,8 +328,14 @@ pub fn translational_periodicity(
 
     // ── Phase 1: Fast full-face matching via 4-corner comparison ──
     let corner_tol = node_tol_xyz.unwrap_or(DEFAULT_TOL);
-    let shift_up = |mut p: [Float; 3]| -> [Float; 3] { p[axis_idx] += delta_axis; p };
-    let shift_dn = |mut p: [Float; 3]| -> [Float; 3] { p[axis_idx] -= delta_axis; p };
+    let shift_up = |mut p: [Float; 3]| -> [Float; 3] {
+        p[axis_idx] += delta_axis;
+        p
+    };
+    let shift_dn = |mut p: [Float; 3]| -> [Float; 3] {
+        p[axis_idx] -= delta_axis;
+        p
+    };
     let mut consumed_lower = HashSet::<FaceKey>::new();
     let mut consumed_upper = HashSet::<FaceKey>::new();
 
@@ -341,15 +359,13 @@ pub fn translational_periodicity(
                 return None;
             }
             // Try lower shifted up vs upper original
-            if let Some(orient) = full_face_match_transformed(
-                face_l, face_u, shift_up, corner_tol,
-            ) {
+            if let Some(orient) = full_face_match_transformed(face_l, face_u, shift_up, corner_tol)
+            {
                 return Some((face_u.clone(), orient));
             }
             // Try upper shifted down vs lower original
-            if let Some(orient) = full_face_match_transformed(
-                face_u, face_l, shift_dn, corner_tol,
-            ) {
+            if let Some(orient) = full_face_match_transformed(face_u, face_l, shift_dn, corner_tol)
+            {
                 return Some((face_u.clone(), orient));
             }
             None
@@ -373,13 +389,15 @@ pub fn translational_periodicity(
             let blk2_r = &blocks_reduced[rec2.block_index];
             let p1_val = block_axis_val(blk1_r, lb1, axis_idx);
             let p2_val = block_axis_val(blk2_r, lb2_orig, axis_idx);
-            let shift_amt = if p1_val < p2_val { delta_axis } else { -delta_axis };
+            let shift_amt = if p1_val < p2_val {
+                delta_axis
+            } else {
+                -delta_axis
+            };
 
-            let (corrected_lb2, corrected_ub2, _orient_vec) =
-                compute_periodic_lb_ub_orientation(
-                    blk1_r, lb1, ub1, blk2_r, lb2_orig, ub2_orig,
-                    axis_idx, shift_amt,
-                );
+            let (corrected_lb2, corrected_ub2, _orient_vec) = compute_periodic_lb_ub_orientation(
+                blk1_r, lb1, ub1, blk2_r, lb2_orig, ub2_orig, axis_idx, shift_amt,
+            );
             rec2.il = corrected_lb2[0];
             rec2.jl = corrected_lb2[1];
             rec2.kl = corrected_lb2[2];
@@ -387,7 +405,13 @@ pub fn translational_periodicity(
             rec2.jh = corrected_ub2[1];
             rec2.kh = corrected_ub2[2];
 
-            let orient = orientation_from_orient_vec(&_orient_vec, &lb1, &ub1, &corrected_lb2, &corrected_ub2);
+            let orient = orientation_from_orient_vec(
+                &_orient_vec,
+                &lb1,
+                &ub1,
+                &corrected_lb2,
+                &corrected_ub2,
+            );
             periodic_matches.push(FaceMatch {
                 block1: rec1,
                 block2: rec2,
@@ -425,7 +449,10 @@ pub fn translational_periodicity(
                 1 => [c[0], c[2]],
                 _ => [c[0], c[1]],
             };
-            UpperCandidate { face: f, centroid_2d }
+            UpperCandidate {
+                face: f,
+                centroid_2d,
+            }
         })
         .collect();
 
@@ -497,13 +524,15 @@ pub fn translational_periodicity(
             let blk2_r = &blocks_reduced[rec2.block_index];
             let p1_val = block_axis_val(blk1_r, lb1, axis_idx);
             let p2_val = block_axis_val(blk2_r, lb2_orig, axis_idx);
-            let shift_amt = if p1_val < p2_val { delta_axis } else { -delta_axis };
+            let shift_amt = if p1_val < p2_val {
+                delta_axis
+            } else {
+                -delta_axis
+            };
 
-            let (corrected_lb2, corrected_ub2, orient_vec) =
-                compute_periodic_lb_ub_orientation(
-                    blk1_r, lb1, ub1, blk2_r, lb2_orig, ub2_orig,
-                    axis_idx, shift_amt,
-                );
+            let (corrected_lb2, corrected_ub2, orient_vec) = compute_periodic_lb_ub_orientation(
+                blk1_r, lb1, ub1, blk2_r, lb2_orig, ub2_orig, axis_idx, shift_amt,
+            );
             rec2.il = corrected_lb2[0];
             rec2.jl = corrected_lb2[1];
             rec2.kl = corrected_lb2[2];
@@ -511,7 +540,13 @@ pub fn translational_periodicity(
             rec2.jh = corrected_ub2[1];
             rec2.kh = corrected_ub2[2];
 
-            let orient = orientation_from_orient_vec(&orient_vec, &lb1, &ub1, &corrected_lb2, &corrected_ub2);
+            let orient = orientation_from_orient_vec(
+                &orient_vec,
+                &lb1,
+                &ub1,
+                &corrected_lb2,
+                &corrected_ub2,
+            );
             periodic_matches.push(FaceMatch {
                 block1: rec1,
                 block2: rec2,

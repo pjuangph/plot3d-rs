@@ -95,7 +95,7 @@ pub use cylindrical::{find_angular_bounding_faces, to_radius, to_theta};
 pub use differencing::{find_edges, find_face_edges, BlockDiff, FaceDiff};
 pub use face_record::{
     FaceKey, FaceMatch, FaceMatchPrinter, FaceRecord, FaceRecordTraits, MatchPoint, Orientation,
-    OrientationPlane, PERMUTATION_MATRICES, PeriodicPair,
+    OrientationPlane, PeriodicPair, PERMUTATION_MATRICES,
 };
 pub use graph::{build_weighted_graph_from_face_matches, write_ddcmp, BlockGraph, WeightAggregate};
 pub use merge_blocks::{
@@ -104,20 +104,18 @@ pub use merge_blocks::{
 pub use point_match::point_match;
 pub use read::{read_ap_nasa, read_plot3d_ascii, read_plot3d_binary, BinaryFormat, FloatPrecision};
 pub use rotational_periodicity::{
-    count_rotated_corners_on_face, create_rotation_matrix, faces_support_any,
-    faces_support_direction, linear_real_transform, periodicity_check_with_points,
-    rotate_block_with_matrix, rotated_periodicity, rotational_periodicity,
+    create_rotation_matrix, rotate_block_with_matrix, rotated_periodicity, rotational_periodicity,
 };
 pub mod serialization;
 pub use serialization::{
-    face_match_to_json, face_match_to_diagonal_json, face_record_to_json,
-    face_record_to_diagonal_json, permutation_matrices_json,
-};
-pub use verification::{
-    apply_permutation, determine_plane, extract_canonical_grid, try_all_permutations,
-    verify_connectivity, verify_match, verify_partial_match, verify_periodicity,
+    face_match_to_diagonal_json, face_match_to_json, face_record_to_diagonal_json,
+    face_record_to_json, permutation_matrices_json,
 };
 pub use split_block::{split_blocks, SplitDirection};
 pub use translational_periodicity::translational_periodicity;
 pub use utils::{apply_rotation, compute_min_gcd, Endian};
+pub use verification::{
+    apply_permutation, determine_plane, extract_canonical_grid, try_all_permutations,
+    verify_connectivity, verify_match, verify_partial_match, verify_periodicity,
+};
 pub use write::write_plot3d;

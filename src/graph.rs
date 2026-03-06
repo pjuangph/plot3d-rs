@@ -152,8 +152,7 @@ pub fn partition_from_face_matches(
     let csr = csr_from_block_graph(&graph);
 
     // Build metis-rs Graph
-    let mut g = metis_rs::Graph::new(n_blocks, csr.xadj, csr.adjncy)
-        .with_adjwgt(csr.eweights);
+    let mut g = metis_rs::Graph::new(n_blocks, csr.xadj, csr.adjncy).with_adjwgt(csr.eweights);
 
     if favor_blocksize {
         let vwgt: Vec<i64> = block_sizes.iter().map(|&s| s as i64).collect();
