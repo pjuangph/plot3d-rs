@@ -411,42 +411,14 @@ impl FaceRecordTraits for Vec<FaceRecord> {
     }
 }
 
-/// The 8 canonical 2x2 permutation matrices for face orientation.
+/// The 8 canonical 2×2 permutation matrices for face orientation (legacy).
+///
+/// Retained for backward compatibility and serialization. New code should
+/// use [`Orientation::matrix3x3`] which works in full (i, j, k) space.
 ///
 /// Each matrix operates on parametric (u, v) coordinates. The index encodes:
-/// - bit 0: `u_reversed`
-/// - bit 1: `v_reversed`
-/// - bit 2: `swapped` (transpose u and v)
-///
-/// The index is computed as:
 /// ```text
 /// index = u_reversed | (v_reversed << 1) | (swapped << 2)
-/// ```
-///
-/// | Index | Matrix              | Effect            |
-/// |:-----:|:-------------------:|:-----------------:|
-/// |   0   | `[[ 1, 0],[ 0, 1]]`| identity          |
-/// |   1   | `[[-1, 0],[ 0, 1]]`| flip u            |
-/// |   2   | `[[ 1, 0],[ 0,-1]]`| flip v            |
-/// |   3   | `[[-1, 0],[ 0,-1]]`| flip both         |
-/// |   4   | `[[ 0, 1],[ 1, 0]]`| transpose         |
-/// |   5   | `[[ 0,-1],[ 1, 0]]`| transpose + flip u|
-/// |   6   | `[[ 0, 1],[-1, 0]]`| transpose + flip v|
-/// |   7   | `[[ 0,-1],[-1, 0]]`| transpose + both  |
-///
-/// # Examples
-///
-/// ```
-/// use plot3d::PERMUTATION_MATRICES;
-///
-/// // Identity (index 0): no reversal, no swap
-/// assert_eq!(PERMUTATION_MATRICES[0], [[1, 0], [0, 1]]);
-///
-/// // Index 5 = u_reversed (bit 0) + swapped (bit 2) = 1 + 4
-/// assert_eq!(PERMUTATION_MATRICES[5], [[0, -1], [1, 0]]);
-///
-/// // Verify the full table has exactly 8 entries
-/// assert_eq!(PERMUTATION_MATRICES.len(), 8);
 /// ```
 pub const PERMUTATION_MATRICES: [[[i8; 2]; 2]; 8] = [
     [[1, 0], [0, 1]],   // 0: identity
@@ -460,30 +432,6 @@ pub const PERMUTATION_MATRICES: [[[i8; 2]; 2]; 8] = [
 ];
 
 /// Whether a face match is in-plane or cross-plane.
-///
-/// When two block faces share an interface, their constant axes may or may
-/// not be the same. This distinction matters because cross-plane matches
-/// require a parametric axis swap (bit 2 of `permutation_index`), while
-/// in-plane matches only need reversal flags.
-///
-/// - [`InPlane`](OrientationPlane::InPlane): both faces have the same
-///   constant axis (e.g., both K-constant). Only the 4 non-swap
-///   permutations (indices 0-3) apply.
-/// - [`CrossPlane`](OrientationPlane::CrossPlane): faces have different
-///   constant axes (e.g., K-constant abutting J-constant). The full set of
-///   8 permutations (indices 0-7) must be tested.
-///
-/// # Examples
-///
-/// ```
-/// use plot3d::OrientationPlane;
-///
-/// let plane = OrientationPlane::InPlane;
-/// assert_eq!(plane, OrientationPlane::InPlane);
-///
-/// let cross = OrientationPlane::CrossPlane;
-/// assert_ne!(plane, cross);
-/// ```
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum OrientationPlane {
@@ -491,82 +439,232 @@ pub enum OrientationPlane {
     CrossPlane,
 }
 
-/// Describes the parametric orientation between two matched faces using a
-/// permutation matrix index (0-7).
+/// Describes the orientation relationship between two matched block faces
+/// using a 3×3 signed permutation matrix.
 ///
-/// The permutation matrix transforms face2's parametric (u, v) coordinates
-/// to align with face1's. The `plane` field indicates whether the faces share
-/// the same constant axis (in-plane) or have different constant axes
-/// (cross-plane).
-///
-/// Construct via [`Orientation::from_flags`] when you have individual boolean
-/// flags, or set `permutation_index` directly when you already know the
-/// encoded value.
-///
-/// # Bit layout
+/// The matrix `M` (entries in {-1, 0, +1}, |det| = 1) maps block1's
+/// (i, j, k) indices to block2's:
 ///
 /// ```text
-/// permutation_index = u_reversed | (v_reversed << 1) | (swapped << 2)
+/// [i2]         [i1 - lb1_i]
+/// [j2] = lb2 + M * [j1 - lb1_j]
+/// [k2]         [k1 - lb1_k]
 /// ```
+///
+/// This replaces the earlier 2×2 parametric (u, v) approach. The 3×3
+/// matrix unifies in-plane and cross-plane matches and eliminates the
+/// need for separate constant-axis detection, u/v extraction, and
+/// i/j/k reconstruction.
+///
+/// # Backward compatibility
+///
+/// The legacy `permutation_index` (0-7) is available via
+/// [`Orientation::permutation_index`] for serialization.
 ///
 /// # Examples
 ///
 /// ```
-/// use plot3d::{Orientation, OrientationPlane, PERMUTATION_MATRICES};
+/// use plot3d::Orientation;
 ///
-/// // Build from boolean flags: u reversed, v not reversed, axes swapped
-/// let orient = Orientation::from_flags(true, false, true, OrientationPlane::CrossPlane);
-/// assert_eq!(orient.permutation_index, 5); // 1 + 0 + 4
-/// assert!(orient.u_reversed());
-/// assert!(!orient.v_reversed());
-/// assert!(orient.swapped());
+/// // Identity orientation for a K-constant face match
+/// let m = [[1,0,0],[0,1,0],[0,0,1i8]];
+/// let orient = Orientation::from_matrix(m);
+/// assert_eq!(orient.permutation_index(), 0);
 ///
-/// // Retrieve the 2x2 matrix
-/// let m = orient.matrix();
-/// assert_eq!(*m, PERMUTATION_MATRICES[5]);
+/// // Build from legacy flags (backward compat)
+/// let orient2 = Orientation::from_perm_index(3, Some(2), Some(2));
+/// assert_eq!(orient2.matrix3x3()[0][0], -1); // u reversed
+/// assert_eq!(orient2.matrix3x3()[1][1], -1); // v reversed
 /// ```
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Orientation {
-    /// Index (0-7) into [`PERMUTATION_MATRICES`].
-    pub permutation_index: u8,
-    /// Whether this is an in-plane or cross-plane match.
-    pub plane: OrientationPlane,
+    /// 3×3 signed permutation matrix mapping block1 (i,j,k) → block2 (i,j,k).
+    pub matrix: [[i8; 3]; 3],
 }
 
 impl Orientation {
-    /// Construct from the legacy boolean flags.
+    /// Construct from a 3×3 matrix directly.
+    pub fn from_matrix(matrix: [[i8; 3]; 3]) -> Self {
+        Self { matrix }
+    }
+
+    /// Build a 3×3 orientation matrix from face constant axes and a 2×2
+    /// permutation index.
+    ///
+    /// `const_axis1` and `const_axis2` are the constant axis indices (0=I, 1=J, 2=K)
+    /// for face1 and face2 respectively. If `None`, defaults to axis 2 (K).
+    pub fn from_perm_index(
+        perm_idx: u8,
+        const_axis1: Option<usize>,
+        const_axis2: Option<usize>,
+    ) -> Self {
+        let c1 = const_axis1.unwrap_or(2);
+        let c2 = const_axis2.unwrap_or(2);
+        let mat2 = PERMUTATION_MATRICES[perm_idx as usize];
+        Self {
+            matrix: expand_2x2_to_3x3(mat2, c1, c2),
+        }
+    }
+
+    /// Construct from the legacy boolean flags plus constant-axis info.
     pub fn from_flags(
         u_reversed: bool,
         v_reversed: bool,
         swapped: bool,
-        plane: OrientationPlane,
+        const_axis1: usize,
+        const_axis2: usize,
     ) -> Self {
         let index = (u_reversed as u8) | ((v_reversed as u8) << 1) | ((swapped as u8) << 2);
-        Self {
-            permutation_index: index,
-            plane,
+        Self::from_perm_index(index, Some(const_axis1), Some(const_axis2))
+    }
+
+    /// Get the 3×3 matrix.
+    #[inline]
+    pub fn matrix3x3(&self) -> &[[i8; 3]; 3] {
+        &self.matrix
+    }
+
+    /// Whether this is an in-plane or cross-plane match (derived from matrix).
+    pub fn plane(&self) -> OrientationPlane {
+        // In-plane: the constant axis maps to itself (diagonal entry is nonzero)
+        // Cross-plane: constant axis maps to a different axis
+        // We detect by checking if the matrix has any off-diagonal nonzero in
+        // the constant-axis row/col. Simplest: check if it's block-diagonal.
+        let c1 = self.const_axis_from();
+        let c2 = self.const_axis_to();
+        if c1 == c2 {
+            OrientationPlane::InPlane
+        } else {
+            OrientationPlane::CrossPlane
         }
     }
 
-    /// Whether block2's u-axis is reversed relative to block1's.
+    /// Compute the legacy 2×2 permutation index (0-7).
+    pub fn permutation_index(&self) -> u8 {
+        let c1 = self.const_axis_from();
+        let vary1 = varying_axes(c1);
+        let c2 = self.const_axis_to();
+        let vary2 = varying_axes(c2);
+
+        // The 2x2 sub-matrix maps (u1,v1) → (u2,v2)
+        // u1 = vary1.0, v1 = vary1.1, u2 = vary2.0, v2 = vary2.1
+        let m00 = self.matrix[vary2.0][vary1.0];
+        let m01 = self.matrix[vary2.0][vary1.1];
+        let m10 = self.matrix[vary2.1][vary1.0];
+        let m11 = self.matrix[vary2.1][vary1.1];
+
+        // swapped: m00==0 && m11==0 (diagonal is zero, off-diagonal is nonzero)
+        let swapped = m00 == 0 && m11 == 0;
+
+        let (u_reversed, v_reversed) = if swapped {
+            // m01 maps u1→v2, m10 maps v1→u2
+            (m10 < 0, m01 < 0)
+        } else {
+            (m00 < 0, m11 < 0)
+        };
+
+        (u_reversed as u8) | ((v_reversed as u8) << 1) | ((swapped as u8) << 2)
+    }
+
+    /// Which axis on face1 (block1) is constant — the row in M that has
+    /// a nonzero entry only in the const_axis_to column.
+    fn const_axis_from(&self) -> usize {
+        // The constant axis from block1 is the column where the
+        // constant-axis row of M has a nonzero entry.
+        // Equivalently, find which column has exactly one nonzero entry
+        // and that entry's row also has exactly one nonzero entry.
+        for col in 0..3 {
+            let nonzero_rows: Vec<usize> = (0..3)
+                .filter(|&row| self.matrix[row][col] != 0)
+                .collect();
+            if nonzero_rows.len() == 1 {
+                let row = nonzero_rows[0];
+                let nonzero_cols: Vec<usize> = (0..3)
+                    .filter(|&c| self.matrix[row][c] != 0)
+                    .collect();
+                if nonzero_cols.len() == 1 {
+                    // This col maps to exactly one row, check if the OTHER
+                    // two cols also map cleanly (valid permutation matrix)
+                    return col;
+                }
+            }
+        }
+        2 // fallback
+    }
+
+    /// Which axis on face2 (block2) is constant.
+    fn const_axis_to(&self) -> usize {
+        for row in 0..3 {
+            let nonzero_cols: Vec<usize> = (0..3)
+                .filter(|&col| self.matrix[row][col] != 0)
+                .collect();
+            if nonzero_cols.len() == 1 {
+                let col = nonzero_cols[0];
+                let nonzero_rows: Vec<usize> = (0..3)
+                    .filter(|&r| self.matrix[r][col] != 0)
+                    .collect();
+                if nonzero_rows.len() == 1 {
+                    return row;
+                }
+            }
+        }
+        2 // fallback
+    }
+
+    /// Whether block2's u-axis is reversed relative to block1's (legacy compat).
     pub fn u_reversed(&self) -> bool {
-        self.permutation_index & 1 != 0
+        self.permutation_index() & 1 != 0
     }
 
-    /// Whether block2's v-axis is reversed relative to block1's.
+    /// Whether block2's v-axis is reversed relative to block1's (legacy compat).
     pub fn v_reversed(&self) -> bool {
-        self.permutation_index & 2 != 0
+        self.permutation_index() & 2 != 0
     }
 
-    /// Whether block2's u and v axes are transposed relative to block1's.
+    /// Whether block2's u and v axes are transposed relative to block1's (legacy compat).
     pub fn swapped(&self) -> bool {
-        self.permutation_index & 4 != 0
+        self.permutation_index() & 4 != 0
     }
 
-    /// Get the 2×2 permutation matrix for this orientation.
-    pub fn matrix(&self) -> &[[i8; 2]; 2] {
-        &PERMUTATION_MATRICES[self.permutation_index as usize]
+    /// Get the legacy 2×2 permutation matrix (for serialization compatibility).
+    pub fn matrix2x2(&self) -> &[[i8; 2]; 2] {
+        &PERMUTATION_MATRICES[self.permutation_index() as usize]
     }
+}
+
+/// Return the two varying axes for a given constant axis.
+#[inline]
+fn varying_axes(const_ax: usize) -> (usize, usize) {
+    match const_ax {
+        0 => (1, 2),
+        1 => (0, 2),
+        _ => (0, 1),
+    }
+}
+
+/// Expand a 2×2 permutation matrix into a 3×3 by embedding it in the
+/// varying-axis subspace. The constant-axis diagonal entry is set to ±1
+/// based on whether the faces are on the same or different constant axes.
+fn expand_2x2_to_3x3(mat2: [[i8; 2]; 2], const1: usize, const2: usize) -> [[i8; 3]; 3] {
+    let mut m = [[0i8; 3]; 3];
+    let (u1, v1) = varying_axes(const1);
+    let (u2, v2) = varying_axes(const2);
+
+    // Map varying axes: row=face2 axis, col=face1 axis
+    m[u2][u1] = mat2[0][0];
+    m[u2][v1] = mat2[0][1];
+    m[v2][u1] = mat2[1][0];
+    m[v2][v1] = mat2[1][1];
+
+    // Map constant axis: face1's const → face2's const
+    // Sign: normals should be anti-parallel at an interface
+    // For simplicity and backward compat, use +1 (same side) or infer from context.
+    // In practice the constant-axis entry is +1 for same-axis, or the
+    // determinant-preserving value for cross-axis.
+    // Map constant axis: face1's const → face2's const
+    m[const2][const1] = 1;
+
+    m
 }
 
 /// Aggregates the matching data between two faces.

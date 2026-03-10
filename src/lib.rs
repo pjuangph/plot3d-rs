@@ -22,17 +22,24 @@
 //!
 //! # Orientation & Permutation System
 //!
-//! When two block faces meet at an interface, their parametric (u, v)
-//! coordinate systems may be flipped, transposed, or both. The crate
-//! encodes all 8 valid orientations as a 3-bit index:
+//! When two block faces meet at an interface, their (i, j, k) index
+//! systems may be flipped, transposed, or both. There are **8 valid
+//! orientations** for a face pair, arising from 3 independent binary
+//! choices:
+//!
+//! - **u_reversed**: traversal along the first varying axis is flipped
+//! - **v_reversed**: traversal along the second varying axis is flipped
+//! - **swapped**: the two varying axes trade places (cross-plane match)
+//!
+//! ## The 8 Orientations (2×2 Representation)
+//!
+//! The constant [`PERMUTATION_MATRICES`] holds 8 canonical 2×2 matrices
+//! that operate on the abstract parametric (u, v) coordinates. The index
+//! is computed as:
 //!
 //! ```text
 //! permutation_index = u_reversed | (v_reversed << 1) | (swapped << 2)
 //! ```
-//!
-//! The constant [`PERMUTATION_MATRICES`] holds the corresponding 2×2
-//! matrices (one per index, 0 through 7). Each matrix transforms face2's
-//! parametric coordinates to align with face1's.
 //!
 //! | Index | Binary | u_rev | v_rev | swap | Matrix | Effect |
 //! |:-----:|:------:|:-----:|:-----:|:----:|:------:|:------:|
@@ -54,12 +61,50 @@
 //! | J-constant | i | k |
 //! | K-constant | i | j |
 //!
-//! [`Orientation`] stores the index together with an [`OrientationPlane`]
-//! tag indicating whether the match is **in-plane** (same constant axis)
-//! or **cross-plane** (different constant axes, requiring a swap). The
-//! connectivity pipeline populates `FaceMatch::orientation` automatically
-//! so downstream code can reconstruct the exact node-to-node mapping
-//! without re-sampling block coordinates.
+//! ## 3×3 Permutation Matrix (Primary Representation)
+//!
+//! The [`Orientation`] struct stores a **3×3 signed permutation matrix**
+//! `M` (entries in {-1, 0, +1}) that directly maps block1's (i, j, k)
+//! indices to block2's:
+//!
+//! ```text
+//! [i2]         [i1 - lb1_i]
+//! [j2] = lb2 + M * [j1 - lb1_j]
+//! [k2]         [k1 - lb1_k]
+//! ```
+//!
+//! The 3×3 matrix is computed from the 2×2 matrix by embedding it in
+//! the varying-axis subspace, using the known constant axes of both
+//! faces. This eliminates the need to separately identify the constant
+//! axis, extract (u, v), apply a 2×2 matrix, then reconstruct (i, j, k).
+//!
+//! ### Example 3×3 matrices
+//!
+//! **In-plane** (both faces K-constant, u=i, v=j):
+//!
+//! | Perm | 2×2 | 3×3 |
+//! |:----:|:---:|:---:|
+//! | 0: identity | `[[1,0],[0,1]]` | `[[1,0,0],[0,1,0],[0,0,1]]` |
+//! | 1: flip u | `[[-1,0],[0,1]]` | `[[-1,0,0],[0,1,0],[0,0,1]]` |
+//! | 3: flip both | `[[-1,0],[0,-1]]` | `[[-1,0,0],[0,-1,0],[0,0,1]]` |
+//!
+//! **Cross-plane** (face1 K-constant, face2 J-constant):
+//!
+//! | Perm | 2×2 | 3×3 |
+//! |:----:|:---:|:---:|
+//! | 4: swap | `[[0,1],[1,0]]` | `[[1,0,0],[0,0,1],[0,1,0]]` |
+//!
+//! ## In-plane vs Cross-plane
+//!
+//! - **In-plane** (perm 0-3): both faces have the same constant axis.
+//!   The 3×3 matrix has a +1 on the constant-axis diagonal.
+//! - **Cross-plane** (perm 4-7): faces have different constant axes.
+//!   The 3×3 matrix has off-diagonal entries mapping one constant axis
+//!   to another.
+//!
+//! [`OrientationPlane`] is derived from the matrix via
+//! [`Orientation::plane()`]. The legacy `permutation_index` (0-7) is
+//! available via [`Orientation::permutation_index()`] for serialization.
 //!
 //! # Verification Pipeline
 //!
@@ -68,15 +113,15 @@
 //!
 //! 1. [`verify_connectivity`] — extracts a canonical 2D grid from each
 //!    face pair, tries all 8 permutation matrices, and picks the one
-//!    that aligns nodes point-by-point within tolerance. Sets
-//!    [`Orientation`] on each verified match.
+//!    that aligns nodes point-by-point within tolerance. Sets the 3×3
+//!    [`Orientation`] matrix on each verified match.
 //!
 //! 2. [`verify_periodicity`] — same approach but rotates block1's face
 //!    by the periodicity angle before comparing grids.
 //!
-//! 3. [`align_face_orientations`] — for same-dimension in-plane matches,
-//!    walks all 8 diagonal orientations to find the one where directed
-//!    I→J→K traversal matches node-by-node.
+//! 3. [`align_face_orientations`] — for same-dimension matches,
+//!    walks all 8 orientations to find the one where node-by-node
+//!    traversal matches.
 //!
 //! The recommended pipeline (as used by the `connectivity_finder` binary):
 //!
@@ -181,7 +226,7 @@ pub use rotational_periodicity::{
 pub mod serialization;
 pub use serialization::{
     face_match_to_diagonal_json, face_match_to_json, face_record_to_diagonal_json,
-    face_record_to_json, permutation_matrices_json,
+    face_record_to_json, orientation_matrix_json, permutation_matrices_json,
 };
 pub use split_block::{split_blocks, SplitDirection};
 pub use translational_periodicity::translational_periodicity;

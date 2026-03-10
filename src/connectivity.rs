@@ -63,7 +63,7 @@ use crate::{
     block::Block,
     block_face_functions::{create_face_from_diagonals, get_outer_faces, split_face, Face},
     face_record::{match_point_bounds, FaceKey, FaceMatch, FaceRecord, MatchPoint, Orientation},
-    verification::{determine_plane, extract_canonical_grid, try_all_permutations},
+    verification::{extract_canonical_grid, try_all_permutations},
     Float,
 };
 
@@ -420,7 +420,7 @@ fn find_full_face_matches(
     tol: Float,
 ) -> (Vec<FaceMatch>, HashSet<FaceKey>) {
     use crate::block_face_functions::full_face_match;
-    use crate::verification::{determine_plane, extract_canonical_grid, try_all_permutations};
+    use crate::verification::{extract_canonical_grid, try_all_permutations};
 
     let mut face_matches = Vec::new();
     let mut consumed: HashSet<FaceKey> = HashSet::new();
@@ -457,11 +457,11 @@ fn find_full_face_matches(
                 if let Some(perm_idx) =
                     try_all_permutations(&pts_a, nu_a, nv_a, &pts_b, nu_b, nv_b, tol)
                 {
-                    let plane = determine_plane(&rec_a, &rec_b);
-                    let orientation = Orientation {
-                        permutation_index: perm_idx,
-                        plane,
-                    };
+                    let orientation = Orientation::from_perm_index(
+                        perm_idx,
+                        rec_a.constant_axis(),
+                        rec_b.constant_axis(),
+                    );
 
                     // Build match points from the verified orientation
                     let points = build_match_points_from_orientation(face_i, face_j, &orientation);
@@ -1080,11 +1080,11 @@ pub fn align_face_orientations(
         // Try all 8 permutation matrices to find the matching orientation
         if let Some(perm_idx) = try_all_permutations(&pts_a, nu_a, nv_a, &pts_b, nu_b, nv_b, tol) {
             let mut fm_out = fm.clone();
-            let plane = determine_plane(b1, b2);
-            fm_out.orientation = Some(Orientation {
-                permutation_index: perm_idx,
-                plane,
-            });
+            fm_out.orientation = Some(Orientation::from_perm_index(
+                perm_idx,
+                b1.constant_axis(),
+                b2.constant_axis(),
+            ));
             aligned.push(fm_out);
         } else {
             eprintln!(

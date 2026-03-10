@@ -20,7 +20,7 @@ use crate::{
     block::Block,
     block_analysis::find_bounding_faces,
     block_face_functions::{full_face_match_transformed, outer_face_records_to_list, Face},
-    face_record::{FaceKey, FaceMatch, FaceRecord, Orientation, OrientationPlane},
+    face_record::{FaceKey, FaceMatch, FaceRecord, Orientation},
     utils::compute_min_gcd,
     Float,
 };
@@ -177,8 +177,10 @@ fn block_axis_val(block: &Block, ijk: [usize; 3], axis_idx: usize) -> Float {
 }
 
 /// Convert the Python-style orientation vector `[a, b, c]` (1-indexed face2 axis
-/// per face1 axis) into the Rust `Orientation` struct by examining the corrected
-/// lb2/ub2 step directions relative to face1's lb1/ub1.
+/// per face1 axis) and corrected lb2/ub2 into a 3×3 `Orientation` matrix.
+///
+/// The orientation vector says: face1 axis `d1` maps to face2 axis `orient_vec[d1]-1`.
+/// The step direction (sign) comes from comparing lb/ub ordering on each axis.
 fn orientation_from_orient_vec(
     orient_vec: &[usize; 3],
     lb1: &[usize; 3],
@@ -186,61 +188,33 @@ fn orientation_from_orient_vec(
     corrected_lb2: &[usize; 3],
     corrected_ub2: &[usize; 3],
 ) -> Orientation {
-    // Find the two varying axes on face1 (dims > 1)
-    let dims1: [usize; 3] = [
-        (ub1[0] as isize - lb1[0] as isize).unsigned_abs() + 1,
-        (ub1[1] as isize - lb1[1] as isize).unsigned_abs() + 1,
-        (ub1[2] as isize - lb1[2] as isize).unsigned_abs() + 1,
-    ];
-    let varying1: Vec<usize> = (0..3).filter(|&d| dims1[d] > 1).collect();
-    if varying1.len() != 2 {
-        return Orientation::from_flags(false, false, false, OrientationPlane::InPlane);
+    let mut matrix = [[0i8; 3]; 3];
+
+    for d1 in 0..3 {
+        let d2 = orient_vec[d1].wrapping_sub(1); // 0-indexed face2 axis
+        if d2 >= 3 {
+            continue;
+        }
+
+        // Determine sign: does stepping along d1 on face1 produce the same
+        // direction on face2's d2 axis?
+        let span1 = ub1[d1] as isize - lb1[d1] as isize;
+        let span2 = corrected_ub2[d2] as isize - corrected_lb2[d2] as isize;
+
+        let sign = if span1 == 0 && span2 == 0 {
+            // Constant axis — use +1 (direction doesn't matter)
+            1i8
+        } else if span1 == 0 || span2 == 0 {
+            1i8
+        } else {
+            // Same sign → +1, opposite sign → -1
+            if (span1 > 0) == (span2 > 0) { 1 } else { -1 }
+        };
+
+        matrix[d2][d1] = sign;
     }
 
-    // Determine constant axes for plane classification
-    let const_axis1 = (0..3).find(|&d| dims1[d] == 1).unwrap_or(0);
-    let dims2: [usize; 3] = [
-        (corrected_ub2[0] as isize - corrected_lb2[0] as isize).unsigned_abs() + 1,
-        (corrected_ub2[1] as isize - corrected_lb2[1] as isize).unsigned_abs() + 1,
-        (corrected_ub2[2] as isize - corrected_lb2[2] as isize).unsigned_abs() + 1,
-    ];
-    let const_axis2 = (0..3).find(|&d| dims2[d] == 1).unwrap_or(0);
-    let plane = if const_axis1 == const_axis2 {
-        OrientationPlane::InPlane
-    } else {
-        OrientationPlane::CrossPlane
-    };
-
-    // Face1 varying axes are u (first) and v (second)
-    let u1 = varying1[0];
-    let v1 = varying1[1];
-    // Each maps to a face2 axis via orient_vec
-    let u2 = orient_vec[u1].wrapping_sub(1); // 0-indexed
-    let v2 = orient_vec[v1].wrapping_sub(1);
-
-    // Check if face2's u and v axes are swapped relative to face1's
-    let swapped = u2 != u1 || v2 != v1;
-
-    // Check reversal: face1 step direction vs face2 step direction
-    let step1 = |d: usize| -> isize {
-        if ub1[d] >= lb1[d] {
-            1
-        } else {
-            -1
-        }
-    };
-    let step2 = |d: usize| -> isize {
-        if corrected_ub2[d] >= corrected_lb2[d] {
-            1
-        } else {
-            -1
-        }
-    };
-
-    let u_reversed = step1(u1) != step2(u2);
-    let v_reversed = step1(v1) != step2(v2);
-
-    Orientation::from_flags(u_reversed, v_reversed, swapped, plane)
+    Orientation::from_matrix(matrix)
 }
 
 /// Detect translational periodicity along an axis.

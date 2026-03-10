@@ -53,9 +53,7 @@ use crate::{
     },
     connectivity::get_face_intersection,
     face_pool::{count_edge_matches, extract_face_edges, FacePool},
-    face_record::{
-        FaceKey, FaceMatch, FaceRecord, MatchPoint, Orientation, OrientationPlane, PeriodicPair,
-    },
+    face_record::{FaceKey, FaceMatch, FaceRecord, MatchPoint, Orientation, PeriodicPair},
     utils::{apply_rotation, compute_min_gcd, distance3},
     Float,
 };
@@ -864,8 +862,8 @@ fn periodicity_check_with_points(
         return None;
     }
 
-    let bounds_a = match_bounds(&matches, true);
-    let bounds_b = match_bounds(&matches, false);
+    let bounds_a = crate::face_record::match_point_bounds(&matches, true);
+    let bounds_b = crate::face_record::match_point_bounds(&matches, false);
 
     let mut out1 = create_face_from_diagonals(
         block_a, bounds_a.0, bounds_a.2, bounds_a.4, bounds_a.1, bounds_a.3, bounds_a.5,
@@ -894,40 +892,6 @@ fn periodicity_check_with_points(
     Some((pair, matches, split1))
 }
 
-/// Determine the bounds of matching points for either the first or second face.
-///
-/// # Arguments
-/// * `matches` - Point-to-point matches returned by connectivity.
-/// * `first` - When `true`, consider the first face indices; otherwise use the second.
-///
-/// # Returns
-/// `(imin, imax, jmin, jmax, kmin, kmax)` describing the bounding box.
-fn match_bounds(
-    matches: &[crate::face_record::MatchPoint],
-    first: bool,
-) -> (usize, usize, usize, usize, usize, usize) {
-    let mut i_lo = usize::MAX;
-    let mut j_lo = usize::MAX;
-    let mut k_lo = usize::MAX;
-    let mut i_hi = 0usize;
-    let mut j_hi = 0usize;
-    let mut k_hi = 0usize;
-    for m in matches {
-        let (i, j, k) = if first {
-            (m.i1, m.j1, m.k1)
-        } else {
-            (m.i2, m.j2, m.k2)
-        };
-        i_lo = i_lo.min(i);
-        j_lo = j_lo.min(j);
-        k_lo = k_lo.min(k);
-        i_hi = i_hi.max(i);
-        j_hi = j_hi.max(j);
-        k_hi = k_hi.max(k);
-    }
-    (i_lo, i_hi, j_lo, j_hi, k_lo, k_hi)
-}
-
 /// Fixed matching tolerance for node coincidence checks.
 const MATCH_TOL: Float = 1e-6;
 
@@ -935,106 +899,78 @@ const MATCH_TOL: Float = 1e-6;
 // Orientation inference from match points
 // ============================================================================
 
-/// Infer orientation (u_reversed, v_reversed, swapped) from node-level MatchPoints.
+/// Infer a 3×3 orientation matrix from node-level MatchPoints.
 ///
-/// Examines how block1 parametric indices map to block2 parametric indices.
+/// Examines how block1 (i, j, k) indices map to block2 (i, j, k) indices
+/// by finding points where each axis changes independently.
 fn infer_orientation_from_match_points(
     points: &[MatchPoint],
-    face1: &Face,
-    face2: &Face,
+    _face1: &Face,
+    _face2: &Face,
 ) -> Option<Orientation> {
     if points.len() < 2 {
         return None;
     }
 
-    let axis1 = face1.const_axis()?;
-    let axis2 = face2.const_axis()?;
+    let p0 = &points[0];
+    let ijk1_0 = [p0.i1 as isize, p0.j1 as isize, p0.k1 as isize];
+    let ijk2_0 = [p0.i2 as isize, p0.j2 as isize, p0.k2 as isize];
 
-    // Extract parametric (u, v) for each face based on constant axis
-    let to_uv1 = |p: &MatchPoint| -> (isize, isize) {
-        match axis1 {
-            FaceAxis::I => (p.j1 as isize, p.k1 as isize),
-            FaceAxis::J => (p.i1 as isize, p.k1 as isize),
-            FaceAxis::K => (p.i1 as isize, p.j1 as isize),
-        }
-    };
-    let to_uv2 = |p: &MatchPoint| -> (isize, isize) {
-        match axis2 {
-            FaceAxis::I => (p.j2 as isize, p.k2 as isize),
-            FaceAxis::J => (p.i2 as isize, p.k2 as isize),
-            FaceAxis::K => (p.i2 as isize, p.j2 as isize),
-        }
-    };
+    // For each block1 axis, find a point where that axis changes
+    // and determine which block2 axis changes and in which direction.
+    let mut matrix = [[0i8; 3]; 3];
+    let mut found = [false; 3];
 
-    // Find two points where u1 differs (along u-direction)
-    let (u1_0, v1_0) = to_uv1(&points[0]);
-    let (u2_0, v2_0) = to_uv2(&points[0]);
-
-    // Look for a point with different u1
-    let mut u_pair = None;
-    let mut v_pair = None;
     for p in points.iter().skip(1) {
-        let (u1, v1) = to_uv1(p);
-        let (u2, v2) = to_uv2(p);
-        if u1 != u1_0 && u_pair.is_none() {
-            u_pair = Some((u1 - u1_0, v1 - v1_0, u2 - u2_0, v2 - v2_0));
+        let ijk1 = [p.i1 as isize, p.j1 as isize, p.k1 as isize];
+        let ijk2 = [p.i2 as isize, p.j2 as isize, p.k2 as isize];
+
+        let d1 = [ijk1[0] - ijk1_0[0], ijk1[1] - ijk1_0[1], ijk1[2] - ijk1_0[2]];
+        let d2 = [ijk2[0] - ijk2_0[0], ijk2[1] - ijk2_0[1], ijk2[2] - ijk2_0[2]];
+
+        // Look for a point where exactly one block1 axis changed
+        let changed1: Vec<usize> = (0..3).filter(|&a| d1[a] != 0).collect();
+        if changed1.len() != 1 {
+            continue;
         }
-        if v1 != v1_0 && v_pair.is_none() {
-            v_pair = Some((u1 - u1_0, v1 - v1_0, u2 - u2_0, v2 - v2_0));
+        let ax1 = changed1[0];
+        if found[ax1] {
+            continue;
         }
-        if u_pair.is_some() && v_pair.is_some() {
+
+        // Find which block2 axis changed
+        let changed2: Vec<usize> = (0..3).filter(|&a| d2[a] != 0).collect();
+        if changed2.len() != 1 {
+            continue;
+        }
+        let ax2 = changed2[0];
+
+        // Sign: same direction → +1, opposite → -1
+        let sign = if d1[ax1].signum() == d2[ax2].signum() {
+            1i8
+        } else {
+            -1i8
+        };
+        matrix[ax2][ax1] = sign;
+        found[ax1] = true;
+
+        if found.iter().all(|&f| f) {
             break;
         }
     }
 
-    // Determine orientation from the mapping
-    // When u1 changes: if u2 also changes → not swapped; if v2 changes → swapped
-    let u_info = u_pair?;
-    let du1 = u_info.0; // delta_u1
-    let du2 = u_info.2; // delta_u2
-    let dv2_from_u = u_info.3; // delta_v2 when u1 changes
-
-    let swapped = du2 == 0 && dv2_from_u != 0;
-
-    if swapped {
-        // u1 maps to v2, need to figure out v1 maps to u2
-        let u_reversed = if let Some(v_info) = v_pair {
-            // v1 changes → check u2
-            v_info.1.signum() != v_info.2.signum()
-        } else {
-            false
-        };
-        let v_reversed = dv2_from_u != 0 && (du1.signum() != dv2_from_u.signum());
-        Some(Orientation::from_flags(
-            u_reversed,
-            v_reversed,
-            true,
-            if axis1 == axis2 {
-                OrientationPlane::InPlane
-            } else {
-                OrientationPlane::CrossPlane
-            },
-        ))
-    } else {
-        let u_reversed = du1 != 0 && du2 != 0 && (du1.signum() != du2.signum());
-        let v_reversed = if let Some(v_info) = v_pair {
-            let dv1 = v_info.1;
-            let dv2 = v_info.3;
-            dv1 != 0 && dv2 != 0 && (dv1.signum() != dv2.signum())
-        } else {
-            false
-        };
-        Some(Orientation::from_flags(
-            u_reversed,
-            v_reversed,
-            false,
-            if axis1 == axis2 {
-                OrientationPlane::InPlane
-            } else {
-                OrientationPlane::CrossPlane
-            },
-        ))
+    // Fill constant axis if not found (maps to itself with +1)
+    for d in 0..3 {
+        if !found[d] {
+            // Find which row is still empty
+            let empty_row = (0..3).find(|&r| matrix[r].iter().all(|&v| v == 0));
+            if let Some(r) = empty_row {
+                matrix[r][d] = 1;
+            }
+        }
     }
+
+    Some(Orientation::from_matrix(matrix))
 }
 
 /// Count how many of face_a's corners (after rotation) land near grid points of face_b.

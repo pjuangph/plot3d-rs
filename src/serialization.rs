@@ -52,18 +52,22 @@ pub fn face_record_to_json(rec: &FaceRecord) -> Value {
     obj
 }
 
-/// Convert a [`FaceMatch`] to JSON (`lo`/`hi` + `permutation_index` 0-7).
+/// Convert a [`FaceMatch`] to JSON (`lo`/`hi` + `permutation_index` + `orientation_matrix`).
 pub fn face_match_to_json(fm: &FaceMatch) -> Value {
     let perm_idx: i8 = fm
         .orientation
         .as_ref()
-        .map(|o| o.permutation_index as i8)
+        .map(|o| o.permutation_index() as i8)
         .unwrap_or(0);
-    json!({
+    let mut obj = json!({
         "block1": face_record_to_json(&fm.block1),
         "block2": face_record_to_json(&fm.block2),
         "permutation_index": perm_idx,
-    })
+    });
+    if let Some(orient) = &fm.orientation {
+        obj["orientation_matrix"] = orientation_matrix_json(orient.matrix3x3());
+    }
+    obj
 }
 
 // ── Diagonal format (lb/ub) ─────────────────────────────────────────────
@@ -131,12 +135,12 @@ fn face_record_to_directed_diagonal_json(rec: &FaceRecord, perm_idx: u8) -> Valu
 /// - **Cross-plane** (perm 4-7): ascending `lb`/`ub`. `permutation_index: N` (actual index).
 pub fn face_match_to_diagonal_json(fm: &FaceMatch) -> Value {
     let orient = fm.orientation.as_ref();
-    let perm_idx = orient.map(|o| o.permutation_index).unwrap_or(0);
+    let perm_idx = orient.map(|o| o.permutation_index()).unwrap_or(0);
     let is_cross_plane = orient
-        .map(|o| o.plane == OrientationPlane::CrossPlane)
+        .map(|o| o.plane() == OrientationPlane::CrossPlane)
         .unwrap_or(false);
 
-    if is_cross_plane {
+    let mut obj = if is_cross_plane {
         // Cross-plane: lb/ub can't encode swap → ascending bounds + actual permutation_index
         json!({
             "block1": face_record_to_diagonal_json(&fm.block1),
@@ -150,13 +154,30 @@ pub fn face_match_to_diagonal_json(fm: &FaceMatch) -> Value {
             "block2": face_record_to_directed_diagonal_json(&fm.block2, perm_idx),
             "permutation_index": -1,
         })
+    };
+    if let Some(orient) = &fm.orientation {
+        obj["orientation_matrix"] = orientation_matrix_json(orient.matrix3x3());
     }
+    obj
 }
 
-/// Serialize the 8 permutation matrices as a JSON array (for inclusion in output headers).
+/// Serialize the 8 legacy 2×2 permutation matrices as a JSON array.
 pub fn permutation_matrices_json() -> Vec<Value> {
     PERMUTATION_MATRICES
         .iter()
         .map(|m| json!([[m[0][0], m[0][1]], [m[1][0], m[1][1]]]))
         .collect()
+}
+
+/// Serialize a 3×3 orientation matrix as a JSON array of arrays.
+///
+/// ```json
+/// [[1,0,0],[0,-1,0],[0,0,1]]
+/// ```
+pub fn orientation_matrix_json(m: &[[i8; 3]; 3]) -> Value {
+    json!([
+        [m[0][0], m[0][1], m[0][2]],
+        [m[1][0], m[1][1], m[1][2]],
+        [m[2][0], m[2][1], m[2][2]],
+    ])
 }

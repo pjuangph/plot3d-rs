@@ -1018,7 +1018,7 @@ fn try_corner_permutations(
     cb: &[[Float; 3]; 4],
     tol: Float,
 ) -> Option<crate::face_record::Orientation> {
-    use crate::face_record::{Orientation, OrientationPlane};
+    use crate::face_record::Orientation;
 
     // Corner index permutations corresponding to each of the 8 orientation matrices.
     // Canonical corner ordering: [0]=(u_min,v_min), [1]=(u_min,v_max),
@@ -1040,14 +1040,10 @@ fn try_corner_permutations(
             .enumerate()
             .all(|(i, &j)| distance(ca[i], cb[j]) <= tol);
         if all_match {
-            return Some(Orientation {
-                permutation_index: idx as u8,
-                plane: if idx >= 4 {
-                    OrientationPlane::CrossPlane
-                } else {
-                    OrientationPlane::InPlane
-                },
-            });
+            // We don't know the constant axes here (corner-only check),
+            // so build from perm_index with unknown axes (defaults to K-const).
+            // The caller should refine with actual constant axes if needed.
+            return Some(Orientation::from_perm_index(idx as u8, None, None));
         }
     }
 

@@ -45,9 +45,7 @@
 
 use crate::block::Block;
 use crate::block_face_functions::{reduce_blocks, rotate_block};
-use crate::face_record::{
-    FaceMatch, FaceRecord, Orientation, OrientationPlane, PERMUTATION_MATRICES,
-};
+use crate::face_record::{FaceMatch, FaceRecord, Orientation, PERMUTATION_MATRICES};
 use crate::rotational_periodicity::create_rotation_matrix;
 use crate::utils::compute_min_gcd;
 use crate::Float;
@@ -191,11 +189,14 @@ pub fn verify_partial_match(
 }
 
 /// Determine if two faces are in-plane (same constant axis) or cross-plane.
-pub fn determine_plane(rec_a: &FaceRecord, rec_b: &FaceRecord) -> OrientationPlane {
+pub fn determine_plane(
+    rec_a: &FaceRecord,
+    rec_b: &FaceRecord,
+) -> crate::face_record::OrientationPlane {
     if rec_a.constant_axis() == rec_b.constant_axis() {
-        OrientationPlane::InPlane
+        crate::face_record::OrientationPlane::InPlane
     } else {
-        OrientationPlane::CrossPlane
+        crate::face_record::OrientationPlane::CrossPlane
     }
 }
 
@@ -305,7 +306,7 @@ pub fn verify_connectivity(
         let (pts_b, nu_b, nv_b) = grid_b;
 
         // Try stored permutation_index first (if available)
-        let stored_perm = sfm.orientation.as_ref().map(|o| o.permutation_index);
+        let stored_perm = sfm.orientation.as_ref().map(|o| o.permutation_index());
         if let Some(perm_idx) = stored_perm {
             let (permuted, out_nu, out_nv) = apply_permutation(&pts_b, nu_b, nv_b, perm_idx);
             if out_nu == nu_a && out_nv == nv_a && verify_match(&pts_a, &permuted, tol) {
@@ -317,11 +318,11 @@ pub fn verify_connectivity(
         // Fall back: try all 8 permutations
         if let Some(perm_idx) = try_all_permutations(&pts_a, nu_a, nv_a, &pts_b, nu_b, nv_b, tol) {
             let mut corrected = face_matches[idx].clone();
-            let plane = determine_plane(b1, b2);
-            corrected.orientation = Some(Orientation {
-                permutation_index: perm_idx,
-                plane,
-            });
+            corrected.orientation = Some(Orientation::from_perm_index(
+                perm_idx,
+                b1.constant_axis(),
+                b2.constant_axis(),
+            ));
             verified.push(corrected);
         } else {
             let orig = &face_matches[idx];
@@ -428,7 +429,7 @@ pub fn verify_periodicity(
             let (pts_a, nu_a, nv_a) = grid_a;
 
             // Try stored permutation_index first
-            let stored_perm = sfm.orientation.as_ref().map(|o| o.permutation_index);
+            let stored_perm = sfm.orientation.as_ref().map(|o| o.permutation_index());
             if let Some(perm_idx) = stored_perm {
                 let (permuted, out_nu, out_nv) = apply_permutation(&pts_b, nu_b, nv_b, perm_idx);
                 if out_nu == nu_a && out_nv == nv_a && verify_match(&pts_a, &permuted, tol) {
@@ -443,11 +444,11 @@ pub fn verify_periodicity(
                 try_all_permutations(&pts_a, nu_a, nv_a, &pts_b, nu_b, nv_b, tol)
             {
                 let mut corrected = face_matches[idx].clone();
-                let plane = determine_plane(b1, b2);
-                corrected.orientation = Some(Orientation {
-                    permutation_index: perm_idx,
-                    plane,
-                });
+                corrected.orientation = Some(Orientation::from_perm_index(
+                    perm_idx,
+                    b1.constant_axis(),
+                    b2.constant_axis(),
+                ));
                 verified.push(corrected);
                 found = true;
                 break;
