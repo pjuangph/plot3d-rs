@@ -134,32 +134,39 @@
 //!
 //! The [`serialization`] module provides two JSON output formats:
 //!
-//! **Default (`lo`/`hi`)** — ascending bounds with `permutation_index` (0-7):
+//! **Default (`lo`/`hi`)** — ascending bounds with `permutation_index` (0-7)
+//! and the full 3×3 `orientation_matrix`:
 //!
 //! ```json
 //! {
 //!   "block1": { "block_index": 0, "lo": [0,0,0], "hi": [0,101,33] },
 //!   "block2": { "block_index": 30, "lo": [0,0,0], "hi": [0,101,33] },
-//!   "permutation_index": 3
+//!   "permutation_index": 3,
+//!   "orientation_matrix": [[-1,0,0],[0,-1,0],[0,0,1]]
 //! }
 //! ```
 //!
 //! **Diagonal (`lb`/`ub`)** — GlennHT-compatible format. In-plane matches
 //! (perm 0-3) encode direction in block2's `lb`/`ub` with
 //! `permutation_index: -1`. Cross-plane matches (perm 4-7) use ascending
-//! `lb`/`ub` with the actual `permutation_index`.
+//! `lb`/`ub` with the actual `permutation_index`. Both include the 3×3
+//! `orientation_matrix`.
 //!
 //! ```json
 //! {
 //!   "block1": { "block_index": 0, "lb": [0,0,0], "ub": [0,101,33] },
 //!   "block2": { "block_index": 30, "lb": [0,101,33], "ub": [0,0,0] },
-//!   "permutation_index": -1
+//!   "permutation_index": -1,
+//!   "orientation_matrix": [[-1,0,0],[0,-1,0],[0,0,1]]
 //! }
 //! ```
 //!
-//! [`permutation_matrices_json`] embeds the full 8-matrix array in the
-//! JSON output header so consumers can reconstruct orientations without
-//! hard-coding the table.
+//! The `orientation_matrix` is the 3×3 signed permutation matrix `M` from
+//! [`Orientation`]. Consumers can use it directly via `j2 = lb2 + M @ (j1 - lb1)`
+//! without needing the 2×2 table or constant-axis information.
+//!
+//! [`permutation_matrices_json`] embeds the legacy 8-matrix 2×2 array in the
+//! JSON output header for backward compatibility.
 
 /// Floating-point precision type used throughout the crate.
 /// Defaults to `f64`; enable the `f32` Cargo feature for single precision.
