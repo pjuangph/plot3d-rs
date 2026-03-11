@@ -18,3 +18,6 @@ target/
 .DS_Store
 *.xyz
 *.xyzb
+
+# Allow test data
+!tests/data/cross_plane_pair.p3d
