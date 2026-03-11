@@ -85,32 +85,24 @@
 //!   → align_face_orientations → rotated_periodicity → verify_periodicity
 //! ```
 //!
-//! # JSON Output Formats
+//! # JSON Output Format
 //!
-//! The [`serialization`] module provides two JSON output formats:
-//!
-//! **Default (`lo`/`hi`)** — ascending bounds with `permutation_index` (0-7):
-//!
-//! ```json
-//! {
-//!   "block1": { "block_index": 0, "lo": [0,0,0], "hi": [0,101,33] },
-//!   "block2": { "block_index": 30, "lo": [0,0,0], "hi": [0,101,33] },
-//!   "permutation_index": 3
-//! }
-//! ```
-//!
-//! **Diagonal (`lb`/`ub`)** — GlennHT-compatible format. In-plane matches
-//! (perm 0-3) encode direction in block2's `lb`/`ub` with
-//! `permutation_index: -1`. Cross-plane matches (perm 4-7) use ascending
-//! `lb`/`ub` with the actual `permutation_index`.
+//! The [`serialization`] module exports directed `lb`/`ub` corners
+//! (raw `il/jl/kl` and `ih/jh/kh` — no ascending sort). After
+//! [`face_matches_to_dict`], block1's `lb` physically matches block2's
+//! `lb` in xyz space, and `ub` likewise.
 //!
 //! ```json
 //! {
-//!   "block1": { "block_index": 0, "lb": [0,0,0], "ub": [0,101,33] },
-//!   "block2": { "block_index": 30, "lb": [0,101,33], "ub": [0,0,0] },
-//!   "permutation_index": -1
+//!   "block1": { "block_index": 0, "lb": [0,0,0], "ub": [24,408,0] },
+//!   "block2": { "block_index": 1, "lb": [408,0,0], "ub": [0,0,24] },
+//!   "permutation_index": 5
 //! }
 //! ```
+//!
+//! The `permutation_index` (0-7) is relative to ascending canonical grids
+//! (as computed by [`extract_canonical_grid`]). It is included as metadata;
+//! the directed corners already encode the corner-to-corner mapping.
 //!
 //! [`permutation_matrices_json`] embeds the full 8-matrix array in the
 //! JSON output header so consumers can reconstruct orientations without
@@ -179,10 +171,7 @@ pub use rotational_periodicity::{
     create_rotation_matrix, rotate_block_with_matrix, rotated_periodicity, rotational_periodicity,
 };
 pub mod serialization;
-pub use serialization::{
-    face_match_to_diagonal_json, face_match_to_json, face_record_to_diagonal_json,
-    face_record_to_json, permutation_matrices_json,
-};
+pub use serialization::{face_match_to_json, face_record_to_json, permutation_matrices_json};
 pub use split_block::{split_blocks, SplitDirection};
 pub use translational_periodicity::translational_periodicity;
 pub use utils::{apply_rotation, compute_min_gcd, Endian};
