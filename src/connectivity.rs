@@ -300,6 +300,18 @@ pub fn get_face_intersection(
         return (Vec::new(), Vec::new(), Vec::new());
     }
 
+    // Reject matches where matched points don't cover the full matched
+    // sub-face area.  Two blocks that share only edges (e.g. O-grid SS
+    // and PS sharing LE/TE lines) can pass the edge check above because
+    // the matched points span two separate edges, making the diagonal
+    // look like a face.  Verify matched count == expected sub-face area.
+    let (i_lo, i_hi, j_lo, j_hi, k_lo, k_hi) = match_point_bounds(&matches, true);
+    let dims = [i_hi - i_lo + 1, j_hi - j_lo + 1, k_hi - k_lo + 1];
+    let expected_area: usize = dims.iter().filter(|&&d| d > 1).product();
+    if expected_area > 0 && matches.len() < expected_area {
+        return (Vec::new(), Vec::new(), Vec::new());
+    }
+
     let split_faces1 = create_split_faces(face1, block1, &matches, true);
     let split_faces2 = create_split_faces(face2, block2, &matches, false);
     (matches, split_faces1, split_faces2)
