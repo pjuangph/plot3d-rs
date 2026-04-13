@@ -127,11 +127,14 @@ pub mod block_face_functions;
 pub mod connectivity;
 pub mod cylindrical;
 pub mod differencing;
+pub mod dual_graph;
 pub mod face_pool;
 pub mod face_record;
+pub mod flat_data;
 pub(crate) mod geometry;
 pub mod graph;
 pub mod merge_blocks;
+pub mod metrics;
 pub mod point_match;
 pub mod read;
 pub mod rotational_periodicity;
@@ -162,6 +165,7 @@ pub use face_record::{
     OrientationPlane, PeriodicPair, PERMUTATION_MATRICES,
 };
 pub use graph::{build_weighted_graph_from_face_matches, write_ddcmp, BlockGraph, WeightAggregate};
+pub use metrics::{compute_cell_centers, compute_cell_volumes, compute_face_metrics, FaceMetrics};
 pub use merge_blocks::{
     combine_2_blocks_mixed_pairing, combine_blocks_mixed_pairs, combine_nxnxn_cubes_mixed_pairs,
 };
@@ -171,7 +175,10 @@ pub use rotational_periodicity::{
     create_rotation_matrix, rotate_block_with_matrix, rotated_periodicity, rotational_periodicity,
 };
 pub mod serialization;
-pub use serialization::{face_match_to_json, face_record_to_json, permutation_matrices_json};
+pub use serialization::{
+    face_match_from_json, face_match_to_json, face_record_from_json, face_record_to_json,
+    permutation_matrices_json,
+};
 pub use split_block::{split_blocks, SplitDirection};
 pub use translational_periodicity::translational_periodicity;
 pub use utils::{apply_rotation, compute_min_gcd, Endian};
@@ -180,3 +187,5 @@ pub use verification::{
     verify_connectivity, verify_match, verify_partial_match, verify_periodicity,
 };
 pub use write::write_plot3d;
+pub use dual_graph::{build_cell_graph, cell_index, global_cell_id, CellGraph};
+pub use flat_data::{build_flat_mesh, FlatMesh};
