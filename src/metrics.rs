@@ -49,6 +49,12 @@ pub struct FaceMetrics {
     pub si_y: Vec<Float>,
     /// z-component of I-face area vectors.
     pub si_z: Vec<Float>,
+    /// x-coordinate of I-face centroid (arithmetic mean of the 4 face nodes).
+    pub ci_x: Vec<Float>,
+    /// y-coordinate of I-face centroid.
+    pub ci_y: Vec<Float>,
+    /// z-coordinate of I-face centroid.
+    pub ci_z: Vec<Float>,
 
     // ------ J-faces (constant-j surfaces) ------
     // Dimensions: (ni-1) * nj * (nk-1)
@@ -59,6 +65,12 @@ pub struct FaceMetrics {
     pub sj_y: Vec<Float>,
     /// z-component of J-face area vectors.
     pub sj_z: Vec<Float>,
+    /// x-coordinate of J-face centroid.
+    pub cj_x: Vec<Float>,
+    /// y-coordinate of J-face centroid.
+    pub cj_y: Vec<Float>,
+    /// z-coordinate of J-face centroid.
+    pub cj_z: Vec<Float>,
 
     // ------ K-faces (constant-k surfaces) ------
     // Dimensions: (ni-1) * (nj-1) * nk
@@ -69,6 +81,12 @@ pub struct FaceMetrics {
     pub sk_y: Vec<Float>,
     /// z-component of K-face area vectors.
     pub sk_z: Vec<Float>,
+    /// x-coordinate of K-face centroid.
+    pub ck_x: Vec<Float>,
+    /// y-coordinate of K-face centroid.
+    pub ck_y: Vec<Float>,
+    /// z-coordinate of K-face centroid.
+    pub ck_z: Vec<Float>,
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +299,9 @@ pub fn compute_face_metrics(block: &Block) -> FaceMetrics {
     let mut si_x = vec![0.0 as Float; n_ifaces];
     let mut si_y = vec![0.0 as Float; n_ifaces];
     let mut si_z = vec![0.0 as Float; n_ifaces];
+    let mut ci_x = vec![0.0 as Float; n_ifaces];
+    let mut ci_y = vec![0.0 as Float; n_ifaces];
+    let mut ci_z = vec![0.0 as Float; n_ifaces];
 
     for k in 0..(nk - 1) {
         for j in 0..(nj - 1) {
@@ -310,6 +331,13 @@ pub fn compute_face_metrics(block: &Block) -> FaceMetrics {
                 si_x[fid] = 0.5 * (d1y * d2z - d1z * d2y);
                 si_y[fid] = 0.5 * (d1z * d2x - d1x * d2z);
                 si_z[fid] = 0.5 * (d1x * d2y - d1y * d2x);
+
+                // Face centroid = arithmetic mean of the 4 corner nodes.
+                // This matches Fortran's ccCoord formula
+                // (M_ccMBMesh.F:2528-2530).
+                ci_x[fid] = 0.25 * (block.x[p0] + block.x[p1] + block.x[p2] + block.x[p3]);
+                ci_y[fid] = 0.25 * (block.y[p0] + block.y[p1] + block.y[p2] + block.y[p3]);
+                ci_z[fid] = 0.25 * (block.z[p0] + block.z[p1] + block.z[p2] + block.z[p3]);
             }
         }
     }
@@ -319,6 +347,9 @@ pub fn compute_face_metrics(block: &Block) -> FaceMetrics {
     let mut sj_x = vec![0.0 as Float; n_jfaces];
     let mut sj_y = vec![0.0 as Float; n_jfaces];
     let mut sj_z = vec![0.0 as Float; n_jfaces];
+    let mut cj_x = vec![0.0 as Float; n_jfaces];
+    let mut cj_y = vec![0.0 as Float; n_jfaces];
+    let mut cj_z = vec![0.0 as Float; n_jfaces];
 
     for k in 0..(nk - 1) {
         for j in 0..nj {
@@ -348,6 +379,10 @@ pub fn compute_face_metrics(block: &Block) -> FaceMetrics {
                 sj_x[fid] = 0.5 * (d1y * d2z - d1z * d2y);
                 sj_y[fid] = 0.5 * (d1z * d2x - d1x * d2z);
                 sj_z[fid] = 0.5 * (d1x * d2y - d1y * d2x);
+
+                cj_x[fid] = 0.25 * (block.x[p0] + block.x[p1] + block.x[p2] + block.x[p3]);
+                cj_y[fid] = 0.25 * (block.y[p0] + block.y[p1] + block.y[p2] + block.y[p3]);
+                cj_z[fid] = 0.25 * (block.z[p0] + block.z[p1] + block.z[p2] + block.z[p3]);
             }
         }
     }
@@ -357,6 +392,9 @@ pub fn compute_face_metrics(block: &Block) -> FaceMetrics {
     let mut sk_x = vec![0.0 as Float; n_kfaces];
     let mut sk_y = vec![0.0 as Float; n_kfaces];
     let mut sk_z = vec![0.0 as Float; n_kfaces];
+    let mut ck_x = vec![0.0 as Float; n_kfaces];
+    let mut ck_y = vec![0.0 as Float; n_kfaces];
+    let mut ck_z = vec![0.0 as Float; n_kfaces];
 
     for k in 0..nk {
         for j in 0..(nj - 1) {
@@ -386,14 +424,18 @@ pub fn compute_face_metrics(block: &Block) -> FaceMetrics {
                 sk_x[fid] = 0.5 * (d1y * d2z - d1z * d2y);
                 sk_y[fid] = 0.5 * (d1z * d2x - d1x * d2z);
                 sk_z[fid] = 0.5 * (d1x * d2y - d1y * d2x);
+
+                ck_x[fid] = 0.25 * (block.x[p0] + block.x[p1] + block.x[p2] + block.x[p3]);
+                ck_y[fid] = 0.25 * (block.y[p0] + block.y[p1] + block.y[p2] + block.y[p3]);
+                ck_z[fid] = 0.25 * (block.z[p0] + block.z[p1] + block.z[p2] + block.z[p3]);
             }
         }
     }
 
     FaceMetrics {
-        si_x, si_y, si_z,
-        sj_x, sj_y, sj_z,
-        sk_x, sk_y, sk_z,
+        si_x, si_y, si_z, ci_x, ci_y, ci_z,
+        sj_x, sj_y, sj_z, cj_x, cj_y, cj_z,
+        sk_x, sk_y, sk_z, ck_x, ck_y, ck_z,
     }
 }
 

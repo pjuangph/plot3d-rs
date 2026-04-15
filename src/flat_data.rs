@@ -78,6 +78,16 @@ pub struct FlatMesh {
     pub face_area_y: Vec<Float>,
     /// Z-component of face area vector.
     pub face_area_z: Vec<Float>,
+    /// X-coordinate of face centroid (arithmetic mean of the 4 corner nodes).
+    /// Matches Fortran's ccCoord face-centroid formula
+    /// (M_ccMBMesh.F:2528-2530), used by the solver to place ghost cell
+    /// centers via exact plane reflection rather than a cuboid V/|A|
+    /// approximation.
+    pub face_centroid_x: Vec<Float>,
+    /// Y-coordinate of face centroid.
+    pub face_centroid_y: Vec<Float>,
+    /// Z-coordinate of face centroid.
+    pub face_centroid_z: Vec<Float>,
 
     // -- Boundary face metadata --
 
@@ -202,6 +212,9 @@ pub fn build_flat_mesh(
     let mut face_area_x: Vec<Float> = Vec::new();
     let mut face_area_y: Vec<Float> = Vec::new();
     let mut face_area_z: Vec<Float> = Vec::new();
+    let mut face_centroid_x: Vec<Float> = Vec::new();
+    let mut face_centroid_y: Vec<Float> = Vec::new();
+    let mut face_centroid_z: Vec<Float> = Vec::new();
     let mut face_surface_id: Vec<i32> = Vec::new();
 
     // --- 3a: Interior faces within each block ---
@@ -246,6 +259,9 @@ pub fn build_flat_mesh(
                     face_area_x.push(fm.si_x[fid]);
                     face_area_y.push(fm.si_y[fid]);
                     face_area_z.push(fm.si_z[fid]);
+                    face_centroid_x.push(fm.ci_x[fid]);
+                    face_centroid_y.push(fm.ci_y[fid]);
+                    face_centroid_z.push(fm.ci_z[fid]);
                     face_surface_id.push(-1);
                 }
             }
@@ -266,6 +282,9 @@ pub fn build_flat_mesh(
                     face_area_x.push(fm.sj_x[fid]);
                     face_area_y.push(fm.sj_y[fid]);
                     face_area_z.push(fm.sj_z[fid]);
+                    face_centroid_x.push(fm.cj_x[fid]);
+                    face_centroid_y.push(fm.cj_y[fid]);
+                    face_centroid_z.push(fm.cj_z[fid]);
                     face_surface_id.push(-1);
                 }
             }
@@ -286,6 +305,9 @@ pub fn build_flat_mesh(
                     face_area_x.push(fm.sk_x[fid]);
                     face_area_y.push(fm.sk_y[fid]);
                     face_area_z.push(fm.sk_z[fid]);
+                    face_centroid_x.push(fm.ck_x[fid]);
+                    face_centroid_y.push(fm.ck_y[fid]);
+                    face_centroid_z.push(fm.ck_z[fid]);
                     face_surface_id.push(-1);
                 }
             }
@@ -313,12 +335,15 @@ pub fn build_flat_mesh(
             &all_face_metrics[b1],
         );
 
-        for (owner, neighbor, ax, ay, az) in edges {
+        for (owner, neighbor, ax, ay, az, cx, cy, cz) in edges {
             face_owner.push(owner);
             face_neighbor.push(neighbor as i32);
             face_area_x.push(ax);
             face_area_y.push(ay);
             face_area_z.push(az);
+            face_centroid_x.push(cx);
+            face_centroid_y.push(cy);
+            face_centroid_z.push(cz);
             face_surface_id.push(-1);
         }
     }
@@ -390,6 +415,11 @@ pub fn build_flat_mesh(
                 let (ax, ay, az) = boundary_face_area(
                     axis, const_v, ijk, blk, fm,
                 );
+                // Face centroid (a position — unaffected by the low-end
+                // sign flip applied to the area vector below).
+                let (cx, cy, cz) = boundary_face_centroid(
+                    axis, const_v, ijk, blk, fm,
+                );
 
                 face_owner.push(gid as u32);
                 face_neighbor.push(-1);
@@ -405,6 +435,9 @@ pub fn build_flat_mesh(
                     face_area_y.push(ay);
                     face_area_z.push(az);
                 }
+                face_centroid_x.push(cx);
+                face_centroid_y.push(cy);
+                face_centroid_z.push(cz);
                 face_surface_id.push(surface_id);
             }
         }
@@ -424,6 +457,9 @@ pub fn build_flat_mesh(
         face_area_x,
         face_area_y,
         face_area_z,
+        face_centroid_x,
+        face_centroid_y,
+        face_centroid_z,
         face_surface_id,
         cell_block_id,
         cell_local_id,
@@ -472,10 +508,46 @@ fn boundary_face_area(
     }
 }
 
+/// Retrieve the face centroid for a boundary face from the pre-computed
+/// face metrics. Parameters match [`boundary_face_area`].
+///
+/// Unlike the area vector, the centroid is a position, so the sign-flip
+/// applied to low-end boundary area vectors does NOT apply here — the
+/// face centroid is the same regardless of which side owns the face.
+fn boundary_face_centroid(
+    axis: usize,
+    const_v: usize,
+    ijk: [usize; 3],
+    blk: &Block,
+    fm: &crate::metrics::FaceMetrics,
+) -> (Float, Float, Float) {
+    let ni = blk.imax;
+    let nj = blk.jmax;
+
+    match axis {
+        0 => {
+            let fid = const_v + ni * ijk[1] + ni * (nj - 1) * ijk[2];
+            (fm.ci_x[fid], fm.ci_y[fid], fm.ci_z[fid])
+        }
+        1 => {
+            let fid = ijk[0] + (ni - 1) * const_v + (ni - 1) * nj * ijk[2];
+            (fm.cj_x[fid], fm.cj_y[fid], fm.cj_z[fid])
+        }
+        2 => {
+            let fid = ijk[0] + (ni - 1) * ijk[1] + (ni - 1) * (nj - 1) * const_v;
+            (fm.ck_x[fid], fm.ck_y[fid], fm.ck_z[fid])
+        }
+        _ => unreachable!("axis must be 0, 1, or 2"),
+    }
+}
+
 /// Build cross-block face data for a single FaceMatch.
 ///
-/// Returns a list of `(owner_global, neighbor_global, area_x, area_y, area_z)`
-/// for each cell pair at the interface.
+/// Returns a list of
+/// `(owner_global, neighbor_global, area_x, area_y, area_z, cx, cy, cz)`
+/// for each cell pair at the interface — the face centroid is taken from
+/// block1's metrics (same physical point regardless of which side is the
+/// owner).
 ///
 /// The area vector is taken from block1's face metrics at the interface,
 /// pointing from block1 (owner) toward block2 (neighbor).
@@ -488,7 +560,7 @@ fn cross_block_face_data(
     blk2: &Block,
     graph: &CellGraph,
     fm1: &crate::metrics::FaceMetrics,
-) -> Vec<(u32, u32, Float, Float, Float)> {
+) -> Vec<(u32, u32, Float, Float, Float, Float, Float, Float)> {
     let mut result = Vec::new();
 
     let axis1 = match face1.constant_axis() {
@@ -593,7 +665,12 @@ fn cross_block_face_data(
                 az = -az;
             }
 
-            result.push((gid1 as u32, gid2 as u32, ax, ay, az));
+            // Face centroid (a position — no sign flip for low-end faces).
+            let (cx, cy, cz) = boundary_face_centroid(
+                axis1, f1_const_val, ijk1, blk1, fm1,
+            );
+
+            result.push((gid1 as u32, gid2 as u32, ax, ay, az, cx, cy, cz));
         }
     }
 
