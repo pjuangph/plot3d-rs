@@ -929,7 +929,7 @@ fn match_bounds(
 }
 
 /// Fixed matching tolerance for node coincidence checks.
-const MATCH_TOL: Float = 1e-6;
+const MATCH_TOL: Float = 1e-4;
 
 // ============================================================================
 // Orientation inference from match points
