@@ -163,6 +163,26 @@ pub fn verify_match(
     true
 }
 
+/// Compute the maximum Euclidean distance between corresponding points.
+///
+/// Returns `Float::MAX` if the arrays differ in length.
+fn max_point_distance(
+    pts_a: &[(Float, Float, Float)],
+    pts_b: &[(Float, Float, Float)],
+) -> Float {
+    if pts_a.len() != pts_b.len() {
+        return Float::MAX;
+    }
+    let mut max_d2: Float = 0.0;
+    for (a, b) in pts_a.iter().zip(pts_b.iter()) {
+        let d2 = (a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) + (a.2 - b.2).powi(2);
+        if d2 > max_d2 {
+            max_d2 = d2;
+        }
+    }
+    max_d2.sqrt()
+}
+
 /// Count how many points of face B (small, after permutation) match face A (large).
 ///
 /// Face A is the large face, face B is the small face. We apply the permutation
@@ -325,27 +345,36 @@ pub fn verify_connectivity(
             verified.push(corrected);
         } else {
             let orig = &face_matches[idx];
-            eprintln!("verify_connectivity: MISMATCH at index {}", idx);
+            let ca1 = b1.constant_axis();
+            let ca2 = b2.constant_axis();
+            let axis_label = |a: Option<usize>| match a {
+                Some(0) => "I", Some(1) => "J", Some(2) => "K", _ => "?"
+            };
+            let cross_tag = if ca1 != ca2 { "CROSS-AXIS" } else { "SAME-AXIS" };
+            // Compute best distance across all 8 permutations
+            let mut best_dist: Float = Float::MAX;
+            for p in 0u8..8 {
+                let (permuted, out_nu, out_nv) = apply_permutation(&pts_b, nu_b, nv_b, p);
+                if out_nu != nu_a || out_nv != nv_a { continue; }
+                let d = max_point_distance(&pts_a, &permuted);
+                if d < best_dist { best_dist = d; }
+            }
+            eprintln!("verify_connectivity: MISMATCH at index {} [{}]", idx, cross_tag);
             eprintln!(
-                "  block {}: lo=({},{},{}) hi=({},{},{})",
+                "  block {}: lo=({},{},{}) hi=({},{},{}) const={}",
                 orig.block1.block_index,
-                orig.block1.i_lo(),
-                orig.block1.j_lo(),
-                orig.block1.k_lo(),
-                orig.block1.i_hi(),
-                orig.block1.j_hi(),
-                orig.block1.k_hi()
+                orig.block1.i_lo(), orig.block1.j_lo(), orig.block1.k_lo(),
+                orig.block1.i_hi(), orig.block1.j_hi(), orig.block1.k_hi(),
+                axis_label(ca1)
             );
             eprintln!(
-                "  block {}: lo=({},{},{}) hi=({},{},{})",
+                "  block {}: lo=({},{},{}) hi=({},{},{}) const={}",
                 orig.block2.block_index,
-                orig.block2.i_lo(),
-                orig.block2.j_lo(),
-                orig.block2.k_lo(),
-                orig.block2.i_hi(),
-                orig.block2.j_hi(),
-                orig.block2.k_hi()
+                orig.block2.i_lo(), orig.block2.j_lo(), orig.block2.k_lo(),
+                orig.block2.i_hi(), orig.block2.j_hi(), orig.block2.k_hi(),
+                axis_label(ca2)
             );
+            eprintln!("  grid_a: {}x{}, grid_b: {}x{}, best_dist: {:.6e}", nu_a, nv_a, nu_b, nv_b, best_dist);
             mismatched.push(face_matches[idx].clone());
         }
     }
@@ -411,6 +440,8 @@ pub fn verify_periodicity(
         let (pts_b, nu_b, nv_b) = grid_b;
 
         let mut found = false;
+        let mut best_dist: Float = Float::MAX;
+        let mut best_dims: Option<(usize, usize, usize, usize)> = None;
 
         // Try +theta rotation first, then -theta
         for rotated_blocks in [&rotated_blocks_pos, &rotated_blocks_neg] {
@@ -426,6 +457,11 @@ pub fn verify_periodicity(
                 None => continue,
             };
             let (pts_a, nu_a, nv_a) = grid_a;
+
+            // Track grid dimensions for diagnostics
+            if best_dims.is_none() {
+                best_dims = Some((nu_a, nv_a, nu_b, nv_b));
+            }
 
             // Try stored permutation_index first
             let stored_perm = sfm.orientation.as_ref().map(|o| o.permutation_index);
@@ -452,31 +488,42 @@ pub fn verify_periodicity(
                 found = true;
                 break;
             }
+
+            // Track best distance for diagnostics
+            for p in 0u8..8 {
+                let (permuted, out_nu, out_nv) = apply_permutation(&pts_b, nu_b, nv_b, p);
+                if out_nu != nu_a || out_nv != nv_a { continue; }
+                let d = max_point_distance(&pts_a, &permuted);
+                if d < best_dist { best_dist = d; }
+            }
         }
 
         if !found {
             let orig = &face_matches[idx];
-            eprintln!("verify_periodicity: MISMATCH at index {}", idx);
+            let ca1 = b1.constant_axis();
+            let ca2 = b2.constant_axis();
+            let axis_label = |a: Option<usize>| match a {
+                Some(0) => "I", Some(1) => "J", Some(2) => "K", _ => "?"
+            };
+            let cross_tag = if ca1 != ca2 { "CROSS-AXIS" } else { "SAME-AXIS" };
+            eprintln!("verify_periodicity: MISMATCH at index {} [{}]", idx, cross_tag);
             eprintln!(
-                "  block {}: lo=({},{},{}) hi=({},{},{})",
+                "  block {}: lo=({},{},{}) hi=({},{},{}) const={}",
                 orig.block1.block_index,
-                orig.block1.i_lo(),
-                orig.block1.j_lo(),
-                orig.block1.k_lo(),
-                orig.block1.i_hi(),
-                orig.block1.j_hi(),
-                orig.block1.k_hi()
+                orig.block1.i_lo(), orig.block1.j_lo(), orig.block1.k_lo(),
+                orig.block1.i_hi(), orig.block1.j_hi(), orig.block1.k_hi(),
+                axis_label(ca1)
             );
             eprintln!(
-                "  block {}: lo=({},{},{}) hi=({},{},{})",
+                "  block {}: lo=({},{},{}) hi=({},{},{}) const={}",
                 orig.block2.block_index,
-                orig.block2.i_lo(),
-                orig.block2.j_lo(),
-                orig.block2.k_lo(),
-                orig.block2.i_hi(),
-                orig.block2.j_hi(),
-                orig.block2.k_hi()
+                orig.block2.i_lo(), orig.block2.j_lo(), orig.block2.k_lo(),
+                orig.block2.i_hi(), orig.block2.j_hi(), orig.block2.k_hi(),
+                axis_label(ca2)
             );
+            if let Some((nua, nva, nub, nvb)) = best_dims {
+                eprintln!("  grid_a: {}x{}, grid_b: {}x{}, best_dist: {:.6e}", nua, nva, nub, nvb, best_dist);
+            }
             mismatched.push(face_matches[idx].clone());
         }
     }

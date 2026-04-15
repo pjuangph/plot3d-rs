@@ -75,6 +75,14 @@ fn test_connectivity() {
         })
         .collect();
 
+    // Expected: 2 matches, not 3. A 3rd match previously emitted by
+    // Phase 3 as blk0 [0..128, 0..100, 32] <-> blk1 [40..168, 0..100, 0]
+    // (52 points) was a wrap-around duplicate of the 858-point Phase 2
+    // match on the SAME block pair and the SAME block1 region
+    // [40..168, 0..100, 0]. `phase3_overlaps_existing` now drops it,
+    // matching the Python plot3d reference implementation. See
+    // `docs/plot3d_phase3_overlap_guard.md` in tgs-py-grc for the
+    // root-cause writeup.
     let expected_matches = vec![
         (
             (0, 128, 0, 32, 256, 100, 32, None),
@@ -86,26 +94,26 @@ fn test_connectivity() {
             (0, 256, 0, 0, 256, 100, 32, None),
             0,
         ),
-        (
-            (0, 0, 0, 32, 128, 100, 32, None),
-            (1, 40, 0, 0, 168, 100, 0, None),
-            52,
-        ),
     ];
     assert_eq!(matches_summary, expected_matches);
 
     let outer_faces_summary: Vec<_> = outer_faces.iter().map(face_summary).collect();
+    // The blk0 K=32 face region [0..128, 0..100, 32] is now reported
+    // as an outer face because the spurious Phase 3 match that used
+    // to claim it was dropped as a duplicate. This matches the Python
+    // plot3d reference, which lists the same region in outer_faces.
     let expected_outer_faces = vec![
         (0, 0, 0, 0, 256, 0, 32, Some(1)),
         (0, 0, 100, 0, 256, 100, 32, Some(2)),
         (0, 0, 0, 0, 256, 100, 0, Some(3)),
-        (1, 0, 0, 0, 0, 100, 52, Some(4)),
-        (1, 268, 0, 0, 268, 100, 52, Some(5)),
-        (1, 0, 0, 0, 268, 0, 52, Some(6)),
-        (1, 0, 100, 0, 268, 100, 52, Some(7)),
-        (1, 0, 0, 52, 268, 100, 52, Some(8)),
-        (1, 0, 0, 0, 40, 100, 0, Some(9)),
-        (1, 168, 0, 0, 268, 100, 0, Some(10)),
+        (0, 0, 0, 32, 128, 100, 32, Some(4)),
+        (1, 0, 0, 0, 0, 100, 52, Some(5)),
+        (1, 268, 0, 0, 268, 100, 52, Some(6)),
+        (1, 0, 0, 0, 268, 0, 52, Some(7)),
+        (1, 0, 100, 0, 268, 100, 52, Some(8)),
+        (1, 0, 0, 52, 268, 100, 52, Some(9)),
+        (1, 0, 0, 0, 40, 100, 0, Some(10)),
+        (1, 168, 0, 0, 268, 100, 0, Some(11)),
     ];
     assert_eq!(outer_faces_summary, expected_outer_faces);
 }

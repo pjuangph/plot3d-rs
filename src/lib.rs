@@ -85,32 +85,24 @@
 //!   → align_face_orientations → rotated_periodicity → verify_periodicity
 //! ```
 //!
-//! # JSON Output Formats
+//! # JSON Output Format
 //!
-//! The [`serialization`] module provides two JSON output formats:
-//!
-//! **Default (`lo`/`hi`)** — ascending bounds with `permutation_index` (0-7):
-//!
-//! ```json
-//! {
-//!   "block1": { "block_index": 0, "lo": [0,0,0], "hi": [0,101,33] },
-//!   "block2": { "block_index": 30, "lo": [0,0,0], "hi": [0,101,33] },
-//!   "permutation_index": 3
-//! }
-//! ```
-//!
-//! **Diagonal (`lb`/`ub`)** — GlennHT-compatible format. In-plane matches
-//! (perm 0-3) encode direction in block2's `lb`/`ub` with
-//! `permutation_index: -1`. Cross-plane matches (perm 4-7) use ascending
-//! `lb`/`ub` with the actual `permutation_index`.
+//! The [`serialization`] module exports directed `lb`/`ub` corners
+//! (raw `il/jl/kl` and `ih/jh/kh` — no ascending sort). After
+//! [`face_matches_to_dict`], block1's `lb` physically matches block2's
+//! `lb` in xyz space, and `ub` likewise.
 //!
 //! ```json
 //! {
-//!   "block1": { "block_index": 0, "lb": [0,0,0], "ub": [0,101,33] },
-//!   "block2": { "block_index": 30, "lb": [0,101,33], "ub": [0,0,0] },
-//!   "permutation_index": -1
+//!   "block1": { "block_index": 0, "lb": [0,0,0], "ub": [24,408,0] },
+//!   "block2": { "block_index": 1, "lb": [408,0,0], "ub": [0,0,24] },
+//!   "permutation_index": 5
 //! }
 //! ```
+//!
+//! The `permutation_index` (0-7) is relative to ascending canonical grids
+//! (as computed by [`extract_canonical_grid`]). It is included as metadata;
+//! the directed corners already encode the corner-to-corner mapping.
 //!
 //! [`permutation_matrices_json`] embeds the full 8-matrix array in the
 //! JSON output header so consumers can reconstruct orientations without
@@ -135,11 +127,14 @@ pub mod block_face_functions;
 pub mod connectivity;
 pub mod cylindrical;
 pub mod differencing;
+pub mod dual_graph;
 pub mod face_pool;
 pub mod face_record;
+pub mod flat_data;
 pub(crate) mod geometry;
 pub mod graph;
 pub mod merge_blocks;
+pub mod metrics;
 pub mod point_match;
 pub mod read;
 pub mod rotational_periodicity;
@@ -170,6 +165,7 @@ pub use face_record::{
     OrientationPlane, PeriodicPair, PERMUTATION_MATRICES,
 };
 pub use graph::{build_weighted_graph_from_face_matches, write_ddcmp, BlockGraph, WeightAggregate};
+pub use metrics::{compute_cell_centers, compute_cell_volumes, compute_face_metrics, FaceMetrics};
 pub use merge_blocks::{
     combine_2_blocks_mixed_pairing, combine_blocks_mixed_pairs, combine_nxnxn_cubes_mixed_pairs,
 };
@@ -180,8 +176,8 @@ pub use rotational_periodicity::{
 };
 pub mod serialization;
 pub use serialization::{
-    face_match_to_diagonal_json, face_match_to_json, face_record_to_diagonal_json,
-    face_record_to_json, permutation_matrices_json,
+    face_match_from_json, face_match_to_json, face_record_from_json, face_record_to_json,
+    permutation_matrices_json,
 };
 pub use split_block::{split_blocks, SplitDirection};
 pub use translational_periodicity::translational_periodicity;
@@ -191,3 +187,5 @@ pub use verification::{
     verify_connectivity, verify_match, verify_partial_match, verify_periodicity,
 };
 pub use write::write_plot3d;
+pub use dual_graph::{build_cell_graph, cell_index, global_cell_id, CellGraph};
+pub use flat_data::{build_flat_mesh, FlatMesh};

@@ -1,0 +1,359 @@
+{
+  "face_matches": [
+    {
+      "block1": {
+        "block_index": 0,
+        "lb": [
+          128,
+          0,
+          32
+        ],
+        "ub": [
+          256,
+          100,
+          32
+        ]
+      },
+      "block2": {
+        "block_index": 1,
+        "lb": [
+          40,
+          0,
+          0
+        ],
+        "ub": [
+          168,
+          100,
+          0
+        ]
+      },
+      "permutation_index": 0
+    },
+    {
+      "block1": {
+        "block_index": 0,
+        "lb": [
+          0,
+          0,
+          0
+        ],
+        "ub": [
+          0,
+          100,
+          32
+        ]
+      },
+      "block2": {
+        "block_index": 0,
+        "lb": [
+          256,
+          0,
+          0
+        ],
+        "ub": [
+          256,
+          100,
+          32
+        ]
+      },
+      "permutation_index": 0
+    }
+  ],
+  "mesh_file": "tests/data/vspt_mesh_scaled.xyz",
+  "nblocks": 2,
+  "outer_faces": [
+    {
+      "block_index": 0,
+      "lb": [
+        0,
+        0,
+        0
+      ],
+      "ub": [
+        256,
+        0,
+        32
+      ]
+    },
+    {
+      "block_index": 0,
+      "lb": [
+        0,
+        100,
+        0
+      ],
+      "ub": [
+        256,
+        100,
+        32
+      ]
+    },
+    {
+      "block_index": 0,
+      "lb": [
+        0,
+        0,
+        0
+      ],
+      "ub": [
+        256,
+        100,
+        0
+      ]
+    },
+    {
+      "block_index": 1,
+      "lb": [
+        0,
+        0,
+        0
+      ],
+      "ub": [
+        0,
+        100,
+        52
+      ]
+    },
+    {
+      "block_index": 1,
+      "lb": [
+        268,
+        0,
+        0
+      ],
+      "ub": [
+        268,
+        100,
+        52
+      ]
+    },
+    {
+      "block_index": 1,
+      "lb": [
+        0,
+        0,
+        0
+      ],
+      "ub": [
+        268,
+        0,
+        52
+      ]
+    },
+    {
+      "block_index": 1,
+      "lb": [
+        0,
+        100,
+        0
+      ],
+      "ub": [
+        268,
+        100,
+        52
+      ]
+    }
+  ],
+  "periodic_faces": [
+    {
+      "block1": {
+        "block_index": 1,
+        "id": 9,
+        "lb": [
+          168,
+          0,
+          0
+        ],
+        "ub": [
+          268,
+          100,
+          0
+        ]
+      },
+      "block2": {
+        "block_index": 1,
+        "id": 11,
+        "lb": [
+          168,
+          0,
+          52
+        ],
+        "ub": [
+          268,
+          100,
+          52
+        ]
+      },
+      "permutation_index": 0
+    },
+    {
+      "block1": {
+        "block_index": 0,
+        "id": 4,
+        "lb": [
+          0,
+          0,
+          32
+        ],
+        "ub": [
+          128,
+          100,
+          32
+        ]
+      },
+      "block2": {
+        "block_index": 1,
+        "id": 9,
+        "lb": [
+          168,
+          0,
+          52
+        ],
+        "ub": [
+          40,
+          100,
+          52
+        ]
+      },
+      "permutation_index": 1
+    },
+    {
+      "block1": {
+        "block_index": 1,
+        "id": 10,
+        "lb": [
+          0,
+          0,
+          52
+        ],
+        "ub": [
+          40,
+          100,
+          52
+        ]
+      },
+      "block2": {
+        "block_index": 1,
+        "id": 9,
+        "lb": [
+          0,
+          0,
+          0
+        ],
+        "ub": [
+          40,
+          100,
+          0
+        ]
+      },
+      "permutation_index": 0
+    }
+  ],
+  "periodicity": {
+    "convention": "Face_B_points = (transformation_matrix @ Face_A_points.T).T",
+    "nblades": 55,
+    "rotation_angle_deg": 6.545454545454546,
+    "rotation_angle_rad": 0.11423973285781067,
+    "rotation_axis": "x",
+    "source": "plot3d-rs::rotated_periodicity",
+    "transformation_matrix": [
+      [
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.9934817353485502,
+        -0.11399140989054063
+      ],
+      [
+        0.0,
+        0.11399140989054063,
+        0.9934817353485502
+      ]
+    ]
+  },
+  "permutation_matrices": [
+    [
+      [
+        1,
+        0
+      ],
+      [
+        0,
+        1
+      ]
+    ],
+    [
+      [
+        -1,
+        0
+      ],
+      [
+        0,
+        1
+      ]
+    ],
+    [
+      [
+        1,
+        0
+      ],
+      [
+        0,
+        -1
+      ]
+    ],
+    [
+      [
+        -1,
+        0
+      ],
+      [
+        0,
+        -1
+      ]
+    ],
+    [
+      [
+        0,
+        1
+      ],
+      [
+        1,
+        0
+      ]
+    ],
+    [
+      [
+        0,
+        -1
+      ],
+      [
+        1,
+        0
+      ]
+    ],
+    [
+      [
+        0,
+        1
+      ],
+      [
+        -1,
+        0
+      ]
+    ],
+    [
+      [
+        0,
+        -1
+      ],
+      [
+        -1,
+        0
+      ]
+    ]
+  ]
+}

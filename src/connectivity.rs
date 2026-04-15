@@ -300,6 +300,18 @@ pub fn get_face_intersection(
         return (Vec::new(), Vec::new(), Vec::new());
     }
 
+    // Reject matches where matched points don't cover the full matched
+    // sub-face area.  Two blocks that share only edges (e.g. O-grid SS
+    // and PS sharing LE/TE lines) can pass the edge check above because
+    // the matched points span two separate edges, making the diagonal
+    // look like a face.  Verify matched count == expected sub-face area.
+    let (i_lo, i_hi, j_lo, j_hi, k_lo, k_hi) = match_point_bounds(&matches, true);
+    let dims = [i_hi - i_lo + 1, j_hi - j_lo + 1, k_hi - k_lo + 1];
+    let expected_area: usize = dims.iter().filter(|&&d| d > 1).product();
+    if expected_area > 0 && matches.len() < expected_area {
+        return (Vec::new(), Vec::new(), Vec::new());
+    }
+
     let split_faces1 = create_split_faces(face1, block1, &matches, true);
     let split_faces2 = create_split_faces(face2, block2, &matches, false);
     (matches, split_faces1, split_faces2)
@@ -617,6 +629,61 @@ fn candidate_neighbor_pairs(blocks: &[Block], tol: Float) -> Vec<(usize, usize)>
 /// Tuple `(matches, outer_faces)` where `matches` enumerates face interfaces
 /// and `outer_faces` records the remaining external surfaces at the original
 /// resolution.
+/// Return `true` if a candidate Phase-3 region overlaps any existing
+/// `FaceMatch` on the same block pair.
+///
+/// Used as an overlap guard in Phase 3 to prevent re-emission of regions
+/// that Phase 2 already claimed. On meshes with O-grid seams,
+/// `filter_block_increasing` drops seam-adjacent points during Phase 2
+/// and leaves a residue that Phase 3 then re-matches against the fresh
+/// neighbor face pool, producing a wrap-around record whose bbox
+/// already overlaps two clean Phase 2 sub-faces on the same pair. The
+/// per-face dedup key in Phase 3 (`face.index_key()`) does not catch
+/// this because it only tracks which `block1` faces have been
+/// processed in Phase 3.
+///
+/// The check is per-dimension on both sides using normalised bounds
+/// (`FaceRecord::bounds()`), so `il > ih` direction is irrelevant.
+fn phase3_overlaps_existing(
+    cand1: &FaceRecord,
+    cand2: &FaceRecord,
+    existing: &[FaceMatch],
+) -> bool {
+    let (a1_lo, a1_hi) = cand1.bounds();
+    let (a2_lo, a2_hi) = cand2.bounds();
+    let bi = cand1.block_index;
+    let bj = cand2.block_index;
+
+    let ranges_overlap = |a_lo: usize, a_hi: usize, b_lo: usize, b_hi: usize| -> bool {
+        !(a_hi < b_lo || b_hi < a_lo)
+    };
+    let all_overlap = |lo_a: [usize; 3], hi_a: [usize; 3], lo_b: [usize; 3], hi_b: [usize; 3]| -> bool {
+        (0..3).all(|d| ranges_overlap(lo_a[d], hi_a[d], lo_b[d], hi_b[d]))
+    };
+
+    for m in existing {
+        let mbi = m.block1.block_index;
+        let mbj = m.block2.block_index;
+        let (m1_lo, m1_hi, m2_lo, m2_hi) = if mbi == bi && mbj == bj {
+            let (lo1, hi1) = m.block1.bounds();
+            let (lo2, hi2) = m.block2.bounds();
+            (lo1, hi1, lo2, hi2)
+        } else if mbi == bj && mbj == bi {
+            let (lo1, hi1) = m.block2.bounds();
+            let (lo2, hi2) = m.block1.bounds();
+            (lo1, hi1, lo2, hi2)
+        } else {
+            continue;
+        };
+        if all_overlap(a1_lo, a1_hi, m1_lo, m1_hi)
+            && all_overlap(a2_lo, a2_hi, m2_lo, m2_hi)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn connectivity_fast(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
     let gcd_to_use = crate::utils::compute_min_gcd(blocks);
     let reduced_blocks = crate::block_face_functions::reduce_blocks(blocks, gcd_to_use);
@@ -971,6 +1038,15 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
                         FaceRecord::from_match_points(bi, &pts, true),
                         FaceRecord::from_match_points(bj, &pts, false),
                     ) {
+                        // Skip if this region overlaps an existing
+                        // Phase 1/2 match on the same block pair —
+                        // happens around O-grid seams where
+                        // filter_block_increasing drops seam-adjacent
+                        // points and leaves a residue that Phase 3
+                        // re-matches against the fresh neighbor face.
+                        if phase3_overlaps_existing(&c1, &c2, &matches) {
+                            continue;
+                        }
                         matches.push(FaceMatch {
                             block1: c1,
                             block2: c2,

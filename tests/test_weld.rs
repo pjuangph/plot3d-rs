@@ -13,10 +13,9 @@ use serde_json::Value;
 
 use plot3d::{
     apply_permutation, connectivity_fast, determine_plane, extract_canonical_grid,
-    face_match_to_diagonal_json, face_match_to_json, face_record_to_diagonal_json,
-    face_record_to_json, permutation_matrices_json, read_plot3d_ascii, translational_periodicity,
-    try_all_permutations, verify_connectivity, verify_match, verify_partial_match, FaceMatch,
-    FaceRecord,
+    face_match_to_json, face_record_to_json, permutation_matrices_json, read_plot3d_ascii,
+    translational_periodicity, try_all_permutations, verify_connectivity, verify_match,
+    verify_partial_match, FaceMatch, FaceRecord,
 };
 
 const MESH_PATH: &str = "/Volumes/T7/WELD/weld_ascii.xyz";
@@ -297,36 +296,21 @@ fn weld_connectivity_and_periodicity() {
         // Default format (lo/hi)
         let json_rec = face_record_to_json(&sample.block1);
         assert!(json_rec["block_index"].is_number());
-        assert!(json_rec["lo"].is_array());
-        assert!(json_rec["hi"].is_array());
+        assert!(json_rec["lb"].is_array());
+        assert!(json_rec["ub"].is_array());
 
         let json_match = face_match_to_json(sample);
         assert!(json_match["block1"].is_object());
         assert!(json_match["block2"].is_object());
         assert!(json_match["permutation_index"].is_number());
 
-        // Diagonal format (lb/ub)
-        let json_diag_rec = face_record_to_diagonal_json(&sample.block1);
-        assert!(json_diag_rec["block_index"].is_number());
-        assert!(json_diag_rec["lb"].is_array());
-        assert!(json_diag_rec["ub"].is_array());
-
-        let json_diag_match = face_match_to_diagonal_json(sample);
-        assert!(json_diag_match["block1"].is_object());
-        assert!(json_diag_match["block2"].is_object());
-        assert!(json_diag_match["permutation_index"].is_number());
-
         // Permutation matrices
         let perm_mats = permutation_matrices_json();
         assert_eq!(perm_mats.len(), 8, "Should have 8 permutation matrices");
 
         println!(
-            "  lo/hi JSON: {}",
-            serde_json::to_string(&json_match).unwrap()
-        );
-        println!(
             "  lb/ub JSON: {}",
-            serde_json::to_string(&json_diag_match).unwrap()
+            serde_json::to_string(&json_match).unwrap()
         );
         println!("  All serialization checks passed");
     }
