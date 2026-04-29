@@ -333,6 +333,7 @@ pub fn build_flat_mesh(
             &blocks[b2],
             &graph,
             &all_face_metrics[b1],
+            fm_match.orientation.as_ref(),
         );
 
         for (owner, neighbor, ax, ay, az, cx, cy, cz) in edges {
@@ -560,6 +561,7 @@ fn cross_block_face_data(
     blk2: &Block,
     graph: &CellGraph,
     fm1: &crate::metrics::FaceMetrics,
+    orientation: Option<&crate::face_record::Orientation>,
 ) -> Vec<(u32, u32, Float, Float, Float, Float, Float, Float)> {
     let mut result = Vec::new();
 
@@ -614,15 +616,47 @@ fn cross_block_face_data(
         return result;
     }
 
-    let swapped = (n_u1 == n_v2) && (n_v1 == n_u2) && !((n_u1 == n_u2) && (n_v1 == n_v2));
-
+    // Decode the cell-pair mapping flags. Prefer the cascade-verified
+    // `permutation_index` when present — it is the only reliable
+    // source of truth for cross-axis 32×32 matches where the
+    // extent-shape heuristic below is structurally indeterminate.
+    //
+    // `permutation_index` bit encoding (matches `apply_permutation` in
+    // `verification.rs:117-143`):
+    //   bit 0 → u_reversed
+    //   bit 1 → v_reversed
+    //   bit 2 → swapped (transpose u ↔ v)
+    //
+    // Legacy heuristic fallback (`orientation = None`):
+    //   * `swapped` is inferred from extent-shape mismatch — works for
+    //     non-square faces, but always returns `false` for square N×N.
+    //   * `f2_u_reversed`/`f2_v_reversed` come from the lb>ub flip in
+    //     each axis of FaceRecord.
     let f2_raw = [
         [face2.il, face2.ih],
         [face2.jl, face2.jh],
         [face2.kl, face2.kh],
     ];
-    let f2_u_reversed = f2_raw[var_axes2[0]][0] > f2_raw[var_axes2[0]][1];
-    let f2_v_reversed = f2_raw[var_axes2[1]][0] > f2_raw[var_axes2[1]][1];
+    let (swapped, f2_u_reversed, f2_v_reversed) = match orientation {
+        Some(o) => {
+            let pi = o.permutation_index;
+            (
+                (pi & 0b100) != 0, // bit 2: swap
+                (pi & 0b001) != 0, // bit 0: u_reversed
+                (pi & 0b010) != 0, // bit 1: v_reversed
+            )
+        }
+        None => {
+            // Legacy heuristic — kept for callers that haven't run
+            // the cascade verifier (e.g. unit tests with no orientation).
+            let swap = (n_u1 == n_v2)
+                && (n_v1 == n_u2)
+                && !((n_u1 == n_u2) && (n_v1 == n_v2));
+            let u_rev = f2_raw[var_axes2[0]][0] > f2_raw[var_axes2[0]][1];
+            let v_rev = f2_raw[var_axes2[1]][0] > f2_raw[var_axes2[1]][1];
+            (swap, u_rev, v_rev)
+        }
+    };
 
     let (nci1, ncj1, _) = graph.block_cell_dims[b1];
     let (nci2, ncj2, _) = graph.block_cell_dims[b2];
