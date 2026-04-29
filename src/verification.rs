@@ -32,6 +32,7 @@
 //! - [`determine_plane`] — classify face pair as in-plane or cross-plane
 //! - [`verify_connectivity`] — verify connectivity face matches
 //! - [`verify_periodicity`] — verify periodic face matches with rotation
+//! - [`verify_translational_periodicity`] — verify periodic face matches with translation
 //!
 //! # JSON Export Convention
 //!
@@ -344,37 +345,44 @@ pub fn verify_connectivity(
             });
             verified.push(corrected);
         } else {
-            let orig = &face_matches[idx];
-            let ca1 = b1.constant_axis();
-            let ca2 = b2.constant_axis();
-            let axis_label = |a: Option<usize>| match a {
-                Some(0) => "I", Some(1) => "J", Some(2) => "K", _ => "?"
-            };
-            let cross_tag = if ca1 != ca2 { "CROSS-AXIS" } else { "SAME-AXIS" };
-            // Compute best distance across all 8 permutations
-            let mut best_dist: Float = Float::MAX;
-            for p in 0u8..8 {
-                let (permuted, out_nu, out_nv) = apply_permutation(&pts_b, nu_b, nv_b, p);
-                if out_nu != nu_a || out_nv != nv_a { continue; }
-                let d = max_point_distance(&pts_a, &permuted);
-                if d < best_dist { best_dist = d; }
+            // Diagnostic dump gated on env var: in a cascade pipeline
+            // (load.rs::load_mesh) this verifier is the FIRST stage —
+            // matches that need translational or rotational verification
+            // legitimately fail here and fall through. Routine misses
+            // would otherwise spam stderr (~1k lines on CMC009 rf=1).
+            // Set `PLOT3D_RS_VERIFY_CONNECTIVITY_VERBOSE=1` to debug.
+            if std::env::var("PLOT3D_RS_VERIFY_CONNECTIVITY_VERBOSE").as_deref() == Ok("1") {
+                let orig = &face_matches[idx];
+                let ca1 = b1.constant_axis();
+                let ca2 = b2.constant_axis();
+                let axis_label = |a: Option<usize>| match a {
+                    Some(0) => "I", Some(1) => "J", Some(2) => "K", _ => "?"
+                };
+                let cross_tag = if ca1 != ca2 { "CROSS-AXIS" } else { "SAME-AXIS" };
+                let mut best_dist: Float = Float::MAX;
+                for p in 0u8..8 {
+                    let (permuted, out_nu, out_nv) = apply_permutation(&pts_b, nu_b, nv_b, p);
+                    if out_nu != nu_a || out_nv != nv_a { continue; }
+                    let d = max_point_distance(&pts_a, &permuted);
+                    if d < best_dist { best_dist = d; }
+                }
+                eprintln!("verify_connectivity: MISMATCH at index {} [{}]", idx, cross_tag);
+                eprintln!(
+                    "  block {}: lo=({},{},{}) hi=({},{},{}) const={}",
+                    orig.block1.block_index,
+                    orig.block1.i_lo(), orig.block1.j_lo(), orig.block1.k_lo(),
+                    orig.block1.i_hi(), orig.block1.j_hi(), orig.block1.k_hi(),
+                    axis_label(ca1)
+                );
+                eprintln!(
+                    "  block {}: lo=({},{},{}) hi=({},{},{}) const={}",
+                    orig.block2.block_index,
+                    orig.block2.i_lo(), orig.block2.j_lo(), orig.block2.k_lo(),
+                    orig.block2.i_hi(), orig.block2.j_hi(), orig.block2.k_hi(),
+                    axis_label(ca2)
+                );
+                eprintln!("  grid_a: {}x{}, grid_b: {}x{}, best_dist: {:.6e}", nu_a, nv_a, nu_b, nv_b, best_dist);
             }
-            eprintln!("verify_connectivity: MISMATCH at index {} [{}]", idx, cross_tag);
-            eprintln!(
-                "  block {}: lo=({},{},{}) hi=({},{},{}) const={}",
-                orig.block1.block_index,
-                orig.block1.i_lo(), orig.block1.j_lo(), orig.block1.k_lo(),
-                orig.block1.i_hi(), orig.block1.j_hi(), orig.block1.k_hi(),
-                axis_label(ca1)
-            );
-            eprintln!(
-                "  block {}: lo=({},{},{}) hi=({},{},{}) const={}",
-                orig.block2.block_index,
-                orig.block2.i_lo(), orig.block2.j_lo(), orig.block2.k_lo(),
-                orig.block2.i_hi(), orig.block2.j_hi(), orig.block2.k_hi(),
-                axis_label(ca2)
-            );
-            eprintln!("  grid_a: {}x{}, grid_b: {}x{}, best_dist: {:.6e}", nu_a, nv_a, nu_b, nv_b, best_dist);
             mismatched.push(face_matches[idx].clone());
         }
     }
@@ -499,31 +507,301 @@ pub fn verify_periodicity(
         }
 
         if !found {
-            let orig = &face_matches[idx];
-            let ca1 = b1.constant_axis();
-            let ca2 = b2.constant_axis();
-            let axis_label = |a: Option<usize>| match a {
-                Some(0) => "I", Some(1) => "J", Some(2) => "K", _ => "?"
-            };
-            let cross_tag = if ca1 != ca2 { "CROSS-AXIS" } else { "SAME-AXIS" };
-            eprintln!("verify_periodicity: MISMATCH at index {} [{}]", idx, cross_tag);
-            eprintln!(
-                "  block {}: lo=({},{},{}) hi=({},{},{}) const={}",
-                orig.block1.block_index,
-                orig.block1.i_lo(), orig.block1.j_lo(), orig.block1.k_lo(),
-                orig.block1.i_hi(), orig.block1.j_hi(), orig.block1.k_hi(),
-                axis_label(ca1)
-            );
-            eprintln!(
-                "  block {}: lo=({},{},{}) hi=({},{},{}) const={}",
-                orig.block2.block_index,
-                orig.block2.i_lo(), orig.block2.j_lo(), orig.block2.k_lo(),
-                orig.block2.i_hi(), orig.block2.j_hi(), orig.block2.k_hi(),
-                axis_label(ca2)
-            );
-            if let Some((nua, nva, nub, nvb)) = best_dims {
-                eprintln!("  grid_a: {}x{}, grid_b: {}x{}, best_dist: {:.6e}", nua, nva, nub, nvb, best_dist);
+            // Diagnostic gated on env var (cascade misses are routine).
+            // Set `PLOT3D_RS_VERIFY_PERIODICITY_VERBOSE=1` to debug.
+            if std::env::var("PLOT3D_RS_VERIFY_PERIODICITY_VERBOSE").as_deref() == Ok("1") {
+                let orig = &face_matches[idx];
+                let ca1 = b1.constant_axis();
+                let ca2 = b2.constant_axis();
+                let axis_label = |a: Option<usize>| match a {
+                    Some(0) => "I", Some(1) => "J", Some(2) => "K", _ => "?"
+                };
+                let cross_tag = if ca1 != ca2 { "CROSS-AXIS" } else { "SAME-AXIS" };
+                eprintln!("verify_periodicity: MISMATCH at index {} [{}]", idx, cross_tag);
+                eprintln!(
+                    "  block {}: lo=({},{},{}) hi=({},{},{}) const={}",
+                    orig.block1.block_index,
+                    orig.block1.i_lo(), orig.block1.j_lo(), orig.block1.k_lo(),
+                    orig.block1.i_hi(), orig.block1.j_hi(), orig.block1.k_hi(),
+                    axis_label(ca1)
+                );
+                eprintln!(
+                    "  block {}: lo=({},{},{}) hi=({},{},{}) const={}",
+                    orig.block2.block_index,
+                    orig.block2.i_lo(), orig.block2.j_lo(), orig.block2.k_lo(),
+                    orig.block2.i_hi(), orig.block2.j_hi(), orig.block2.k_hi(),
+                    axis_label(ca2)
+                );
+                if let Some((nua, nva, nub, nvb)) = best_dims {
+                    eprintln!("  grid_a: {}x{}, grid_b: {}x{}, best_dist: {:.6e}", nua, nva, nub, nvb, best_dist);
+                }
             }
+            let _ = best_dist; let _ = best_dims;
+            mismatched.push(face_matches[idx].clone());
+        }
+    }
+
+    (verified, mismatched)
+}
+
+/// Verify face-match list against the grid under TRANSLATIONAL
+/// periodicity (e.g. blade-pitch in y, span height in z).
+///
+/// Mirror of [`verify_periodicity`] but uses **translation** instead
+/// of **rotation**: shifts every block by `±delta` along `axis`
+/// (`'x' | 'y' | 'z'`), then for each face_match tries all 8
+/// permutations against the shifted-block grid.
+///
+/// Use this for face_matches that are translationally periodic — i.e.,
+/// the two faces don't physically coincide in the original mesh, but
+/// they DO coincide once one block is translated by the periodicity
+/// vector. CMC009 has translational periodicity in **both Y (pitch)**
+/// and **Z (span height)**; call once for each direction in a cascading
+/// pipeline:
+///
+/// ```ignore
+/// let (verified_y, leftover_after_y) =
+///     verify_translational_periodicity(&blocks, &leftover_from_verify_connectivity, None, 'y', 1.0e-6);
+/// let (verified_z, still_unverified) =
+///     verify_translational_periodicity(&blocks, &leftover_after_y, None, 'z', 1.0e-6);
+/// ```
+///
+/// `delta` is the magnitude of the translation along `axis`.
+///
+/// **`None` triggers PER-MATCH auto-detect**: for each face_match, the
+/// shift is computed as the difference between the centroids of face A
+/// and face B projected onto `axis`. This is the geometrically-correct
+/// per-match displacement and works for both:
+///   * **Same-block self-loops** (e.g. block 589's k=0 ↔ k=4 face,
+///     where Δ_z = block-z-extent)
+///   * **Cross-block translational pitch matches** (where Δ is the
+///     blade pitch in y or the span height in z)
+///
+/// A globally-fixed `Some(delta)` is supported for callers that want
+/// a single mesh-wide pitch — but the per-match auto-detect is
+/// generally more robust because it adapts to whatever shift each
+/// individual face_match actually requires.
+///
+/// # Returns
+///
+/// `(verified, mismatched)` — verified face_matches have their
+/// [`FaceMatch::orientation`] populated with the winning
+/// `permutation_index` and the appropriate
+/// [`OrientationPlane`] discriminator (`InPlane` for same-axis matches,
+/// `CrossPlane` for axis-swapped). Mismatched face_matches are
+/// returned for the caller to retry against another verifier
+/// (e.g., the rotational [`verify_periodicity`]).
+pub fn verify_translational_periodicity(
+    blocks: &[Block],
+    face_matches: &[FaceMatch],
+    delta: Option<Float>,
+    axis: char,
+    tol: Float,
+) -> (Vec<FaceMatch>, Vec<FaceMatch>) {
+    let (reduced_blocks, scaled_matches) = prepare_reduced(blocks, face_matches);
+
+    let axis_idx = match axis {
+        'x' | 'X' => 0usize,
+        'y' | 'Y' => 1usize,
+        'z' | 'Z' => 2usize,
+        _ => panic!("verify_translational_periodicity: invalid axis {:?}", axis),
+    };
+
+    // Helper: face centroid along `axis_idx`. Walks the FaceRecord's
+    // (lb..ub) range on the parent block and averages the coordinate.
+    // Uses `extract_canonical_grid` indirectly by going through the
+    // block's corner coords — cheap and avoids re-extracting the full
+    // canonical grid just for centroid computation.
+    let face_axis_centroid = |block: &Block, rec: &FaceRecord| -> Float {
+        // FaceRecord has `i_lo, i_hi, j_lo, j_hi, k_lo, k_hi` accessors.
+        // Walk the inclusive range and average. Reduced blocks have
+        // small node counts so this is cheap.
+        let (il, jh, kl) = (rec.i_lo(), rec.j_lo(), rec.k_lo());
+        let (ih, jl, kh) = (rec.i_hi(), rec.j_hi(), rec.k_hi());
+        // FaceRecord may have lb > ub for direction-flipped faces;
+        // normalise to ascending for the centroid walk.
+        let (i0, i1) = if il <= ih { (il, ih) } else { (ih, il) };
+        let (j0, j1) = if jl <= jh { (jl, jh) } else { (jh, jl) };
+        let (k0, k1) = if kl <= kh { (kl, kh) } else { (kh, kl) };
+        let mut sum: Float = 0.0;
+        let mut n: usize = 0;
+        for k in k0..=k1 {
+            for j in j0..=j1 {
+                for i in i0..=i1 {
+                    let (x, y, z) = block.xyz(i, j, k);
+                    let v = match axis_idx {
+                        0 => x,
+                        1 => y,
+                        _ => z,
+                    };
+                    sum += v;
+                    n += 1;
+                }
+            }
+        }
+        sum / (n.max(1) as Float)
+    };
+
+    let mut verified = Vec::new();
+    let mut mismatched = Vec::new();
+
+    for (idx, sfm) in scaled_matches.iter().enumerate() {
+        let b1 = &sfm.block1;
+        let b2 = &sfm.block2;
+        let b1_idx = b1.block_index;
+        let b2_idx = b2.block_index;
+
+        if b1_idx >= reduced_blocks.len() || b2_idx >= reduced_blocks.len() {
+            mismatched.push(face_matches[idx].clone());
+            continue;
+        }
+
+        let block1 = &reduced_blocks[b1_idx];
+        let block2 = &reduced_blocks[b2_idx];
+
+        // Per-match Δ: when caller didn't pin a global delta, compute
+        // the geometrically-required shift directly from the centroids
+        // of face A vs face B (projected onto the requested axis).
+        // This handles same-block self-loops and cross-block pitch
+        // matches uniformly.
+        let delta_axis = match delta {
+            Some(d) => d,
+            None => {
+                let c1 = face_axis_centroid(block1, b1);
+                let c2 = face_axis_centroid(block2, b2);
+                // We want to shift block 1 onto block 2: Δ = c2 - c1.
+                // The match loop below tries both +Δ and -Δ, so the
+                // sign is irrelevant — store the absolute value.
+                (c2 - c1).abs()
+            }
+        };
+        // Skip degenerate Δ (≈0): means the two faces are already
+        // approximately coincident along this axis — they wouldn't
+        // need a translational verifier; let them fall through.
+        if delta_axis.abs() < tol {
+            mismatched.push(face_matches[idx].clone());
+            continue;
+        }
+        let block1_shifted_pos = block1.shifted(delta_axis, axis);
+        let block1_shifted_neg = block1.shifted(-delta_axis, axis);
+
+        // Face B's canonical grid (un-shifted).
+        let grid_b = match extract_canonical_grid(block2, b2) {
+            Some(g) => g,
+            None => {
+                mismatched.push(face_matches[idx].clone());
+                continue;
+            }
+        };
+        let (pts_b, nu_b, nv_b) = grid_b;
+
+        let mut found = false;
+        let mut best_dist: Float = Float::MAX;
+        let mut best_dims: Option<(usize, usize, usize, usize)> = None;
+
+        // Try +delta translation first, then -delta.
+        for block1_shifted in [&block1_shifted_pos, &block1_shifted_neg] {
+            if found {
+                break;
+            }
+
+
+            let grid_a = match extract_canonical_grid(block1_shifted, b1) {
+                Some(g) => g,
+                None => continue,
+            };
+            let (pts_a, nu_a, nv_a) = grid_a;
+
+            if best_dims.is_none() {
+                best_dims = Some((nu_a, nv_a, nu_b, nv_b));
+            }
+
+            // Try stored permutation_index first (fast-path for
+            // already-verified matches).
+            let stored_perm = sfm.orientation.as_ref().map(|o| o.permutation_index);
+            if let Some(perm_idx) = stored_perm {
+                let (permuted, out_nu, out_nv) =
+                    apply_permutation(&pts_b, nu_b, nv_b, perm_idx);
+                if out_nu == nu_a && out_nv == nv_a && verify_match(&pts_a, &permuted, tol) {
+                    verified.push(face_matches[idx].clone());
+                    found = true;
+                    break;
+                }
+            }
+
+            // Fall back: try all 8 permutations.
+            if let Some(perm_idx) =
+                try_all_permutations(&pts_a, nu_a, nv_a, &pts_b, nu_b, nv_b, tol)
+            {
+                let mut corrected = face_matches[idx].clone();
+                let plane = determine_plane(b1, b2);
+                corrected.orientation = Some(Orientation {
+                    permutation_index: perm_idx,
+                    plane,
+                });
+                verified.push(corrected);
+                found = true;
+                break;
+            }
+
+            // Diagnostic: track best distance across all 8 perms.
+            for p in 0u8..8 {
+                let (permuted, out_nu, out_nv) =
+                    apply_permutation(&pts_b, nu_b, nv_b, p);
+                if out_nu != nu_a || out_nv != nv_a {
+                    continue;
+                }
+                let d = max_point_distance(&pts_a, &permuted);
+                if d < best_dist {
+                    best_dist = d;
+                }
+            }
+        }
+
+        if !found {
+            // Quiet on miss — caller will retry against the next
+            // verifier in the cascade. Keep diagnostics behind an
+            // env var to avoid spamming production runs that legitimately
+            // route some matches to a different verifier.
+            if std::env::var("PLOT3D_RS_VERIFY_TRANSLATIONAL_VERBOSE").as_deref() == Ok("1") {
+                let orig = &face_matches[idx];
+                let ca1 = b1.constant_axis();
+                let ca2 = b2.constant_axis();
+                let axis_label = |a: Option<usize>| match a {
+                    Some(0) => "I",
+                    Some(1) => "J",
+                    Some(2) => "K",
+                    _ => "?",
+                };
+                let cross_tag = if ca1 != ca2 { "CROSS-AXIS" } else { "SAME-AXIS" };
+                eprintln!(
+                    "verify_translational_periodicity[{}, Δ_per_match={:+.3e}]: \
+                     MISMATCH at index {} [{}]",
+                    axis, delta_axis, idx, cross_tag,
+                );
+                eprintln!(
+                    "  block {}: lo=({},{},{}) hi=({},{},{}) const={}",
+                    orig.block1.block_index,
+                    orig.block1.i_lo(), orig.block1.j_lo(), orig.block1.k_lo(),
+                    orig.block1.i_hi(), orig.block1.j_hi(), orig.block1.k_hi(),
+                    axis_label(ca1),
+                );
+                eprintln!(
+                    "  block {}: lo=({},{},{}) hi=({},{},{}) const={}",
+                    orig.block2.block_index,
+                    orig.block2.i_lo(), orig.block2.j_lo(), orig.block2.k_lo(),
+                    orig.block2.i_hi(), orig.block2.j_hi(), orig.block2.k_hi(),
+                    axis_label(ca2),
+                );
+                if let Some((nua, nva, nub, nvb)) = best_dims {
+                    eprintln!(
+                        "  grid_a: {}x{}, grid_b: {}x{}, best_dist: {:.6e}",
+                        nua, nva, nub, nvb, best_dist,
+                    );
+                }
+            }
+            // Suppress unused warning when env var is absent.
+            let _ = best_dims;
             mismatched.push(face_matches[idx].clone());
         }
     }

@@ -185,6 +185,7 @@ pub use utils::{apply_rotation, compute_min_gcd, Endian};
 pub use verification::{
     apply_permutation, determine_plane, extract_canonical_grid, try_all_permutations,
     verify_connectivity, verify_match, verify_partial_match, verify_periodicity,
+    verify_translational_periodicity,
 };
 pub use write::write_plot3d;
 pub use dual_graph::{build_cell_graph, cell_index, global_cell_id, CellGraph};
