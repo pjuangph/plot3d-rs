@@ -1047,6 +1047,7 @@ fn try_corner_permutations(
                 } else {
                     OrientationPlane::InPlane
                 },
+                permutation_matrix: None,
             });
         }
     }

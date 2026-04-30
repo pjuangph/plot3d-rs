@@ -325,27 +325,72 @@ pub fn verify_connectivity(
         let (pts_a, nu_a, nv_a) = grid_a;
         let (pts_b, nu_b, nv_b) = grid_b;
 
-        // Try stored permutation_index first (if available)
-        let stored_perm = sfm.orientation.as_ref().map(|o| o.permutation_index);
-        if let Some(perm_idx) = stored_perm {
+        // Two paths, depending on whether the FaceMatch carries a
+        // declaration:
+        //
+        //   - DECLARED (orientation is Some): matrix-honest. Resolve the
+        //     canonical index from `permutation_matrix` (preferred) or
+        //     fall back to `permutation_index`. NO brute-force search —
+        //     a wrong declaration is reported as mismatched, never
+        //     silently rounded into a different orientation.
+        //
+        //   - UNDECLARED (orientation is None): geometry-driven discovery.
+        //     This is the case for older connectivity.json files (e.g.
+        //     CMC009) that pre-date the orientation field. The verifier
+        //     scans all 8 canonical permutations and back-fills the
+        //     winning index.
+        let declared_perm = sfm.orientation.as_ref().map(|o| {
+            match o.permutation_matrix {
+                Some(m) => Orientation::index_from_permutation_matrix(m)
+                    .unwrap_or(o.permutation_index),
+                None => o.permutation_index,
+            }
+        });
+
+        let mut matched = false;
+        let mut best_dist: Float = Float::MAX;
+
+        if let Some(perm_idx) = declared_perm {
+            // DECLARED path — matrix-honest, no fallback.
             let (permuted, out_nu, out_nv) = apply_permutation(&pts_b, nu_b, nv_b, perm_idx);
             if out_nu == nu_a && out_nv == nv_a && verify_match(&pts_a, &permuted, tol) {
-                verified.push(face_matches[idx].clone());
-                continue;
+                let mut corrected = face_matches[idx].clone();
+                let plane = determine_plane(b1, b2);
+                let preserved_matrix = sfm
+                    .orientation
+                    .as_ref()
+                    .and_then(|o| o.permutation_matrix);
+                corrected.orientation = Some(Orientation {
+                    permutation_index: perm_idx,
+                    plane,
+                    permutation_matrix: preserved_matrix,
+                });
+                verified.push(corrected);
+                matched = true;
+            } else {
+                let d = max_point_distance(&pts_a, &permuted);
+                if d < best_dist { best_dist = d; }
+            }
+        } else {
+            // UNDECLARED path — discover the orientation by trying all
+            // 8 canonical permutations.
+            if let Some(perm_idx) =
+                try_all_permutations(&pts_a, nu_a, nv_a, &pts_b, nu_b, nv_b, tol)
+            {
+                let mut corrected = face_matches[idx].clone();
+                let plane = determine_plane(b1, b2);
+                corrected.orientation = Some(Orientation {
+                    permutation_index: perm_idx,
+                    plane,
+                    permutation_matrix: None,
+                });
+                verified.push(corrected);
+                matched = true;
             }
         }
 
-        // Fall back: try all 8 permutations
-        if let Some(perm_idx) = try_all_permutations(&pts_a, nu_a, nv_a, &pts_b, nu_b, nv_b, tol) {
-            let mut corrected = face_matches[idx].clone();
-            let plane = determine_plane(b1, b2);
-            corrected.orientation = Some(Orientation {
-                permutation_index: perm_idx,
-                plane,
-            });
-            verified.push(corrected);
-        } else {
-            // Diagnostic dump gated on env var: in a cascade pipeline
+        if !matched {
+            // Diagnostic gated on env var: in a cascade pipeline
             // (load.rs::load_mesh) this verifier is the FIRST stage —
             // matches that need translational or rotational verification
             // legitimately fail here and fall through. Routine misses
@@ -359,7 +404,8 @@ pub fn verify_connectivity(
                     Some(0) => "I", Some(1) => "J", Some(2) => "K", _ => "?"
                 };
                 let cross_tag = if ca1 != ca2 { "CROSS-AXIS" } else { "SAME-AXIS" };
-                let mut best_dist: Float = Float::MAX;
+                // Diagnostic-only scan of all 8 perms for reporting
+                // (this is NOT a fallback — `matched` stays false).
                 for p in 0u8..8 {
                     let (permuted, out_nu, out_nv) = apply_permutation(&pts_b, nu_b, nv_b, p);
                     if out_nu != nu_a || out_nv != nv_a { continue; }
@@ -383,6 +429,7 @@ pub fn verify_connectivity(
                 );
                 eprintln!("  grid_a: {}x{}, grid_b: {}x{}, best_dist: {:.6e}", nu_a, nv_a, nu_b, nv_b, best_dist);
             }
+            let _ = best_dist;
             mismatched.push(face_matches[idx].clone());
         }
     }
@@ -471,38 +518,62 @@ pub fn verify_periodicity(
                 best_dims = Some((nu_a, nv_a, nu_b, nv_b));
             }
 
-            // Try stored permutation_index first
-            let stored_perm = sfm.orientation.as_ref().map(|o| o.permutation_index);
-            if let Some(perm_idx) = stored_perm {
-                let (permuted, out_nu, out_nv) = apply_permutation(&pts_b, nu_b, nv_b, perm_idx);
-                if out_nu == nu_a && out_nv == nv_a && verify_match(&pts_a, &permuted, tol) {
-                    verified.push(face_matches[idx].clone());
+            // Declarative-only orientation lookup. The caller MUST supply
+            // either a `permutation_matrix` (preferred — directly looks
+            // up the canonical index in PERMUTATION_MATRICES) or a
+            // `permutation_index`. There is NO brute-force fallback;
+            // missing or non-canonical declarations fail loudly.
+            let declared_perm = match sfm.orientation.as_ref() {
+                Some(o) => match o.permutation_matrix {
+                    Some(m) => Orientation::index_from_permutation_matrix(m),
+                    None => Some(o.permutation_index),
+                },
+                None => None,
+            };
+            if let Some(perm_idx) = declared_perm {
+                let (permuted, out_nu, out_nv) =
+                    apply_permutation(&pts_b, nu_b, nv_b, perm_idx);
+                if out_nu == nu_a
+                    && out_nv == nv_a
+                    && verify_match(&pts_a, &permuted, tol)
+                {
+                    let mut corrected = face_matches[idx].clone();
+                    let plane = determine_plane(b1, b2);
+                    // Back-fill the canonical index (preserves any
+                    // declared matrix on the original entry).
+                    let preserved_matrix = sfm
+                        .orientation
+                        .as_ref()
+                        .and_then(|o| o.permutation_matrix);
+                    corrected.orientation = Some(Orientation {
+                        permutation_index: perm_idx,
+                        plane,
+                        permutation_matrix: preserved_matrix,
+                    });
+                    verified.push(corrected);
                     found = true;
                     break;
                 }
-            }
-
-            // Fall back: try all 8 permutations
-            if let Some(perm_idx) =
-                try_all_permutations(&pts_a, nu_a, nv_a, &pts_b, nu_b, nv_b, tol)
-            {
-                let mut corrected = face_matches[idx].clone();
-                let plane = determine_plane(b1, b2);
-                corrected.orientation = Some(Orientation {
-                    permutation_index: perm_idx,
-                    plane,
-                });
-                verified.push(corrected);
-                found = true;
-                break;
-            }
-
-            // Track best distance for diagnostics
-            for p in 0u8..8 {
-                let (permuted, out_nu, out_nv) = apply_permutation(&pts_b, nu_b, nv_b, p);
-                if out_nu != nu_a || out_nv != nv_a { continue; }
+                // Track for diagnostics on the declared index too.
                 let d = max_point_distance(&pts_a, &permuted);
-                if d < best_dist { best_dist = d; }
+                if d < best_dist {
+                    best_dist = d;
+                }
+            }
+
+            // Diagnostic-only: scan all 8 to report the BEST mismatch
+            // distance.  This is NOT a fallback — `found` stays false if
+            // the declared orientation didn't match within `tol`.
+            for p in 0u8..8 {
+                let (permuted, out_nu, out_nv) =
+                    apply_permutation(&pts_b, nu_b, nv_b, p);
+                if out_nu != nu_a || out_nv != nv_a {
+                    continue;
+                }
+                let d = max_point_distance(&pts_a, &permuted);
+                if d < best_dist {
+                    best_dist = d;
+                }
             }
         }
 
@@ -716,21 +787,43 @@ pub fn verify_translational_periodicity(
                 best_dims = Some((nu_a, nv_a, nu_b, nv_b));
             }
 
-            // Try stored permutation_index first (fast-path for
-            // already-verified matches).
-            let stored_perm = sfm.orientation.as_ref().map(|o| o.permutation_index);
-            if let Some(perm_idx) = stored_perm {
+            // DECLARED path: orientation present → matrix-honest, no
+            // brute-force. UNDECLARED path: scan all 8 perms (legacy
+            // connectivity.json without the orientation field).
+            let declared_perm = sfm.orientation.as_ref().map(|o| {
+                match o.permutation_matrix {
+                    Some(m) => Orientation::index_from_permutation_matrix(m)
+                        .unwrap_or(o.permutation_index),
+                    None => o.permutation_index,
+                }
+            });
+            if let Some(perm_idx) = declared_perm {
                 let (permuted, out_nu, out_nv) =
                     apply_permutation(&pts_b, nu_b, nv_b, perm_idx);
-                if out_nu == nu_a && out_nv == nv_a && verify_match(&pts_a, &permuted, tol) {
-                    verified.push(face_matches[idx].clone());
+                if out_nu == nu_a
+                    && out_nv == nv_a
+                    && verify_match(&pts_a, &permuted, tol)
+                {
+                    let mut corrected = face_matches[idx].clone();
+                    let plane = determine_plane(b1, b2);
+                    let preserved_matrix = sfm
+                        .orientation
+                        .as_ref()
+                        .and_then(|o| o.permutation_matrix);
+                    corrected.orientation = Some(Orientation {
+                        permutation_index: perm_idx,
+                        plane,
+                        permutation_matrix: preserved_matrix,
+                    });
+                    verified.push(corrected);
                     found = true;
                     break;
                 }
-            }
-
-            // Fall back: try all 8 permutations.
-            if let Some(perm_idx) =
+                let d = max_point_distance(&pts_a, &permuted);
+                if d < best_dist {
+                    best_dist = d;
+                }
+            } else if let Some(perm_idx) =
                 try_all_permutations(&pts_a, nu_a, nv_a, &pts_b, nu_b, nv_b, tol)
             {
                 let mut corrected = face_matches[idx].clone();
@@ -738,13 +831,14 @@ pub fn verify_translational_periodicity(
                 corrected.orientation = Some(Orientation {
                     permutation_index: perm_idx,
                     plane,
+                    permutation_matrix: None,
                 });
                 verified.push(corrected);
                 found = true;
                 break;
             }
 
-            // Diagnostic: track best distance across all 8 perms.
+            // Diagnostic-only scan of all 8 perms (NOT a fallback).
             for p in 0u8..8 {
                 let (permuted, out_nu, out_nv) =
                     apply_permutation(&pts_b, nu_b, nv_b, p);

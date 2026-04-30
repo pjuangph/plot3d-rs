@@ -473,6 +473,7 @@ fn find_full_face_matches(
                     let orientation = Orientation {
                         permutation_index: perm_idx,
                         plane,
+                        permutation_matrix: None,
                     };
 
                     // Build match points from the verified orientation
@@ -1160,6 +1161,7 @@ pub fn align_face_orientations(
             fm_out.orientation = Some(Orientation {
                 permutation_index: perm_idx,
                 plane,
+                permutation_matrix: None,
             });
             aligned.push(fm_out);
         } else {

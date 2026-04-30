@@ -531,6 +531,16 @@ pub struct Orientation {
     pub permutation_index: u8,
     /// Whether this is an in-plane or cross-plane match.
     pub plane: OrientationPlane,
+    /// Optional declarative copy of the 2×2 permutation matrix as written
+    /// in upstream connectivity files (e.g. `connectivity.json` from
+    /// `plot3d_utilities`). When present, this is the authoritative
+    /// orientation source: callers must convert it via
+    /// [`Orientation::index_from_permutation_matrix`] to get the
+    /// [`PERMUTATION_MATRICES`]-canonical index, and verifiers prefer it
+    /// over `permutation_index`. None for legacy / synthesized matches
+    /// where only the index was set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permutation_matrix: Option<[[i8; 2]; 2]>,
 }
 
 impl Orientation {
@@ -545,6 +555,7 @@ impl Orientation {
         Self {
             permutation_index: index,
             plane,
+            permutation_matrix: None,
         }
     }
 
@@ -566,6 +577,22 @@ impl Orientation {
     /// Get the 2×2 permutation matrix for this orientation.
     pub fn matrix(&self) -> &[[i8; 2]; 2] {
         &PERMUTATION_MATRICES[self.permutation_index as usize]
+    }
+
+    /// Look up the canonical permutation index whose matrix in
+    /// [`PERMUTATION_MATRICES`] equals `m`.  Returns `None` if `m` is not
+    /// one of the 8 canonical permutations (e.g. a non-axis-aligned
+    /// matrix or a typo in upstream-provided connectivity).
+    ///
+    /// This is the deterministic translation used when an upstream
+    /// `connectivity.json` carries an explicit `permutation_matrix` —
+    /// the verifiers consult this instead of brute-forcing through all
+    /// 8 candidates.
+    pub fn index_from_permutation_matrix(m: [[i8; 2]; 2]) -> Option<u8> {
+        PERMUTATION_MATRICES
+            .iter()
+            .position(|c| *c == m)
+            .map(|i| i as u8)
     }
 }
 

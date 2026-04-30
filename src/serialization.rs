@@ -60,17 +60,27 @@ pub fn face_record_to_json(rec: &FaceRecord) -> Value {
 /// Both block1 and block2 export raw `lb`/`ub` (il/jl/kl → ih/jh/kh).
 /// The `permutation_index` is included for reference but the corners
 /// already encode the full mapping: lb1 ↔ lb2, ub1 ↔ ub2 in physical space.
+/// The optional `permutation_matrix` (2x2 i8) is exported when present so
+/// downstream consumers (e.g. glennht-core) can use the declarative
+/// matrix-driven path instead of the bare index.
 pub fn face_match_to_json(fm: &FaceMatch) -> Value {
     let perm_idx: i8 = fm
         .orientation
         .as_ref()
         .map(|o| o.permutation_index as i8)
         .unwrap_or(0);
-    json!({
+    let mut obj = json!({
         "block1": face_record_to_json(&fm.block1),
         "block2": face_record_to_json(&fm.block2),
         "permutation_index": perm_idx,
-    })
+    });
+    if let Some(m) = fm.orientation.as_ref().and_then(|o| o.permutation_matrix) {
+        obj["permutation_matrix"] = json!([
+            [m[0][0], m[0][1]],
+            [m[1][0], m[1][1]],
+        ]);
+    }
+    obj
 }
 
 /// Serialize the 8 permutation matrices as a JSON array (for inclusion in output headers).
@@ -216,23 +226,61 @@ pub fn face_match_from_json(val: &Value) -> Result<FaceMatch, String> {
     let block2 = face_record_from_json(block2_val)
         .map_err(|e| format!("face_match.block2: {}", e))?;
 
-    // Parse orientation from permutation_index if present. The `permutation_index`
-    // written by `face_match_to_json` is an i8 (signed), so accept any JSON integer
-    // in the 0..=7 range.
-    let orientation = val
-        .get("permutation_index")
-        .and_then(|v| v.as_i64())
-        .map(|idx| {
-            // Defensive clamp: 0..=7 are the only valid permutation indices.
-            let clamped = idx.clamp(0, 7) as u8;
-            Orientation {
-                permutation_index: clamped,
-                // Default to in-plane; downstream code that needs cross-plane
-                // information should re-run the verification pipeline, which
-                // populates `plane` explicitly.
-                plane: OrientationPlane::InPlane,
+    // Parse the optional `permutation_matrix` (2x2 i8). Preferred over
+    // `permutation_index` because it carries enough information to look
+    // up the canonical index even when the JSON's index field is the
+    // sentinel `-1` (some tools use this to indicate "matrix only").
+    let permutation_matrix: Option<[[i8; 2]; 2]> = val
+        .get("permutation_matrix")
+        .and_then(|v| v.as_array())
+        .and_then(|outer| {
+            if outer.len() != 2 {
+                return None;
             }
+            let mut m = [[0i8; 2]; 2];
+            for (r, row) in outer.iter().enumerate() {
+                let row = row.as_array()?;
+                if row.len() != 2 {
+                    return None;
+                }
+                for (c, cell) in row.iter().enumerate() {
+                    let v = cell.as_i64()?;
+                    if !(-1..=1).contains(&v) {
+                        return None;
+                    }
+                    m[r][c] = v as i8;
+                }
+            }
+            Some(m)
         });
+
+    // Parse orientation from permutation_matrix (preferred) or
+    // permutation_index. The `permutation_index` written by
+    // `face_match_to_json` is an i8 (signed), so accept any JSON integer
+    // in the 0..=7 range.
+    let orientation = if let Some(m) = permutation_matrix {
+        let idx = Orientation::index_from_permutation_matrix(m).unwrap_or(0);
+        Some(Orientation {
+            permutation_index: idx,
+            plane: OrientationPlane::InPlane,
+            permutation_matrix: Some(m),
+        })
+    } else {
+        val.get("permutation_index")
+            .and_then(|v| v.as_i64())
+            .map(|idx| {
+                // Defensive clamp: 0..=7 are the only valid permutation indices.
+                let clamped = idx.clamp(0, 7) as u8;
+                Orientation {
+                    permutation_index: clamped,
+                    // Default to in-plane; downstream code that needs cross-plane
+                    // information should re-run the verification pipeline, which
+                    // populates `plane` explicitly.
+                    plane: OrientationPlane::InPlane,
+                    permutation_matrix: None,
+                }
+            })
+    };
 
     Ok(FaceMatch {
         block1,
@@ -342,6 +390,7 @@ mod tests {
             orientation: Some(Orientation {
                 permutation_index: 5,
                 plane: OrientationPlane::InPlane,
+                permutation_matrix: None,
             }),
         };
 
