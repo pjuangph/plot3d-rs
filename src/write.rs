@@ -119,44 +119,43 @@ fn write_fortran(
         write_fortran_record(&mut w, &rec, endian)?;
     }
 
-    // payload: 3 records per block: X, Y, Z
+    // payload: one record per block containing X, Y, Z concatenated —
+    // the standard PLOT3D layout. (The reader still accepts the older
+    // three-records-per-block files; see `read_binary_fortran`.)
     for b in blocks {
-        match precision {
+        let xyz: Vec<u8> = match precision {
             FloatPrecision::F32 => {
-                let xb = utils::Endian::write_f32_slice(
+                let mut buf = utils::Endian::write_f32_slice(
                     &b.x.iter().map(|v| *v as f32).collect::<Vec<f32>>(),
                     endian,
                 );
-                write_fortran_record(&mut w, &xb, endian)?;
-                let yb = utils::Endian::write_f32_slice(
+                buf.extend_from_slice(&utils::Endian::write_f32_slice(
                     &b.y.iter().map(|v| *v as f32).collect::<Vec<f32>>(),
                     endian,
-                );
-                write_fortran_record(&mut w, &yb, endian)?;
-                let zb = utils::Endian::write_f32_slice(
+                ));
+                buf.extend_from_slice(&utils::Endian::write_f32_slice(
                     &b.z.iter().map(|v| *v as f32).collect::<Vec<f32>>(),
                     endian,
-                );
-                write_fortran_record(&mut w, &zb, endian)?;
+                ));
+                buf
             }
             FloatPrecision::F64 => {
-                let xb = utils::Endian::write_f64_slice(
+                let mut buf = utils::Endian::write_f64_slice(
                     &b.x.iter().map(|v| *v as f64).collect::<Vec<f64>>(),
                     endian,
                 );
-                write_fortran_record(&mut w, &xb, endian)?;
-                let yb = utils::Endian::write_f64_slice(
+                buf.extend_from_slice(&utils::Endian::write_f64_slice(
                     &b.y.iter().map(|v| *v as f64).collect::<Vec<f64>>(),
                     endian,
-                );
-                write_fortran_record(&mut w, &yb, endian)?;
-                let zb = utils::Endian::write_f64_slice(
+                ));
+                buf.extend_from_slice(&utils::Endian::write_f64_slice(
                     &b.z.iter().map(|v| *v as f64).collect::<Vec<f64>>(),
                     endian,
-                );
-                write_fortran_record(&mut w, &zb, endian)?;
+                ));
+                buf
             }
-        }
+        };
+        write_fortran_record(&mut w, &xyz, endian)?;
     }
 
     Ok(())

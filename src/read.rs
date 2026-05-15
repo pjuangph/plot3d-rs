@@ -156,55 +156,59 @@ fn read_binary_fortran(
         dims.push((imax, jmax, kmax));
     }
 
-    // payload records: X, Y, Z for each block
+    // Decode one Fortran record's raw bytes into `Float`s, honoring the
+    // file's precision + endianness.
+    let decode = |bytes: &[u8]| -> Vec<Float> {
+        match precision {
+            FloatPrecision::F32 => utils::Endian::read_f32_slice(bytes, endian)
+                .into_iter()
+                .map(|v| v as Float)
+                .collect(),
+            FloatPrecision::F64 => utils::Endian::read_f64_slice(bytes, endian)
+                .into_iter()
+                .map(|v| v as Float)
+                .collect(),
+        }
+    };
+
+    // Payload. The standard PLOT3D convention writes X, Y, Z as a single
+    // concatenated record per block; older plot3d-rs / Plot3D_utilities
+    // releases wrote them as three separate records. Detect which layout
+    // is present from the size of the first payload record per block, so
+    // existing files written either way still read correctly.
     let mut blocks = Vec::with_capacity(nblocks);
     for (imax, jmax, kmax) in dims {
         let n = imax * jmax * kmax;
 
-        let xr = read_fortran_record(r, endian)?;
-        let x: Vec<Float> = match precision {
-            FloatPrecision::F32 => utils::Endian::read_f32_slice(&xr, endian)
-                .into_iter()
-                .map(|v| v as Float)
-                .collect(),
-            FloatPrecision::F64 => utils::Endian::read_f64_slice(&xr, endian)
-                .into_iter()
-                .map(|v| v as Float)
-                .collect(),
+        let first = decode(&read_fortran_record(r, endian)?);
+        let (x, y, z) = if first.len() == 3 * n {
+            // Single concatenated record: [X | Y | Z].
+            let x = first[..n].to_vec();
+            let y = first[n..2 * n].to_vec();
+            let z = first[2 * n..].to_vec();
+            (x, y, z)
+        } else if first.len() == n {
+            // Legacy three-record layout: this record is X; Y and Z each
+            // follow in their own record.
+            let y = decode(&read_fortran_record(r, endian)?);
+            if y.len() != n {
+                return Err(ioerr("Y size mismatch"));
+            }
+            let z = decode(&read_fortran_record(r, endian)?);
+            if z.len() != n {
+                return Err(ioerr("Z size mismatch"));
+            }
+            (first, y, z)
+        } else {
+            return Err(ioerr(&format!(
+                "unexpected Fortran record size for block {}: got {} reals, \
+                 expected {} (legacy 3-record) or {} (concatenated)",
+                blocks.len(),
+                first.len(),
+                n,
+                3 * n
+            )));
         };
-        if x.len() != n {
-            return Err(ioerr("X size mismatch"));
-        }
-
-        let yr_rec = read_fortran_record(r, endian)?;
-        let y: Vec<Float> = match precision {
-            FloatPrecision::F32 => utils::Endian::read_f32_slice(&yr_rec, endian)
-                .into_iter()
-                .map(|v| v as Float)
-                .collect(),
-            FloatPrecision::F64 => utils::Endian::read_f64_slice(&yr_rec, endian)
-                .into_iter()
-                .map(|v| v as Float)
-                .collect(),
-        };
-        if y.len() != n {
-            return Err(ioerr("Y size mismatch"));
-        }
-
-        let zr = read_fortran_record(r, endian)?;
-        let z: Vec<Float> = match precision {
-            FloatPrecision::F32 => utils::Endian::read_f32_slice(&zr, endian)
-                .into_iter()
-                .map(|v| v as Float)
-                .collect(),
-            FloatPrecision::F64 => utils::Endian::read_f64_slice(&zr, endian)
-                .into_iter()
-                .map(|v| v as Float)
-                .collect(),
-        };
-        if z.len() != n {
-            return Err(ioerr("Z size mismatch"));
-        }
 
         blocks.push(Block::new(imax, jmax, kmax, x, y, z));
     }

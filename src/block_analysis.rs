@@ -305,7 +305,10 @@ pub fn standardize_block_orientation(block: &Block) -> Block {
     Block::new(block.imax, block.jmax, block.kmax, x, y, z)
 }
 
-fn flip_block_axis(
+/// Reverse a block's node ordering along one structured axis
+/// (`0` = i, `1` = j, `2` = k) in place. Used by
+/// `standardize_block_orientation` and by `mesh_quality::make_right_handed`.
+pub(crate) fn flip_block_axis(
     x: &mut [Float],
     y: &mut [Float],
     z: &mut [Float],

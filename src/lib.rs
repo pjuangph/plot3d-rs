@@ -134,6 +134,7 @@ pub mod flat_data;
 pub(crate) mod geometry;
 pub mod graph;
 pub mod merge_blocks;
+pub mod mesh_quality;
 pub mod metrics;
 pub mod point_match;
 pub mod read;
@@ -166,6 +167,11 @@ pub use face_record::{
 };
 pub use graph::{build_weighted_graph_from_face_matches, write_ddcmp, BlockGraph, WeightAggregate};
 pub use metrics::{compute_cell_centers, compute_cell_volumes, compute_face_metrics, FaceMetrics};
+pub use mesh_quality::{
+    block_handedness, cell_aspect_ratio, cell_signed_volume, cell_skewness, make_right_handed,
+    run_all as run_mesh_quality, CellLocation, Handedness, MeshQualityReport, Severity,
+    Thresholds, Violation,
+};
 pub use merge_blocks::{
     combine_2_blocks_mixed_pairing, combine_blocks_mixed_pairs, combine_nxnxn_cubes_mixed_pairs,
 };
