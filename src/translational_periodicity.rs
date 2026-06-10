@@ -561,6 +561,202 @@ pub fn translational_periodicity(
     drop(blocks_up);
     drop(blocks_dn);
 
+    // ── Phase 3: Oblique fallback (bladed-cascade pitch boundaries) ──
+    //
+    // Phases 1–2 only see faces collected by `find_bounding_faces`, i.e.
+    // faces lying at the GLOBAL axis extremes — flat constant-coordinate
+    // pitch planes. A bladed cascade's pitch boundaries are oblique
+    // (they follow the metal-angle inlet/outlet extensions and hug the
+    // O-grid), so those pools come back empty and nothing is found even
+    // on an exactly-periodic mesh. This phase considers ALL still-
+    // unmatched outer faces, exploiting two properties of a pure
+    // translation along `axis`:
+    //   1. A periodic face is a single-valued height field over the
+    //      orthogonal plane (its footprint). Faces whose normal is ⊥ to
+    //      the axis collapse to a line; wrap-around blade walls are
+    //      multi-valued — both are rejected by footprint-quality stats.
+    //   2. Δ is the median per-footprint-key axis offset (no global-
+    //      extent assumption — that heuristic is wrong for cascades
+    //      where the domain spans more than one pitch).
+    // Verification is a quantized 3D node intersection under the
+    // estimated shift: the smaller side must be ≥ 95 % covered. Faces
+    // may match PARTIALLY (an unsplit pitch face hosts several smaller
+    // counterparts), so only the fully-covered side is retired.
+    {
+        let consumed_keys: HashSet<FaceKey> = periodic_matches
+            .iter()
+            .map(|m| m.block1.index_key())
+            .chain(original_block2_recs.iter().map(|r| r.index_key()))
+            .collect();
+        let all_faces = outer_face_records_to_list(&blocks_reduced, outer_faces, gcd_to_use);
+        let remaining_faces: Vec<Face> = all_faces
+            .into_iter()
+            .filter(|f| !consumed_keys.contains(&f.index_key()))
+            .collect();
+
+        // Footprint map: quantized orthogonal coords -> axis coordinate.
+        // Returns None when the face is not a height field over the
+        // orthogonal plane (ratio / multi-valued thresholds calibrated on
+        // the tgs-py cascade mesh; the 95 % 3D verification is the real
+        // acceptance test — these are cheap prunes).
+        let orth_map = |pts: &[[Float; 3]], tol: Float| -> Option<std::collections::HashMap<(i64, i64), Float>> {
+            let mut out = std::collections::HashMap::new();
+            let mut n_multi = 0usize;
+            for p in pts {
+                let (o1, o2) = match axis_idx {
+                    0 => (p[1], p[2]),
+                    1 => (p[0], p[2]),
+                    _ => (p[0], p[1]),
+                };
+                let key = ((o1 / tol).round() as i64, (o2 / tol).round() as i64);
+                match out.get(&key) {
+                    None => {
+                        out.insert(key, p[axis_idx]);
+                    }
+                    Some(prev) => {
+                        if (p[axis_idx] - prev).abs() > tol {
+                            n_multi += 1;
+                        }
+                    }
+                }
+            }
+            let ratio = out.len() as Float / pts.len().max(1) as Float;
+            let mfrac = n_multi as Float / out.len().max(1) as Float;
+            if ratio < 0.5 || mfrac > 0.30 {
+                return None;
+            }
+            Some(out)
+        };
+
+        let quant3 = |pts: &[[Float; 3]], tol: Float| -> HashSet<[i64; 3]> {
+            pts.iter()
+                .map(|p| {
+                    [
+                        (p[0] / tol).round() as i64,
+                        (p[1] / tol).round() as i64,
+                        (p[2] / tol).round() as i64,
+                    ]
+                })
+                .collect()
+        };
+
+        // Cache grid points per face.
+        let face_pts: Vec<Vec<[Float; 3]>> = remaining_faces
+            .iter()
+            .map(|f| f.grid_points(&blocks_reduced[f.block_index().unwrap()], 1, 1))
+            .collect();
+
+        // (coverage_frac, n_shared, ia, ib, d_pair, tol_pair)
+        let mut pair_hits: Vec<(Float, usize, usize, usize, Float, Float)> = Vec::new();
+        for ia in 0..remaining_faces.len() {
+            for ib in (ia + 1)..remaining_faces.len() {
+                let (fa, fb) = (&remaining_faces[ia], &remaining_faces[ib]);
+                let tol_pair =
+                    pair_tolerance(fa, fb, &blocks_reduced, node_tol_xyz, axis.as_str());
+                let (ma, mb) = match (
+                    orth_map(&face_pts[ia], tol_pair),
+                    orth_map(&face_pts[ib], tol_pair),
+                ) {
+                    (Some(a), Some(b)) => (a, b),
+                    _ => continue,
+                };
+                // Footprint-overlap gate + Δ estimation (median).
+                let mut diffs: Vec<Float> = ma
+                    .iter()
+                    .filter_map(|(k, va)| mb.get(k).map(|vb| vb - va))
+                    .collect();
+                let n_small = ma.len().min(mb.len());
+                if diffs.len() < min_shared_abs.max(n_small / 2) {
+                    continue;
+                }
+                diffs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let d_pair = diffs[diffs.len() / 2];
+                if d_pair.abs() <= tol_pair {
+                    continue; // coincident along axis — interface, not periodic
+                }
+                if let Some(d) = delta {
+                    if (d_pair.abs() - d.abs()).abs() > 10.0 * tol_pair {
+                        continue; // caller pinned the pitch
+                    }
+                }
+                // 3D quantized verification under the estimated shift.
+                let shifted: Vec<[Float; 3]> = face_pts[ia]
+                    .iter()
+                    .map(|p| {
+                        let mut q = *p;
+                        q[axis_idx] += d_pair;
+                        q
+                    })
+                    .collect();
+                let qa = quant3(&shifted, tol_pair);
+                let qb = quant3(&face_pts[ib], tol_pair);
+                let n3_small = qa.len().min(qb.len());
+                let inter = qa.intersection(&qb).count();
+                let need = min_shared_abs.max((0.95 * n3_small as Float) as usize);
+                if inter < need {
+                    continue;
+                }
+                let frac = inter as Float / n3_small.max(1) as Float;
+                pair_hits.push((frac, inter, ia, ib, d_pair, tol_pair));
+            }
+        }
+
+        // Best-coverage pairs first; retire only fully-covered sides.
+        pair_hits.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap()
+                .then(b.1.cmp(&a.1))
+        });
+        let mut fully_used: HashSet<FaceKey> = HashSet::new();
+        for (frac, _n_shared, ia, ib, d_pair, _tol_pair) in pair_hits {
+            let (fa, fb) = (&remaining_faces[ia], &remaining_faces[ib]);
+            if fully_used.contains(&fa.index_key()) || fully_used.contains(&fb.index_key()) {
+                continue;
+            }
+            // block1 = smaller (contained) face; Δ maps block1 → block2.
+            let (f1, f2, d12) = if face_pts[ia].len() <= face_pts[ib].len() {
+                (fa, fb, d_pair)
+            } else {
+                (fb, fa, -d_pair)
+            };
+            let rec1 = FaceRecord::from_face(f1);
+            let mut rec2 = FaceRecord::from_face(f2);
+            original_block2_recs.push(rec2.clone());
+
+            let lb1 = [rec1.il, rec1.jl, rec1.kl];
+            let ub1 = [rec1.ih, rec1.jh, rec1.kh];
+            let lb2_orig = [rec2.il, rec2.jl, rec2.kl];
+            let ub2_orig = [rec2.ih, rec2.jh, rec2.kh];
+            let blk1_r = &blocks_reduced[rec1.block_index];
+            let blk2_r = &blocks_reduced[rec2.block_index];
+            let (corrected_lb2, corrected_ub2, orient_vec) = compute_periodic_lb_ub_orientation(
+                blk1_r, lb1, ub1, blk2_r, lb2_orig, ub2_orig, axis_idx, d12,
+            );
+            rec2.il = corrected_lb2[0];
+            rec2.jl = corrected_lb2[1];
+            rec2.kl = corrected_lb2[2];
+            rec2.ih = corrected_ub2[0];
+            rec2.jh = corrected_ub2[1];
+            rec2.kh = corrected_ub2[2];
+            let orient =
+                orientation_from_orient_vec(&orient_vec, &lb1, &ub1, &corrected_lb2, &corrected_ub2);
+            periodic_matches.push(FaceMatch {
+                block1: rec1,
+                block2: rec2,
+                points: Vec::new(),
+                orientation: Some(orient),
+            });
+            if frac >= 0.95 {
+                let smaller_key = if face_pts[ia].len() <= face_pts[ib].len() {
+                    fa.index_key()
+                } else {
+                    fb.index_key()
+                };
+                fully_used.insert(smaller_key);
+            }
+        }
+    }
+
     // Scale periodic matches back to original resolution FIRST so that
     // periodic_keys are at the same resolution as outer_faces (which are
     // already at original resolution from connectivity_fast).
