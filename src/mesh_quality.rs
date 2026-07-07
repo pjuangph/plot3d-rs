@@ -277,10 +277,20 @@ impl Thresholds {
         boundary_drop: 2,
     };
     /// Day-to-day production bar — the default.
+    ///
+    /// skew_max / min_orthogonality (2026-07): tightened 90°→75° / 10°→15°
+    /// in lockstep with tgs-py-grc's thresholds.py. skew_max=90° was
+    /// vacuous (90° IS a degenerate cell). Anchor case: a cascade OH
+    /// mesh's inlet-extension↔O-grid corner cell (skew 77.6°, min-ortho
+    /// 12.38°) passed this preset silently, then blew up k-omega
+    /// (omega/mu_t → NaN by iter 3) on BOTH GlennHT-Fortran (F64) and
+    /// glennht-gpu. Solver-killing cells must at least WARN in the
+    /// mesh-quality battery (they stay Warn severity — the solver still
+    /// runs; see glennht-gpu mesh_diagnostics policy).
     pub const STANDARD: Thresholds = Thresholds {
         skew_p99_deg: 80.0,
-        skew_max_deg: 90.0,
-        min_orthogonality_deg: 10.0,
+        skew_max_deg: 75.0,
+        min_orthogonality_deg: 15.0,
         max_ar_interior: 5_000.0,
         max_ar_wall: 100_000.0,
         min_cell_volume_ratio: 1e-6,
