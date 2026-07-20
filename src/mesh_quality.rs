@@ -96,6 +96,86 @@ pub fn cell_signed_volume(b: &Block, i: usize, j: usize, k: usize) -> Float {
     dot(ei, cross(ej, ek))
 }
 
+/// True hexahedral cell volume by the **divergence theorem**,
+/// `V = (1/3) Σ_faces (r_c · S)`, with each quad face's area vector taken
+/// as `0.5 (d1 × d2)` from its diagonals (the standard treatment for a
+/// non-planar quad). This is the SAME operator the solver integrates with
+/// (`metrics::compute_cell_volumes`), so it is the authority on whether a
+/// cell has usable volume.
+///
+/// Contrast [`cell_signed_volume`], which anchors on ONE corner and is a
+/// handedness indicator: on a cell with a collapsed edge at that corner it
+/// returns exactly `0` even though the cell has real, positive volume.
+/// Measured on the reference Rotor 35 tip block, the fold cells return
+/// `0.0`/`-0.0` from the triple product and `+1e-17` from this function.
+pub fn cell_volume_divergence(b: &Block, i: usize, j: usize, k: usize) -> Float {
+    let p = |ii: usize, jj: usize, kk: usize| -> [Float; 3] {
+        let (x, y, z) = b.xyz(ii, jj, kk);
+        [x, y, z]
+    };
+    let n = [
+        p(i, j, k),
+        p(i + 1, j, k),
+        p(i, j + 1, k),
+        p(i + 1, j + 1, k),
+        p(i, j, k + 1),
+        p(i + 1, j, k + 1),
+        p(i, j + 1, k + 1),
+        p(i + 1, j + 1, k + 1),
+    ];
+    // Each face as 4 corner indices, wound so the area vector points OUT.
+    const FACES: [[usize; 4]; 6] = [
+        [0, 4, 6, 2], // i-low
+        [1, 3, 7, 5], // i-high
+        [0, 1, 5, 4], // j-low
+        [2, 6, 7, 3], // j-high
+        [0, 2, 3, 1], // k-low
+        [4, 5, 7, 6], // k-high
+    ];
+    let mut v = 0.0 as Float;
+    for f in FACES.iter() {
+        let (a, bb, c, d) = (n[f[0]], n[f[1]], n[f[2]], n[f[3]]);
+        let centroid = [
+            (a[0] + bb[0] + c[0] + d[0]) * 0.25,
+            (a[1] + bb[1] + c[1] + d[1]) * 0.25,
+            (a[2] + bb[2] + c[2] + d[2]) * 0.25,
+        ];
+        let s = cross(sub(c, a), sub(d, bb));
+        v += dot(centroid, [s[0] * 0.5, s[1] * 0.5, s[2] * 0.5]);
+    }
+    v / 3.0
+}
+
+/// Whether cell `(i, j, k)` has at least one pair of **coincident corner
+/// nodes** — i.e. it sits on a collapsed/pinched grid line.
+///
+/// Such lines are a deliberate, standard turbomachinery construction (an
+/// O-grid folded onto a blade-tip camber line; the analogue of a C-grid
+/// wake cut), so their presence is a fact about the grid, not damage. The
+/// nodes are typically bit-identical, which is why an exact comparison is
+/// the right test — a tolerance would sweep in merely-close nodes.
+pub fn cell_has_collapsed_edge(b: &Block, i: usize, j: usize, k: usize) -> bool {
+    let mut n = [[0.0 as Float; 3]; 8];
+    let mut m = 0;
+    for &dk in &[0usize, 1] {
+        for &dj in &[0usize, 1] {
+            for &di in &[0usize, 1] {
+                let (x, y, z) = b.xyz(i + di, j + dj, k + dk);
+                n[m] = [x, y, z];
+                m += 1;
+            }
+        }
+    }
+    for a in 0..8 {
+        for c in (a + 1)..8 {
+            if n[a] == n[c] {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Per-cell aspect ratio `max(edge_len) / min(edge_len)` over the three
 /// edge vectors. Always `>= 1`; a perfect cube returns `1.0`. Port of
 /// `metrics_3d.cell_aspect_ratio`.
@@ -606,30 +686,60 @@ pub fn run_all(blocks: &[Block], t: &Thresholds, preset_name: &str) -> MeshQuali
         }
 
         // --- negative signed volume (per cell) ---
+        //
+        // Two DIFFERENT defects hide behind "signed volume <= 0", and
+        // conflating them makes a legitimate reference grid unusable:
+        //
+        //   INVERTED   — the cell is genuinely turned inside out. The
+        //                divergence-theorem volume is negative. Fatal:
+        //                it breaks the finite-volume discretization.
+        //   DEGENERATE — the cell sits on a collapsed/pinched grid line,
+        //                so `cell_signed_volume`'s anchor corner has a
+        //                zero-length edge and the triple product is
+        //                exactly 0 — but the cell still has real positive
+        //                volume. NOT fatal: the grid is valid and the
+        //                reference solver ran on it.
+        //
+        // We therefore adjudicate with `cell_volume_divergence` (the
+        // operator the solver actually integrates with) and only call it
+        // an error when that says the cell is inverted.
         let signed = cell_field(b, cell_signed_volume);
         let mut neg_count = 0usize;
+        let mut degen_count = 0usize;
+        let mut degen_first: Option<(usize, usize, usize, Float)> = None;
         for (idx, &sv) in signed.iter().enumerate() {
-            if sv <= 0.0 {
-                neg_count += 1;
-                if neg_count <= MAX_LISTED_NEGATIVE {
-                    let (i, j, k) = cell_ijk(idx, nci, ncj);
-                    violations.push(Violation {
-                        check: "negative_volume",
-                        severity: Severity::Error,
-                        actual: sv,
-                        threshold: 0.0,
-                        location: Some(CellLocation {
-                            block: bi,
-                            i,
-                            j,
-                            k,
-                            centroid: cell_centroid(b, i, j, k),
-                        }),
-                        message: format!(
-                            "signed cell volume {sv:.3e} <= 0 (inverted/degenerate cell)"
-                        ),
-                    });
+            if sv > 0.0 {
+                continue;
+            }
+            let (i, j, k) = cell_ijk(idx, nci, ncj);
+            let vd = cell_volume_divergence(b, i, j, k);
+            if vd > 0.0 && cell_has_collapsed_edge(b, i, j, k) {
+                // Collapsed grid line, real positive volume — report, don't abort.
+                degen_count += 1;
+                if degen_first.is_none() {
+                    degen_first = Some((i, j, k, vd));
                 }
+                continue;
+            }
+            neg_count += 1;
+            if neg_count <= MAX_LISTED_NEGATIVE {
+                violations.push(Violation {
+                    check: "negative_volume",
+                    severity: Severity::Error,
+                    actual: sv,
+                    threshold: 0.0,
+                    location: Some(CellLocation {
+                        block: bi,
+                        i,
+                        j,
+                        k,
+                        centroid: cell_centroid(b, i, j, k),
+                    }),
+                    message: format!(
+                        "signed cell volume {sv:.3e} <= 0 and divergence-theorem \
+                         volume {vd:.3e} (inverted cell)"
+                    ),
+                });
             }
         }
         if neg_count > MAX_LISTED_NEGATIVE {
@@ -646,9 +756,45 @@ pub fn run_all(blocks: &[Block], t: &Thresholds, preset_name: &str) -> MeshQuali
                 ),
             });
         }
+        if degen_count > 0 {
+            let (i, j, k, vd) = degen_first.unwrap_or((0, 0, 0, 0.0));
+            violations.push(Violation {
+                check: "degenerate_cell",
+                severity: Severity::Warn,
+                actual: degen_count as Float,
+                threshold: 0.0,
+                location: Some(CellLocation {
+                    block: bi,
+                    i,
+                    j,
+                    k,
+                    centroid: cell_centroid(b, i, j, k),
+                }),
+                message: format!(
+                    "block {bi}: {degen_count} cell(s) on a COLLAPSED GRID LINE \
+                     (coincident corner nodes). These are not inverted — the \
+                     divergence-theorem volume is positive (e.g. {vd:.3e} at the \
+                     first such cell) — so the discretization is well posed. But \
+                     such cells are orders of magnitude smaller than their \
+                     neighbours and will throttle an explicit local time step; \
+                     merge them into a neighbour rather than advancing them as \
+                     independent control volumes."
+                ),
+            });
+        }
 
         // --- degenerate: min |volume| relative to the block median ---
-        let mut absvol: Vec<Float> = signed.iter().map(|v| v.abs()).collect();
+        //
+        // Scored on the divergence-theorem volume for the same reason as
+        // above: the corner-anchored triple product reads exactly 0 on a
+        // collapsed grid line, which would peg this ratio at 0 and fire a
+        // spurious Error on a valid grid. A cell that is genuinely tiny
+        // (rather than merely corner-degenerate) still trips this check —
+        // it is a real stiffness hazard — but at Warn severity when the
+        // cell is only degenerate, so the run is not blocked.
+        let true_vol = cell_field(b, cell_volume_divergence);
+        let all_degenerate_are_collapsed = degen_count > 0 && neg_count == 0;
+        let mut absvol: Vec<Float> = true_vol.iter().map(|v| v.abs()).collect();
         absvol.sort_by(|a, c| a.partial_cmp(c).unwrap_or(std::cmp::Ordering::Equal));
         let median = median_sorted(&absvol);
         if median <= 0.0 {
@@ -663,10 +809,10 @@ pub fn run_all(blocks: &[Block], t: &Thresholds, preset_name: &str) -> MeshQuali
                 ),
             });
         } else {
-            // argmin over the original (unsorted) signed field's magnitude
+            // argmin over the original (unsorted) true-volume magnitudes
             let mut vmin = Float::INFINITY;
             let mut vmin_idx = 0usize;
-            for (idx, &sv) in signed.iter().enumerate() {
+            for (idx, &sv) in true_vol.iter().enumerate() {
                 let a = sv.abs();
                 if a < vmin {
                     vmin = a;
@@ -676,9 +822,20 @@ pub fn run_all(blocks: &[Block], t: &Thresholds, preset_name: &str) -> MeshQuali
             let ratio = vmin / median;
             if ratio < t.min_cell_volume_ratio {
                 let (i, j, k) = cell_ijk(vmin_idx, nci, ncj);
+                // If the smallest cell is small BECAUSE it sits on a
+                // collapsed line (and nothing in this block is actually
+                // inverted), this is the known-degenerate case already
+                // reported above — advisory, not fatal.
+                let sev = if all_degenerate_are_collapsed
+                    && cell_has_collapsed_edge(b, i, j, k)
+                {
+                    Severity::Warn
+                } else {
+                    Severity::Error
+                };
                 violations.push(Violation {
                     check: "min_cell_volume",
-                    severity: Severity::Error,
+                    severity: sev,
                     actual: ratio,
                     threshold: t.min_cell_volume_ratio,
                     location: Some(CellLocation {
@@ -855,6 +1012,84 @@ mod tests {
         Block::new(n, n, n, x, y, z)
     }
 
+    /// A unit cube with one grid line COLLAPSED: the `i=0` and `i=1`
+    /// nodes are made bit-identical along the `j=0` plane, reproducing an
+    /// O-grid pinched onto a camber line (the NASA Rotor 35 tip block).
+    /// The affected cells keep real positive volume but their
+    /// corner-anchored triple product is exactly zero.
+    fn collapsed_line_block(n: usize) -> Block {
+        let b = unit_cube(n);
+        let (mut x, mut y, mut z) = (b.x.clone(), b.y.clone(), b.z.clone());
+        for k in 0..n {
+            let src = (k * n) * n; // (i=0, j=0, k)
+            let dst = src + 1; // (i=1, j=0, k)
+            x[dst] = x[src];
+            y[dst] = y[src];
+            z[dst] = z[src];
+        }
+        Block::new(n, n, n, x, y, z)
+    }
+
+    #[test]
+    fn collapsed_line_is_degenerate_not_inverted() {
+        let b = collapsed_line_block(5);
+        // The pinched cell: triple product is exactly 0 ...
+        assert_eq!(cell_signed_volume(&b, 0, 0, 0), 0.0);
+        // ... but it has REAL positive volume and a detectable collapse.
+        assert!(cell_volume_divergence(&b, 0, 0, 0) > 0.0);
+        assert!(cell_has_collapsed_edge(&b, 0, 0, 0));
+        // A healthy cell elsewhere is untouched and not flagged.
+        assert!(cell_signed_volume(&b, 2, 2, 2) > 0.0);
+        assert!(!cell_has_collapsed_edge(&b, 2, 2, 2));
+
+        let report = run_all(&[b], &Thresholds::STANDARD, "STANDARD");
+        // The collapse must NOT be reported as an inverted cell ...
+        assert!(
+            !report
+                .violations
+                .iter()
+                .any(|v| v.check == "negative_volume"),
+            "a collapsed grid line must not be classified as an inverted cell"
+        );
+        // ... it must be reported as a degenerate cell, at Warn severity ...
+        let degen: Vec<_> = report
+            .violations
+            .iter()
+            .filter(|v| v.check == "degenerate_cell")
+            .collect();
+        assert_eq!(degen.len(), 1, "expected one degenerate_cell violation");
+        assert!(matches!(degen[0].severity, Severity::Warn));
+        // ... and nothing in the block may be fatal.
+        assert!(
+            !report
+                .violations
+                .iter()
+                .any(|v| matches!(v.severity, Severity::Error)),
+            "a valid grid with a collapsed line must not produce a fatal verdict"
+        );
+    }
+
+    #[test]
+    fn genuinely_inverted_cell_is_still_fatal() {
+        // Regression guard: the degenerate carve-out must not become a
+        // blanket amnesty. Mirror one node so a cell turns inside out.
+        let b = unit_cube(5);
+        let (mut x, y, z) = (b.x.clone(), b.y.clone(), b.z.clone());
+        x[0] = 10.0; // drag (0,0,0) far past the opposite face
+        let b = Block::new(5, 5, 5, x, y, z);
+        assert!(cell_signed_volume(&b, 0, 0, 0) < 0.0);
+        assert!(!cell_has_collapsed_edge(&b, 0, 0, 0));
+        let report = run_all(&[b], &Thresholds::STANDARD, "STANDARD");
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|v| v.check == "negative_volume"
+                    && matches!(v.severity, Severity::Error)),
+            "a genuinely inverted cell must remain a fatal negative_volume error"
+        );
+    }
+
     #[test]
     fn unit_cube_is_right_handed_and_clean() {
         let b = unit_cube(5);
@@ -911,13 +1146,25 @@ mod tests {
         b.y[dst] = b.y[src];
         b.z[dst] = b.z[src];
         let report = run_all(&[b], &Thresholds::STANDARD, "STANDARD");
-        // The collapse produces a non-positive / near-degenerate cell —
-        // at least one Error violation, and it carries a location.
-        assert!(report.n_error() >= 1);
-        assert!(report
-            .violations
-            .iter()
-            .any(|v| v.severity == Severity::Error && v.location.is_some()));
+        // BEHAVIOUR CHANGE (degenerate-cell classification): snapping a
+        // node produces coincident corners — a COLLAPSED cell, not an
+        // INVERTED one. Its divergence-theorem volume is still positive,
+        // so the finite-volume discretization is well posed and this is
+        // no longer fatal. It must still be flagged, and still carry a
+        // location so the user can find it; that is what this test guards.
+        // Genuine inversion remains fatal — see
+        // `genuinely_inverted_cell_is_still_fatal`.
+        assert!(
+            report.violations.iter().any(|v| v.check == "degenerate_cell"
+                && v.severity == Severity::Warn
+                && v.location.is_some()),
+            "a collapsed cell must be flagged (with a location) as degenerate"
+        );
+        assert_eq!(
+            report.n_error(),
+            0,
+            "a collapsed-but-positive-volume cell must not be fatal"
+        );
     }
 
     #[test]
