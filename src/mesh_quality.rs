@@ -277,10 +277,14 @@ impl Thresholds {
         boundary_drop: 2,
     };
     /// Day-to-day production bar — the default.
+    // skew_max/min_ortho tightened 90->75 / 10->15 in lockstep with
+    // tgs-py-grc thresholds.py. Anchor: cascade LE extension<->O-grid
+    // corner (skew 77.6, ortho 12.38) passed silently, then NaN'd
+    // k-omega on both GlennHT backends. Warn-severity: solver still runs.
     pub const STANDARD: Thresholds = Thresholds {
         skew_p99_deg: 80.0,
-        skew_max_deg: 90.0,
-        min_orthogonality_deg: 10.0,
+        skew_max_deg: 75.0,
+        min_orthogonality_deg: 15.0,
         max_ar_interior: 5_000.0,
         max_ar_wall: 100_000.0,
         min_cell_volume_ratio: 1e-6,
