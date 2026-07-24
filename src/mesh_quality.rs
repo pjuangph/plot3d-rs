@@ -986,6 +986,234 @@ pub fn run_all(blocks: &[Block], t: &Thresholds, preset_name: &str) -> MeshQuali
 }
 
 // =============================================================================
+// Element-type inventory — ADS / Code Leo `ELEMTYPE` + `ADVOLAREA` analogue
+// =============================================================================
+//
+// A structured hex cell that sits on an O-grid pinch line collapses to a
+// lower element: the NASA Rotor 35 blade-tip seam has 960 cells with two
+// coincident node-pairs (a wedge). Code Leo's load log reports exactly that
+// — `1509440 HEX + 960 PRISM` — via its `ELEMTYPE` (type census) and
+// `ADVOLAREA` (per-element volume) passes. This block reproduces that census
+// so a glennht-gpu load echoes the reference solver's own printout. It is a
+// DIAGNOSTIC: it changes no solver state (we already integrate the collapsed
+// hex correctly — the divergence-theorem volume is exact for a wedge).
+
+/// The standard element a structured hex cell collapses to, by DISTINCT
+/// corner-node count. Mirrors Code Leo's `ELEMTYPE` categories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElementType {
+    /// 8 distinct nodes — a normal hexahedron.
+    Hex,
+    /// 6 — one edge collapsed (a wedge; two coincident node-pairs).
+    Prism,
+    /// 5 — one face collapsed toward a point.
+    Pyramid,
+    /// 4 — a tetrahedron.
+    Tet,
+    /// 7, or `< 4` — a non-standard partial collapse.
+    Other,
+}
+
+impl ElementType {
+    /// Classify by the number of distinct corner nodes.
+    pub fn from_distinct_nodes(n: usize) -> ElementType {
+        match n {
+            8 => ElementType::Hex,
+            6 => ElementType::Prism,
+            5 => ElementType::Pyramid,
+            4 => ElementType::Tet,
+            _ => ElementType::Other,
+        }
+    }
+    /// Upper-case type name (`"HEX"`, `"PRISM"`, …).
+    pub fn name(self) -> &'static str {
+        match self {
+            ElementType::Hex => "HEX",
+            ElementType::Prism => "PRISM",
+            ElementType::Pyramid => "PYRAMID",
+            ElementType::Tet => "TET",
+            ElementType::Other => "OTHER",
+        }
+    }
+}
+
+/// Number of DISTINCT corner nodes of cell `(i,j,k)` (exact equality — the
+/// same bit-identical test [`cell_has_collapsed_edge`] uses; O-grid pinch
+/// nodes are bit-identical, so a tolerance would sweep in merely-close nodes).
+pub fn cell_distinct_node_count(b: &Block, i: usize, j: usize, k: usize) -> usize {
+    let mut n = [[0.0 as Float; 3]; 8];
+    let mut m = 0;
+    for &dk in &[0usize, 1] {
+        for &dj in &[0usize, 1] {
+            for &di in &[0usize, 1] {
+                let (x, y, z) = b.xyz(i + di, j + dj, k + dk);
+                n[m] = [x, y, z];
+                m += 1;
+            }
+        }
+    }
+    let mut count = 0usize;
+    for a in 0..8 {
+        let mut dup = false;
+        for c in 0..a {
+            if n[a] == n[c] {
+                dup = true;
+                break;
+            }
+        }
+        if !dup {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Per-block element-type tally + minimum divergence-theorem cell volume.
+#[derive(Debug, Clone)]
+pub struct BlockElementSummary {
+    pub n_hex: usize,
+    pub n_prism: usize,
+    pub n_pyramid: usize,
+    pub n_tet: usize,
+    pub n_other: usize,
+    /// Minimum divergence-theorem cell volume in the block.
+    pub min_volume: Float,
+    /// The `(i,j,k)` of the minimum-volume cell.
+    pub min_volume_cell: (usize, usize, usize),
+}
+
+/// Whole-mesh element census — the analogue of Code Leo's `ELEMTYPE`
+/// (type counts) + `ADVOLAREA` (per-element volume) load passes.
+#[derive(Debug, Clone)]
+pub struct ElementInventory {
+    pub per_block: Vec<BlockElementSummary>,
+    pub n_hex: usize,
+    pub n_prism: usize,
+    pub n_pyramid: usize,
+    pub n_tet: usize,
+    pub n_other: usize,
+    pub total: usize,
+    pub global_min_volume: Float,
+    /// `(block, i, j, k)` of the global-minimum-volume cell.
+    pub global_min_cell: (usize, usize, usize, usize),
+}
+
+/// Classify every cell of every block by collapsed-node topology and tally
+/// per-block volumes. A cheap second load-time pass, independent of
+/// [`run_all`].
+pub fn element_type_inventory(blocks: &[Block]) -> ElementInventory {
+    let mut per_block = Vec::with_capacity(blocks.len());
+    let (mut t_hex, mut t_prism, mut t_pyr, mut t_tet, mut t_other) =
+        (0usize, 0usize, 0usize, 0usize, 0usize);
+    let mut g_min = Float::INFINITY;
+    let mut g_cell = (0usize, 0usize, 0usize, 0usize);
+
+    for (bi, b) in blocks.iter().enumerate() {
+        let (nci, ncj, nck) = cell_dims(b);
+        let mut s = BlockElementSummary {
+            n_hex: 0,
+            n_prism: 0,
+            n_pyramid: 0,
+            n_tet: 0,
+            n_other: 0,
+            min_volume: Float::INFINITY,
+            min_volume_cell: (0, 0, 0),
+        };
+        if nci == 0 || ncj == 0 || nck == 0 {
+            per_block.push(s);
+            continue;
+        }
+        for k in 0..nck {
+            for j in 0..ncj {
+                for i in 0..nci {
+                    match ElementType::from_distinct_nodes(
+                        cell_distinct_node_count(b, i, j, k),
+                    ) {
+                        ElementType::Hex => s.n_hex += 1,
+                        ElementType::Prism => s.n_prism += 1,
+                        ElementType::Pyramid => s.n_pyramid += 1,
+                        ElementType::Tet => s.n_tet += 1,
+                        ElementType::Other => s.n_other += 1,
+                    }
+                    let v = cell_volume_divergence(b, i, j, k);
+                    if v < s.min_volume {
+                        s.min_volume = v;
+                        s.min_volume_cell = (i, j, k);
+                    }
+                }
+            }
+        }
+        if s.min_volume < g_min {
+            g_min = s.min_volume;
+            g_cell =
+                (bi, s.min_volume_cell.0, s.min_volume_cell.1, s.min_volume_cell.2);
+        }
+        t_hex += s.n_hex;
+        t_prism += s.n_prism;
+        t_pyr += s.n_pyramid;
+        t_tet += s.n_tet;
+        t_other += s.n_other;
+        per_block.push(s);
+    }
+
+    ElementInventory {
+        per_block,
+        n_hex: t_hex,
+        n_prism: t_prism,
+        n_pyramid: t_pyr,
+        n_tet: t_tet,
+        n_other: t_other,
+        total: t_hex + t_prism + t_pyr + t_tet + t_other,
+        global_min_volume: if g_min.is_finite() { g_min } else { 0.0 },
+        global_min_cell: g_cell,
+    }
+}
+
+impl ElementInventory {
+    /// Code Leo-style census string (`ELEMTYPE` counts + `ADVOLAREA` min-vol),
+    /// so a glennht-gpu load echoes the reference solver's own printout.
+    pub fn format_ads_style(&self) -> String {
+        let mut s = String::new();
+        s.push_str(&format!(
+            "Element census (ELEMTYPE analogue) — {} elements:\n",
+            self.total
+        ));
+        s.push_str(&format!("  {:>10} ELEMENTS OF HEX     TYPE\n", self.n_hex));
+        s.push_str(&format!("  {:>10} ELEMENTS OF PRISM   TYPE\n", self.n_prism));
+        s.push_str(&format!(
+            "  {:>10} ELEMENTS OF PYRAMID TYPE\n",
+            self.n_pyramid
+        ));
+        s.push_str(&format!("  {:>10} ELEMENTS OF TET     TYPE\n", self.n_tet));
+        if self.n_other > 0 {
+            s.push_str(&format!(
+                "  {:>10} ELEMENTS OF OTHER   TYPE (non-standard partial collapse)\n",
+                self.n_other
+            ));
+        }
+        let (gb, gi, gj, gk) = self.global_min_cell;
+        s.push_str(&format!(
+            "Volume (ADVOLAREA analogue): global MIN VOLUME {:.6e} at block {} cell ({},{},{})\n",
+            self.global_min_volume, gb, gi, gj, gk
+        ));
+        for (bi, blk) in self.per_block.iter().enumerate() {
+            let (i, j, k) = blk.min_volume_cell;
+            let other = if blk.n_other > 0 {
+                format!(", {} other", blk.n_other)
+            } else {
+                String::new()
+            };
+            s.push_str(&format!(
+                "  block {:>2}: MIN VOLUME {:.4e} at ({},{},{})  [{} hex, {} prism, {} pyr, {} tet{}]\n",
+                bi, blk.min_volume, i, j, k,
+                blk.n_hex, blk.n_prism, blk.n_pyramid, blk.n_tet, other
+            ));
+        }
+        s
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
