@@ -13,6 +13,11 @@ fn merge_block_test() {
     let reduced_binary_path = Path::new("weld_binary_reduced.xyzb");
     let merged_binary_path = Path::new("weld_binary_reduced_3x3x3_out.xyzb");
 
+    if !reduced_binary_path.exists() && !ascii_path.exists() {
+        eprintln!("weld_ascii.xyz not found, skipping test.");
+        return;
+    }
+
     let reduced_blocks = if reduced_binary_path.exists() {
         read_plot3d_binary(
             reduced_binary_path
