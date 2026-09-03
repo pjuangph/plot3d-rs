@@ -139,8 +139,20 @@ fn max_nearest_dist(query: &[[Float; 3]], target: &[[Float; 3]]) -> Float {
 
 // ── Tests ──
 
+/// `MESH_PATH` is a local fixture, not committed (see .gitignore's `*.xyz`),
+/// so CI and fresh checkouts must skip rather than panic when it's absent.
+macro_rules! require_mesh {
+    () => {
+        if !std::path::Path::new(MESH_PATH).exists() {
+            eprintln!("{MESH_PATH} not found, skipping test.");
+            return;
+        }
+    };
+}
+
 #[test]
 fn test_creates_connectivity_json() {
+    require_mesh!();
     let (blocks, payload) = build_connectivity_json();
 
     assert_eq!(payload["nblocks"].as_u64().unwrap() as usize, blocks.len());
@@ -155,6 +167,7 @@ fn test_creates_connectivity_json() {
 
 #[test]
 fn test_periodic_faces_geometry() {
+    require_mesh!();
     let (blocks, payload) = build_connectivity_json();
 
     let rot_mat_json = payload["periodicity"]["transformation_matrix"]
@@ -216,6 +229,7 @@ fn test_periodic_faces_geometry() {
 
 #[test]
 fn test_connectivity_faces_geometry() {
+    require_mesh!();
     let (blocks, payload) = build_connectivity_json();
 
     for (idx, fm) in payload["face_matches"]
@@ -255,6 +269,7 @@ fn test_connectivity_faces_geometry() {
 /// double-emission from other future refactors of the match pipeline.
 #[test]
 fn test_no_overlapping_face_matches() {
+    require_mesh!();
     let (_blocks, payload) = build_connectivity_json();
 
     let fms = payload["face_matches"].as_array().unwrap();
