@@ -46,9 +46,25 @@
 //!
 //! # Tolerance
 //!
-//! The default spatial tolerance used for vertex comparisons is
-//! [`DEFAULT_TOL`] (1e-6). Both [`connectivity`] and [`connectivity_fast`]
-//! accept an explicit tolerance parameter to override this default.
+//! [`connectivity`] and [`connectivity_fast`] derive their spatial tolerance
+//! from the mesh itself via [`adaptive_tolerance`], because a *fixed*
+//! tolerance is only meaningful for coordinates of order 1. Coordinate
+//! storage (binary `f32`, or ASCII written with a fixed number of
+//! significant digits) loses precision *proportionally* to the coordinate
+//! magnitude, so two stored copies of the same physical interface node can
+//! differ by far more than a fixed 1e-6 on a mesh whose coordinates are
+//! large. See [`adaptive_tolerance`] for the exact formula, its floor
+//! (never tighter than the historical 1e-6) and its ceiling (never larger
+//! than a quarter of the shortest distance between two corners of any cell
+//! in the mesh).
+//!
+//! [`connectivity_fast`] derives its tolerance from the same full-resolution
+//! blocks as [`connectivity`], not from the GCD-reduced grid it matches on,
+//! so both entry points use one tolerance for a given mesh; its docs explain
+//! why.
+//!
+//! [`connectivity_with_tol`] accepts an explicit tolerance for callers that
+//! need to override the derived value.
 //!
 //! # Verification
 //!
@@ -67,7 +83,245 @@ use crate::{
     Float,
 };
 
-const DEFAULT_TOL: Float = 1e-6;
+/// Absolute floor for the matching tolerance.
+///
+/// This is the value this module used unconditionally before the tolerance
+/// became adaptive. [`adaptive_tolerance`] never returns anything smaller,
+/// so no interface that is detected today can be lost by the change.
+pub const TOL_FLOOR: Float = 1e-6;
+
+/// Relative coordinate-storage noise model: one part in `10^6`.
+///
+/// Rationale: the weakest precision in practical PLOT3D use is roughly seven
+/// significant decimal digits (single-precision binary, or ASCII written in
+/// scientific notation with six decimals), whose quantum is at most `1e-6`
+/// of the coordinate's own magnitude. Two independently written copies of
+/// the same physical interface node can land on adjacent quanta, so their
+/// coordinates can differ by that much.
+///
+/// Choosing exactly `1e-6` also makes the adaptive tolerance a strict
+/// generalisation of the historical fixed constant: at a coordinate
+/// magnitude of 1 the two agree bit-for-bit, and the fixed value is simply
+/// re-read as "1e-6 relative to unit-magnitude coordinates".
+const TOL_RELATIVE_NOISE: Float = 1e-6;
+
+/// Fraction of the mesh's finest cell corner-to-corner distance that the
+/// tolerance is never permitted to exceed. See [`adaptive_tolerance`].
+const TOL_SPACING_FRACTION: Float = 0.25;
+
+/// Largest absolute coordinate value anywhere in `blocks` (`0.0` if empty).
+///
+/// Non-finite coordinates are ignored so a stray NaN/inf cannot poison the
+/// tolerance for the whole mesh.
+fn coordinate_magnitude(blocks: &[Block]) -> Float {
+    use rayon::prelude::*;
+
+    blocks
+        .par_iter()
+        .map(|b| {
+            b.x.iter()
+                .chain(b.y.iter())
+                .chain(b.z.iter())
+                .filter(|v| v.is_finite())
+                .fold(0.0 as Float, |acc, v| acc.max(v.abs()))
+        })
+        .reduce(|| 0.0 as Float, Float::max)
+}
+
+/// The 13 index offsets that enumerate every unordered pair of corners of a
+/// hexahedral cell exactly once: 3 edges, 6 face diagonals, 4 body
+/// diagonals. Each pair `(a, b)` of the 8 corners differs by some
+/// `(di, dj, dk)` in `{-1, 0, 1}^3 \ {0}`; taking the sign in which the first
+/// non-zero component is positive picks one of the two orderings.
+const CELL_CORNER_OFFSETS: [(isize, isize, isize); 13] = [
+    (1, 0, 0),
+    (0, 1, 0),
+    (0, 0, 1),
+    (1, 1, 0),
+    (1, -1, 0),
+    (1, 0, 1),
+    (1, 0, -1),
+    (0, 1, 1),
+    (0, 1, -1),
+    (1, 1, 1),
+    (1, 1, -1),
+    (1, -1, 1),
+    (1, -1, -1),
+];
+
+/// Smallest *non-zero* distance between any two corners of one cell (an
+/// edge, a face diagonal or a body diagonal) anywhere in `blocks`.
+///
+/// Diagonals are included, not just edges, because on a sheared cell the
+/// short face diagonal is the closest other corner: at an included angle θ
+/// it is `sqrt(2 - 2 cos θ)` edge lengths, which drops below a quarter of an
+/// edge at θ ≈ 14°. A tolerance bounded by the edge length alone would
+/// then let a node pair with that diagonal corner instead of its true
+/// partner; see [`adaptive_tolerance`]. On orthogonal cells every diagonal
+/// is longer than every edge, so including them changes nothing there.
+///
+/// Exactly coincident corners are skipped rather than returning zero.
+/// Collapsed edges are common and legitimate in structured grids (O-grid
+/// pole lines, singular axes): their two endpoints are the *same* physical
+/// node stored twice, so a zero separation says nothing about mesh
+/// resolution.
+///
+/// No wider "nearly degenerate" filter is applied, deliberately. Any such
+/// filter needs a threshold, and every candidate threshold mis-classifies
+/// real data in one direction or the other — a noise-scaled threshold in
+/// particular would discard the genuine boundary-layer spacing of ordinary
+/// wall-resolved RANS meshes. Measured on the real CMC009 mesh
+/// (`RANS_009_refined2.p3d`, 593 blocks, 20.77M nodes): `max|coord|` is
+/// `1.1e1`, so the `1e-6 * max|coord|` noise estimate is `1.1e-5`, while the
+/// finest corner-to-corner distance is `2.37e-7` (an edge, in block 231) —
+/// a factor of 46 *below* that noise estimate. A noise-scaled filter would
+/// therefore throw away this mesh's real wall spacing and then permit a
+/// tolerance far larger than it. A collapsed edge that is *near* zero
+/// rather than exactly zero therefore keeps the tolerance pinned at
+/// [`TOL_FLOOR`], i.e. at today's behaviour. That is the fail-safe
+/// direction: the adaptive widening simply does not engage, and nothing
+/// regresses.
+///
+/// Returns `None` when no non-zero corner pair exists at all (e.g. every
+/// block is a single node).
+fn min_cell_corner_spacing(blocks: &[Block]) -> Option<Float> {
+    use rayon::prelude::*;
+
+    let best = blocks
+        .par_iter()
+        .map(|b| {
+            let (ni, nj, nk) = (b.imax as isize, b.jmax as isize, b.kmax as isize);
+            let mut best_sq = Float::INFINITY;
+            for k in 0..nk {
+                for j in 0..nj {
+                    for i in 0..ni {
+                        let p = b.xyz(i as usize, j as usize, k as usize);
+                        for &(di, dj, dk) in &CELL_CORNER_OFFSETS {
+                            let (ii, jj, kk) = (i + di, j + dj, k + dk);
+                            if ii < 0 || jj < 0 || kk < 0 || ii >= ni || jj >= nj || kk >= nk {
+                                continue;
+                            }
+                            let c = b.xyz(ii as usize, jj as usize, kk as usize);
+                            let d_sq = (p.0 - c.0) * (p.0 - c.0)
+                                + (p.1 - c.1) * (p.1 - c.1)
+                                + (p.2 - c.2) * (p.2 - c.2);
+                            // `> 0.0` skips exactly coincident corners; NaN
+                            // comparisons are false, so non-finite
+                            // coordinates skip too.
+                            if d_sq > 0.0 && d_sq < best_sq {
+                                best_sq = d_sq;
+                            }
+                        }
+                    }
+                }
+            }
+            best_sq
+        })
+        .reduce(|| Float::INFINITY, Float::min);
+
+    best.is_finite().then(|| best.sqrt())
+}
+
+/// Derive the node-matching tolerance for `blocks` from the mesh itself.
+///
+/// # Why this is not a constant
+///
+/// A fixed absolute tolerance silently encodes an assumption that
+/// coordinates are of order 1. Coordinate *storage* loses precision in
+/// proportion to magnitude: a binary `f32` value near `2e1` resolves to
+/// about `2e-6`, and near `6.4e6` only to about `0.5`; ASCII written with a
+/// fixed number of significant digits behaves the same way. Two copies of
+/// the same physical interface node — one written by each of the two blocks
+/// that share it — therefore differ by an amount that grows with the
+/// coordinate magnitude, and a fixed `1e-6` stops bridging that gap well
+/// before "exotic" magnitudes.
+///
+/// # Formula
+///
+/// ```text
+/// scale = max |coordinate|
+/// noise = TOL_RELATIVE_NOISE * scale
+/// h     = min non-zero distance between two corners of one cell
+///         (edges, face diagonals and body diagonals)
+/// tol   = clamp(noise, TOL_FLOOR, max(TOL_FLOOR, TOL_SPACING_FRACTION * h))
+/// ```
+///
+/// # The two bounds, and why each is where it is
+///
+/// **Floor ([`TOL_FLOOR`], `1e-6`) — never tighter than today.** The result
+/// is never below the historical fixed constant, so this change cannot
+/// remove a match that is found today. In particular meshes with
+/// coordinates of magnitude ≤ 1 get *exactly* `1e-6`, bit-for-bit.
+///
+/// **Ceiling (a quarter of the finest cell corner spacing) — bounded
+/// false-positive risk.** This is a *face-matching* tolerance: it decides
+/// whether two faces describe the same interface. The way an over-large
+/// value goes wrong is that a node finds the *wrong* partner: another
+/// corner of the cell its true partner belongs to. Phase 1 compares the two
+/// faces index-wise and cannot mis-pair, but Phases 2 and 3 pair each node
+/// with the *nearest* opposite node within `tol`, so once storage noise
+/// pushes the true partner just outside `tol`, a wrong corner that is
+/// inside it becomes the only candidate and is accepted. That corner is not
+/// always an edge neighbour: on a cell sheared to an included angle θ the
+/// short face diagonal is `sqrt(2 - 2 cos θ)` edge lengths, under a quarter
+/// of an edge below θ ≈ 14°. `h` is therefore the smallest distance between
+/// *any* two corners of one cell, and bounding the tolerance at `0.25 * h`
+/// keeps every wrong corner at least `0.75 * h` — three tolerances — from
+/// the true partner on any cell shape, so the true partner is either the
+/// nearest candidate or there is no candidate at all. It equally bounds the
+/// other false-positive mode — two distinct, nearly parallel surfaces being
+/// declared coincident — since any two genuinely different surfaces in a
+/// valid solver mesh are at least a cell apart.
+///
+/// The ceiling is applied as `max(TOL_FLOOR, 0.25 * h)` rather than
+/// `0.25 * h`, so it can only ever *limit growth* above the historical
+/// value and never tighten below it. On a mesh whose spacing is already
+/// finer than `4e-6` the tolerance simply stays at `1e-6` — exactly what
+/// the code does today — instead of becoming stricter than working code.
+///
+/// # Known limitations
+///
+/// * `h` is a single global minimum, so one boundary-layer block's fine
+///   spacing bounds the tolerance for the whole mesh. That is the
+///   conservative direction (less growth, never less than today's value).
+/// * `0.25 * h` bounds distances to the other corners of the *same* cell.
+///   Nodes of different cells — in particular two faces of different blocks
+///   that pass within a cell of each other without being the same surface —
+///   are only covered by the assumption above that a valid mesh keeps
+///   distinct surfaces at least a cell apart.
+/// * When storage noise genuinely exceeds a quarter of the mesh's own
+///   spacing, the stored coordinates cannot distinguish the interface from
+///   its neighbours at all. The tolerance is clipped rather than raised,
+///   so such a mesh reports missing matches instead of wrong ones.
+/// * A mesh containing a collapsed edge whose two endpoints are *nearly*
+///   but not exactly coincident keeps `h` at that round-off distance and so
+///   stays at [`TOL_FLOOR`]; the adaptive widening does not engage. The
+///   private `min_cell_corner_spacing` helper documents why no threshold is
+///   used to exclude such edges.
+///
+/// # Cost
+///
+/// `O(number of nodes)` (13 corner pairs per node), parallelised over
+/// blocks, and only paid when the tolerance could actually grow (coordinate
+/// magnitude above 1). This is negligible next to the face-pair search that
+/// follows.
+pub fn adaptive_tolerance(blocks: &[Block]) -> Float {
+    let scale = coordinate_magnitude(blocks);
+    let noise = TOL_RELATIVE_NOISE * scale;
+    // `!is_finite()` also covers a NaN `noise`, which must fall through to
+    // the safe historical value rather than propagate.
+    if !noise.is_finite() || noise <= TOL_FLOOR {
+        // Ordinary, order-one meshes: bit-identical to the historical
+        // constant, and no spacing pass is performed at all.
+        return TOL_FLOOR;
+    }
+    match min_cell_corner_spacing(blocks) {
+        Some(h) => noise.min(TOL_SPACING_FRACTION * h).max(TOL_FLOOR),
+        // Nothing to measure the mesh against (single-node blocks, or every
+        // corner pair coincident). Keep the historical value.
+        None => TOL_FLOOR,
+    }
+}
 
 /// Structured-grid node on a face, capturing indices and XYZ coordinate.
 #[derive(Clone, Debug)]
@@ -685,10 +939,33 @@ fn phase3_overlaps_existing(
     false
 }
 
+/// [`connectivity`] on a GCD-reduced copy of `blocks`, with the resulting
+/// indices scaled back to full resolution.
+///
+/// # Tolerance
+///
+/// The matching tolerance is derived by [`adaptive_tolerance`] from the
+/// **full-resolution** `blocks`, not from the reduced grid the matching
+/// runs on, so this entry point and [`connectivity`] use one tolerance for a
+/// given mesh.
+///
+/// Reduction leaves the storage noise unchanged — the reduced nodes are the
+/// same stored numbers — but multiplies the cell size by the GCD, so a
+/// tolerance derived from the reduced grid would have a ceiling up to `gcd`
+/// times looser. That buys nothing where the full-resolution mesh is
+/// resolved by its storage (the noise estimate is identical), and its only
+/// effect is to widen, by a factor of `gcd`, the band of genuinely separated
+/// faces that are declared coincident. On the repo's `VSPT_ASCII.xyz`
+/// fixture (`max|coord|` 47.8, GCD 4) that would have been `3.82e-5`
+/// against [`connectivity`]'s `5.72e-6`. Because matches found on the
+/// reduced grid are scaled back to full resolution here without being
+/// re-verified, this entry point must never be more permissive than
+/// [`connectivity`].
 pub fn connectivity_fast(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
+    let tol = adaptive_tolerance(blocks);
     let gcd_to_use = crate::utils::compute_min_gcd(blocks);
     let reduced_blocks = crate::block_face_functions::reduce_blocks(blocks, gcd_to_use);
-    let (mut matches, mut outer_faces) = connectivity(&reduced_blocks);
+    let (mut matches, mut outer_faces) = connectivity_with_tol(&reduced_blocks, tol);
     // Scale back to original size
     for face in &mut matches {
         face.block1.scale_indices(gcd_to_use);
@@ -702,6 +979,10 @@ pub fn connectivity_fast(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) 
 
 /// Determine face-to-face connectivity and exterior faces for all blocks.
 ///
+/// The node-matching tolerance is derived from `blocks` via
+/// [`adaptive_tolerance`]. Use [`connectivity_with_tol`] to supply one
+/// explicitly.
+///
 /// # Arguments
 /// * `blocks` - Full-resolution blocks to analyse.
 ///
@@ -709,6 +990,22 @@ pub fn connectivity_fast(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) 
 /// Tuple `(matches, outer_faces)` representing matched interfaces and the
 /// formatted list of outer faces.
 pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
+    connectivity_with_tol(blocks, adaptive_tolerance(blocks))
+}
+
+/// [`connectivity`] with an explicit node-matching tolerance.
+///
+/// # Arguments
+/// * `blocks` - Full-resolution blocks to analyse.
+/// * `tol` - Euclidean tolerance for deciding that two nodes coincide.
+///   Passing the value of [`adaptive_tolerance`] for `blocks` reproduces
+///   [`connectivity`]; passing [`TOL_FLOOR`] reproduces the fixed-tolerance
+///   behaviour this crate had before the tolerance became adaptive.
+///
+/// # Returns
+/// Tuple `(matches, outer_faces)` representing matched interfaces and the
+/// formatted list of outer faces.
+pub fn connectivity_with_tol(blocks: &[Block], tol: Float) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
     use rayon::prelude::*;
 
     // Parallelize outer face extraction per block.
@@ -732,11 +1029,11 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
         })
         .collect();
 
-    let combos = candidate_neighbor_pairs(blocks, DEFAULT_TOL);
+    let combos = candidate_neighbor_pairs(blocks, tol);
 
     // ===== PHASE 1: Full face matching (fast, corner-based + interior verification) =====
     let (mut matches, consumed_keys) =
-        find_full_face_matches(blocks, &block_outer_faces, &combos, DEFAULT_TOL);
+        find_full_face_matches(blocks, &block_outer_faces, &combos, tol);
 
     // Remove fully-matched faces from the outer face pools
     for faces in &mut block_outer_faces {
@@ -779,8 +1076,7 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
                 continue;
             }
 
-            let mut match_points =
-                find_matching_blocks(&blocks[i], &blocks[j], left, right, DEFAULT_TOL);
+            let mut match_points = find_matching_blocks(&blocks[i], &blocks[j], left, right, tol);
             for points in match_points.drain(..) {
                 phase2_changed = true;
                 let (i1lo, i1hi, j1lo, j1hi, k1lo, k1hi) = match_point_bounds(&points, true);
@@ -1019,7 +1315,11 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
                 for (fi, ff) in fresh_all[bj].iter().enumerate() {
                     // AABB pre-check using precomputed all-node AABBs
                     let gaabb = &fresh_aabbs[bj][fi];
-                    let tol_pre = 0.01;
+                    // Coarse AABB gate. It must never be tighter than the
+                    // node-matching tolerance itself, or a genuinely touching
+                    // face pair whose stored coordinates differ by up to `tol`
+                    // would be rejected before it is ever compared.
+                    let tol_pre = (0.01 as Float).max(tol);
                     if fxx + tol_pre < gaabb[0]
                         || gaabb[1] + tol_pre < fxn
                         || fyx + tol_pre < gaabb[2]
@@ -1031,7 +1331,7 @@ pub fn connectivity(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
                     }
 
                     let (pts, _, _) =
-                        get_face_intersection(face, ff, &blocks[bi], &blocks[bj], DEFAULT_TOL);
+                        get_face_intersection(face, ff, &blocks[bi], &blocks[bj], tol);
                     if pts.is_empty() {
                         continue;
                     }

@@ -156,8 +156,8 @@ pub use block_face_functions::{
     reduce_blocks, rotate_block, Face,
 };
 pub use connectivity::{
-    align_face_orientations, connectivity, connectivity_fast, face_matches_to_dict,
-    get_face_intersection,
+    adaptive_tolerance, align_face_orientations, connectivity, connectivity_fast,
+    connectivity_with_tol, face_matches_to_dict, get_face_intersection, TOL_FLOOR,
 };
 pub use cylindrical::{find_angular_bounding_faces, to_radius, to_theta};
 pub use differencing::{find_edges, find_face_edges, BlockDiff, FaceDiff};
