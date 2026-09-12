@@ -168,9 +168,10 @@ pub use face_record::{
 pub use graph::{build_weighted_graph_from_face_matches, write_ddcmp, BlockGraph, WeightAggregate};
 pub use metrics::{compute_cell_centers, compute_cell_volumes, compute_face_metrics, FaceMetrics};
 pub use mesh_quality::{
-    block_handedness, cell_aspect_ratio, cell_signed_volume, cell_skewness, make_right_handed,
-    run_all as run_mesh_quality, CellLocation, Handedness, MeshQualityReport, Severity,
-    Thresholds, Violation,
+    block_handedness, cell_aspect_ratio, cell_distinct_node_count, cell_signed_volume,
+    cell_skewness, element_type_inventory, make_right_handed, run_all as run_mesh_quality,
+    BlockElementSummary, CellLocation, ElementInventory, ElementType, Handedness,
+    MeshQualityReport, Severity, Thresholds, Violation,
 };
 pub use merge_blocks::{
     combine_2_blocks_mixed_pairing, combine_blocks_mixed_pairs, combine_nxnxn_cubes_mixed_pairs,
