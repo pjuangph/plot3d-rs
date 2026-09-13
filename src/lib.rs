@@ -125,6 +125,7 @@ pub mod block;
 pub mod block_analysis;
 pub mod block_face_functions;
 pub mod connectivity;
+pub mod correspondence;
 pub mod cylindrical;
 pub mod differencing;
 pub mod dual_graph;
@@ -152,12 +153,18 @@ pub use block_analysis::{
     standardize_block_orientation, BlockConnectionOptions,
 };
 pub use block_face_functions::{
-    create_face_from_diagonals, full_face_match, full_face_match_transformed, get_outer_faces,
-    reduce_blocks, rotate_block, Face,
+    corner_match, corner_match_transformed, create_face_from_diagonals, full_face_match,
+    full_face_match_transformed, get_outer_faces, get_outer_faces_with_tol, reduce_blocks,
+    rotate_block, Face,
 };
 pub use connectivity::{
     adaptive_tolerance, align_face_orientations, connectivity, connectivity_fast,
-    connectivity_with_tol, face_matches_to_dict, get_face_intersection, TOL_FLOOR,
+    connectivity_fast_with_tol, connectivity_with_tol, face_matches_to_dict,
+    get_face_intersection, TOL_FLOOR,
+};
+pub use correspondence::{
+    certify_correspondence, certify_face_match, certify_permutation, CertifiedMapping,
+    MappingFailure, NodeDiscrepancy, Patch, PatchError,
 };
 pub use cylindrical::{find_angular_bounding_faces, to_radius, to_theta};
 pub use differencing::{find_edges, find_face_edges, BlockDiff, FaceDiff};
@@ -179,7 +186,9 @@ pub use merge_blocks::{
 pub use point_match::point_match;
 pub use read::{read_ap_nasa, read_plot3d_ascii, read_plot3d_binary, BinaryFormat, FloatPrecision};
 pub use rotational_periodicity::{
-    create_rotation_matrix, rotate_block_with_matrix, rotated_periodicity, rotational_periodicity,
+    create_rotation_matrix, rotate_block_with_matrix, rotated_periodicity,
+    rotated_periodicity_with_tol, rotational_periodicity, rotational_periodicity_with_tol,
+    DEFAULT_MATCH_TOL,
 };
 pub mod serialization;
 pub use serialization::{
@@ -187,7 +196,9 @@ pub use serialization::{
     permutation_matrices_json,
 };
 pub use split_block::{split_blocks, SplitDirection};
-pub use translational_periodicity::translational_periodicity;
+pub use translational_periodicity::{
+    translational_periodicity, translational_periodicity_with_tols, TranslationalTolerances,
+};
 pub use utils::{apply_rotation, compute_min_gcd, Endian};
 pub use verification::{
     apply_permutation, determine_plane, extract_canonical_grid, try_all_permutations,

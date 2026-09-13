@@ -2,19 +2,24 @@ use std::collections::HashSet;
 
 use crate::{
     block::Block,
+    correspondence::{certify_correspondence, Patch},
     face_record::{FaceKey, FaceMatch, FaceRecord},
     geometry::{
         clip_sutherland_hodgman, distance, dominant_projection_axis, poly_area_2d,
-        project_drop_axis, quad_normal_from_verts, quantize_point, to_array, vertex_aabb,
+        project_drop_axis, quad_normal_from_verts, to_array, vertex_aabb, PointGrid3,
     },
     utils::{cross3, dot3, sub3, vec_norm3},
     Float,
 };
 
-const DEFAULT_TOL: Float = 1e-8;
+/// Default tolerance for [`get_outer_faces`]'s self-match test (two faces of
+/// one block whose corners coincide, e.g. a full-annulus O-grid seam).
+/// Use [`get_outer_faces_with_tol`] to supply your own.
+pub const DEFAULT_TOL: Float = 1e-8;
 
-/// Vertex-matching tolerance used by [`Face::match_indices`].
-const VERTEX_MATCH_TOL: Float = 1e-6;
+/// Default vertex-matching tolerance for [`Face::match_indices`]. Use
+/// [`Face::match_indices_with_tol`] to supply your own.
+pub const VERTEX_MATCH_TOL: Float = 1e-6;
 
 /// Enumeration describing which index remains constant over a structured face.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -520,16 +525,10 @@ impl Face {
             return false;
         }
 
-        let q_self: HashSet<_> = pts_self
-            .iter()
-            .map(|p| quantize_point(*p, tol_xyz))
-            .collect();
-        let q_other: HashSet<_> = pts_other
-            .iter()
-            .map(|p| quantize_point(*p, tol_xyz))
-            .collect();
-
-        let shared = q_self.intersection(&q_other).count();
+        // Actual distances via a proximity grid: a node of `self` counts as
+        // shared when some node of `other` lies within `tol_xyz` of it.
+        let grid = PointGrid3::new(&pts_other, tol_xyz);
+        let shared = grid.count_with_partner(&pts_self, tol_xyz);
         if shared < min_shared_abs {
             return false;
         }
@@ -658,7 +657,11 @@ impl Face {
     /// Returns pairs `[i_self, j_other]` where vertex `i_self` of this face
     /// matches vertex `j_other` of `other` within [`VERTEX_MATCH_TOL`].
     pub fn match_indices(&self, other: &Face) -> Vec<[usize; 2]> {
-        let tol = VERTEX_MATCH_TOL;
+        self.match_indices_with_tol(other, VERTEX_MATCH_TOL)
+    }
+
+    /// [`Face::match_indices`] with an explicit per-component tolerance.
+    pub fn match_indices_with_tol(&self, other: &Face, tol: Float) -> Vec<[usize; 2]> {
         let mut matched_other = vec![false; other.vertices.len()];
         let mut result = Vec::new();
         for (i, v_self) in self.vertices.iter().enumerate() {
@@ -775,9 +778,8 @@ impl Face {
         self.overlap_fraction(other, tol_angle_deg, tol_plane_dist) >= min_overlap_frac
     }
 
-    /// Fraction of shared grid nodes between this face and `other`.
-    ///
-    /// Uses quantized point comparison for robustness.
+    /// Fraction of this face's grid nodes that have a node of `other` within
+    /// `tol_xyz` (actual Euclidean distance, via a proximity grid).
     pub fn shared_point_fraction(
         &self,
         other: &Face,
@@ -793,16 +795,8 @@ impl Face {
             return 0.0;
         }
 
-        let q_self: HashSet<_> = pts_self
-            .iter()
-            .map(|p| quantize_point(*p, tol_xyz))
-            .collect();
-        let q_other: HashSet<_> = pts_other
-            .iter()
-            .map(|p| quantize_point(*p, tol_xyz))
-            .collect();
-
-        let shared = q_self.intersection(&q_other).count();
+        let grid = PointGrid3::new(&pts_other, tol_xyz);
+        let shared = grid.count_with_partner(&pts_self, tol_xyz);
         let denom = pts_self.len().min(pts_other.len()) as Float;
         if denom == 0.0 {
             return 0.0;
@@ -962,16 +956,20 @@ pub fn faces_match(
     (false, None)
 }
 
-/// Attempt a full (1:1) face match by comparing the 4 corner vertices.
+/// Propose a face orientation from the 4 corner vertices alone.
 ///
-/// Tries all 8 valid orientations (4 flip combinations + swap) of face_b's
-/// corners against face_a's canonical corner ordering.  A match means all 4
-/// corners are within `tol` of each other.
+/// Tries all 8 orientations (4 flip combinations + swap) of `face_b`'s
+/// corners against `face_a`'s canonical corner ordering and returns the
+/// first under which all 4 corners are within `tol`.
 ///
-/// # Returns
-/// `Some(Orientation)` describing how face_b's indices map to face_a's,
-/// or `None` if no valid corner mapping exists within tolerance.
-pub fn full_face_match(
+/// This is a *proposal*, not a match: interior nodes are not examined, so
+/// two faces whose corners coincide but whose interiors do not (a 2:1
+/// refinement interface, a face that bulges away, a differently
+/// distributed spacing) pass. Use it only as a cheap pre-filter ahead of
+/// [`full_face_match`] / [`full_face_match_transformed`], which certify
+/// every node. Because a corner is itself a node, corners that fail here
+/// under every orientation are a sound reason to reject.
+pub fn corner_match(
     face_a: &Face,
     face_b: &Face,
     tol: Float,
@@ -981,12 +979,9 @@ pub fn full_face_match(
     try_corner_permutations(&corners_a, &corners_b, tol)
 }
 
-/// Like [`full_face_match`] but applies a coordinate transformation to
-/// face_a's corners before comparing.
-///
-/// `transform` maps `[Float; 3] -> [Float; 3]`, typically a rotation or
-/// translation.
-pub fn full_face_match_transformed<F>(
+/// [`corner_match`] with a coordinate transformation applied to `face_a`'s
+/// corners before comparing.
+pub fn corner_match_transformed<F>(
     face_a: &Face,
     face_b: &Face,
     transform: F,
@@ -1004,6 +999,69 @@ where
     ];
     let corners_b = face_b.get_all_corners()?;
     try_corner_permutations(&corners_a, &corners_b, tol)
+}
+
+/// Certify a full (1:1) face match: every node of `face_a` on `block_a`,
+/// interior nodes included, lies within `tol` of its counterpart on
+/// `face_b`/`block_b` under exactly one structured index mapping.
+///
+/// The mapping is one of the 8 orientations (index reversal along either
+/// parametric axis and/or axis exchange); the dimensions must agree under
+/// it, so coverage is bijective by construction. Corner agreement is used
+/// only to reject early and to order the search — it never certifies.
+///
+/// # Returns
+/// `Some(Orientation)` describing how `face_b`'s indices map to `face_a`'s,
+/// or `None` when no orientation — or more than one, which a non-degenerate
+/// face cannot produce — keeps every node within `tol`.
+pub fn full_face_match(
+    face_a: &Face,
+    block_a: &Block,
+    face_b: &Face,
+    block_b: &Block,
+    tol: Float,
+) -> Option<crate::face_record::Orientation> {
+    full_face_match_transformed(face_a, block_a, face_b, block_b, |p| p, tol)
+}
+
+/// [`full_face_match`] with a coordinate transformation applied to every
+/// node of `face_a` before comparing — for periodic interfaces, where
+/// `transform` is the rotation or translation that carries `face_a` onto
+/// `face_b`.
+pub fn full_face_match_transformed<F>(
+    face_a: &Face,
+    block_a: &Block,
+    face_b: &Face,
+    block_b: &Block,
+    transform: F,
+    tol: Float,
+) -> Option<crate::face_record::Orientation>
+where
+    F: Fn([Float; 3]) -> [Float; 3],
+{
+    // Cheap, sound rejection: corners are nodes too.
+    corner_match_transformed(face_a, face_b, &transform, tol)?;
+    let patch_a = face_patch(face_a)?;
+    let patch_b = face_patch(face_b)?;
+    if patch_a.check_in(std::slice::from_ref(block_a)).is_err()
+        || patch_b.check_in(std::slice::from_ref(block_b)).is_err()
+    {
+        return None;
+    }
+    certify_correspondence(block_a, &patch_a, block_b, &patch_b, transform, tol)
+        .ok()
+        .map(|m| m.orientation())
+}
+
+/// The index range of a [`Face`] as a [`Patch`], if it is a face (one
+/// constant axis, at least two nodes along each other axis).
+pub(crate) fn face_patch(face: &Face) -> Option<Patch> {
+    Patch::new(
+        0,
+        [face.imin(), face.jmin(), face.kmin()],
+        [face.imax(), face.jmax(), face.kmax()],
+    )
+    .ok()
 }
 
 /// Core logic: try all 8 orientation permutations of `cb` against `ca`.
@@ -1082,7 +1140,8 @@ pub fn find_matching_faces(
     None
 }
 
-/// Build the six outer faces for a block and identify internal matches.
+/// Build the six outer faces for a block and identify internal matches,
+/// using [`DEFAULT_TOL`] for the self-match test.
 ///
 /// # Arguments
 /// * `block` - Target plot3d block.
@@ -1090,6 +1149,16 @@ pub fn find_matching_faces(
 /// # Returns
 /// Tuple containing the exterior faces and any internal matching face pairs.
 pub fn get_outer_faces(block: &Block) -> (Vec<Face>, Vec<(Face, Face)>) {
+    get_outer_faces_with_tol(block, DEFAULT_TOL)
+}
+
+/// [`get_outer_faces`] with an explicit tolerance for the self-match test
+/// (two faces of the same block whose four corners coincide within `tol`).
+///
+/// Note that this is a corner test on the block's own faces; callers that
+/// return such a pair as an interface certify it node-for-node afterwards
+/// (see [`crate::connectivity::connectivity_fast_with_tol`]).
+pub fn get_outer_faces_with_tol(block: &Block, tol: Float) -> (Vec<Face>, Vec<(Face, Face)>) {
     let mut faces = Vec::with_capacity(6);
     for kind in BlockFaceKind::all() {
         let mut face = Face::new();
@@ -1145,7 +1214,7 @@ pub fn get_outer_faces(block: &Block) -> (Vec<Face>, Vec<(Face, Face)>) {
             if i == j {
                 continue;
             }
-            if faces[i].vertices_equals(&faces[j], DEFAULT_TOL) {
+            if faces[i].vertices_equals(&faces[j], tol) {
                 matching_pairs.push((i, j));
                 matched = true;
             }

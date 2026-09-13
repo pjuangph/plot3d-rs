@@ -14,21 +14,24 @@
 //! All outer faces are inserted into a `FacePool` that buckets them by
 //! their angular (theta) coordinate in cylindrical space. For each face,
 //! the rotated counterpart's theta range is computed and candidate faces
-//! in the matching bucket are tested with `full_face_match_transformed`.
-//! When all four rotated corners match a candidate's corners within
-//! tolerance, a [`PeriodicPair`] is recorded. This phase runs in parallel
-//! across all outer faces.
+//! in the matching bucket are tested with `full_face_match_transformed`,
+//! which certifies **every node** of the rotated face against the
+//! candidate under exactly one structured mapping (corner agreement only
+//! orders the search). A [`PeriodicPair`] is recorded on certification.
+//! This phase runs in parallel across all outer faces.
 //!
 //! **Phase 2 — Split-face matching with corner pre-check**
 //!
 //! Remaining unmatched faces are tested for partial overlap. Before the
 //! expensive `get_face_intersection`, a quick corner pre-check confirms
 //! that at least one rotated corner lies near a candidate face. When a
-//! partial match is found, both faces are split along the intersection
-//! boundary. Matched sub-faces produce [`PeriodicPair`] records and
-//! remnants re-enter the pool. This loop runs until convergence — there
-//! is **no iteration limit** (earlier versions had a hardcoded limit of 50
-//! which was insufficient; Phase 2 may need 100+ iterations).
+//! partial match is found — the claimed rectangular sub-patch certifying
+//! node-for-node on both sides — both faces are split along the
+//! intersection boundary. Matched sub-faces produce [`PeriodicPair`]
+//! records and remnants re-enter the pool. This loop runs until
+//! convergence — there is **no iteration limit** (earlier versions had a
+//! hardcoded limit of 50 which was insufficient; Phase 2 may need 100+
+//! iterations).
 //!
 //! **Phase 3 — Edge-based matching**
 //!
@@ -36,6 +39,15 @@
 //! Face edges are extracted and compared via `count_edge_matches` in the
 //! `FacePool`. This catches degenerate or thin-strip faces that the
 //! area-based intersection misses.
+//!
+//! When discovery ran on a GCD-reduced copy of the mesh
+//! ([`rotational_periodicity`], or [`rotated_periodicity`] with
+//! `reduce_mesh`), every pair is re-certified on the full-resolution nodes
+//! before it is returned; a pair that fails there is demoted to two outer
+//! faces with a warning on stderr.
+//!
+//! Tolerances default to [`DEFAULT_MATCH_TOL`]; the `*_with_tol` variants
+//! take the caller's own.
 //!
 //! Use [`verify_periodicity`] to confirm that every matched periodic pair
 //! has coincident nodes after rotation.
@@ -122,6 +134,33 @@ pub fn rotational_periodicity(
     rotation_axis: char,
     rotation_angle: Float,
 ) -> (Vec<PeriodicPair>, Vec<FaceRecord>) {
+    rotational_periodicity_with_tol(
+        blocks,
+        matched_faces,
+        outer_faces,
+        periodic_direction,
+        rotation_axis,
+        rotation_angle,
+        DEFAULT_MATCH_TOL,
+    )
+}
+
+/// [`rotational_periodicity`] with an explicit node-coincidence tolerance.
+///
+/// The GCD-reduced grid is used for discovery only: every periodic pair it
+/// proposes is re-certified node-for-node on the full-resolution blocks
+/// (under either rotation direction) before it is returned. A pair that
+/// fails at full resolution is returned as two outer faces with a warning
+/// on stderr.
+pub fn rotational_periodicity_with_tol(
+    blocks: &[Block],
+    matched_faces: &[FaceMatch],
+    outer_faces: &[FaceRecord],
+    periodic_direction: &str,
+    rotation_axis: char,
+    rotation_angle: Float,
+    tol: Float,
+) -> (Vec<PeriodicPair>, Vec<FaceRecord>) {
     let gcd_to_use = compute_min_gcd(blocks);
 
     let reduced_blocks = reduce_blocks(blocks, gcd_to_use);
@@ -143,6 +182,7 @@ pub fn rotational_periodicity(
         rotation_angle,
         periodic_direction,
         rotation_axis,
+        tol,
     );
 
     if gcd_to_use > 1 {
@@ -154,9 +194,44 @@ pub fn rotational_periodicity(
         for dict in &mut outer_export {
             dict.scale_indices(gcd_to_use);
         }
+        periodic_export = revalidate_periodic_pairs(
+            blocks,
+            periodic_export,
+            &mut outer_export,
+            rotation_angle,
+            rotation_axis,
+            tol,
+            "rotational_periodicity",
+        );
     }
 
     (periodic_export, outer_export)
+}
+
+/// Re-certify reduced-grid periodic proposals on the full-resolution blocks
+/// under `+angle` or `-angle`; demote failures to outer faces.
+fn revalidate_periodic_pairs(
+    blocks: &[Block],
+    proposed: Vec<PeriodicPair>,
+    outer_export: &mut Vec<FaceRecord>,
+    rotation_angle: Float,
+    rotation_axis: char,
+    tol: Float,
+    stage: &str,
+) -> Vec<PeriodicPair> {
+    let fwd = create_rotation_matrix(rotation_angle, rotation_axis);
+    let bwd = create_rotation_matrix(-rotation_angle, rotation_axis);
+    let t_fwd = |p: [Float; 3]| apply_rotation(p, fwd);
+    let t_bwd = |p: [Float; 3]| apply_rotation(p, bwd);
+    let (kept, rejected) = crate::connectivity::revalidate_full_resolution(
+        blocks,
+        proposed,
+        &[&t_fwd, &t_bwd],
+        tol,
+        stage,
+    );
+    crate::connectivity::demote_to_outer(outer_export, rejected);
+    kept
 }
 
 /// Core implementation shared by `rotational_periodicity` and `rotated_periodicity`.
@@ -172,6 +247,7 @@ fn rotational_periodicity_core(
     rotation_angle: Float,
     periodic_direction: &str,
     rotation_axis: char,
+    tol: Float,
 ) -> (Vec<PeriodicPair>, Vec<FaceRecord>) {
     use crate::block_face_functions::full_face_match_transformed;
 
@@ -228,13 +304,26 @@ fn rotational_periodicity_core(
                     if face_a.const_type() == -1 || face_b.const_type() == -1 {
                         continue;
                     }
+                    let (Some(bidx_a), Some(bidx_b)) = (face_a.block_index(), face_b.block_index())
+                    else {
+                        continue;
+                    };
+                    if bidx_a >= blocks.len() || bidx_b >= blocks.len() {
+                        continue;
+                    }
 
-                    // Try both rotation directions for this candidate
+                    // Try both rotation directions for this candidate; every
+                    // node of the face is compared, not just the corners.
                     for &rot_mat in &[rot_forward, rot_backward] {
                         let transform = |p: [Float; 3]| apply_rotation(p, rot_mat);
-                        if let Some(orientation) =
-                            full_face_match_transformed(face_a, face_b, transform, MATCH_TOL)
-                        {
+                        if let Some(orientation) = full_face_match_transformed(
+                            face_a,
+                            &blocks[bidx_a],
+                            face_b,
+                            &blocks[bidx_b],
+                            transform,
+                            tol,
+                        ) {
                             let key_a = face_a.index_key();
                             let key_b = face_b.index_key();
                             return Some((
@@ -339,7 +428,7 @@ fn rotational_periodicity_core(
                     let mut found_corners = false;
                     for &rot_matrix in &[rot_forward, rot_backward] {
                         let corners_hit = count_rotated_corners_on_face(
-                            face_a, face_b, block_b, rot_matrix, MATCH_TOL,
+                            face_a, face_b, block_b, rot_matrix, tol,
                         );
                         if corners_hit >= 2 {
                             match_found = Some((idx_a, idx_b, rot_matrix));
@@ -374,6 +463,7 @@ fn rotational_periodicity_core(
                     &mut seen_pair_keys,
                     &mut periodic_exports,
                     &mut pool,
+                    tol,
                 ) {
                     changed = true;
                 } else {
@@ -473,7 +563,7 @@ fn rotational_periodicity_core(
                         // Identity matrix since edges are already extracted from rotated block
                         let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
                         let match_count =
-                            count_edge_matches(edges_a, &edges_b, identity, MATCH_TOL);
+                            count_edge_matches(edges_a, &edges_b, identity, tol);
                         if match_count >= 2 {
                             match_found = Some((idx_a, idx_b, is_forward));
                             break 'phase3_search;
@@ -507,9 +597,14 @@ fn rotational_periodicity_core(
                     } else {
                         &transform_rev
                     };
-                    if let Some(orientation) =
-                        full_face_match_transformed(&face_a, &face_b, transform, MATCH_TOL)
-                    {
+                    if let Some(orientation) = full_face_match_transformed(
+                        &face_a,
+                        &blocks[block_idx_a],
+                        &face_b,
+                        block_b,
+                        transform,
+                        tol,
+                    ) {
                         let key_a = face_a.index_key();
                         let key_b = face_b.index_key();
                         let pair_key = ordered_pair(key_a, key_b);
@@ -538,6 +633,7 @@ fn rotational_periodicity_core(
                         &mut seen_pair_keys,
                         &mut periodic_exports,
                         &mut pool,
+                        tol,
                     ) {
                         changed_p3 = true;
                     }
@@ -575,6 +671,34 @@ pub fn rotated_periodicity(
     rotation_axis: char,
     reduce_mesh: bool,
 ) -> (Vec<PeriodicPair>, Vec<FaceRecord>) {
+    rotated_periodicity_with_tol(
+        blocks,
+        matched_faces,
+        outer_faces,
+        rotation_angle_deg,
+        rotation_axis,
+        reduce_mesh,
+        DEFAULT_MATCH_TOL,
+    )
+}
+
+/// [`rotated_periodicity`] with an explicit node-coincidence tolerance.
+///
+/// With `reduce_mesh`, the GCD-reduced grid is used for discovery only:
+/// every proposed pair is re-certified node-for-node on the full-resolution
+/// blocks (under either rotation direction) before it is returned, and a
+/// pair that fails is returned as two outer faces with a warning on stderr.
+/// Without `reduce_mesh` discovery already runs on the full grid and every
+/// match is certified as it is found.
+pub fn rotated_periodicity_with_tol(
+    blocks: &[Block],
+    matched_faces: &[FaceMatch],
+    outer_faces: &[FaceRecord],
+    rotation_angle_deg: Float,
+    rotation_axis: char,
+    reduce_mesh: bool,
+    tol: Float,
+) -> (Vec<PeriodicPair>, Vec<FaceRecord>) {
     let mut gcd_to_use = 1usize;
     let mut working_blocks: Vec<Block> = blocks.to_vec();
     if reduce_mesh && !blocks.is_empty() {
@@ -602,6 +726,7 @@ pub fn rotated_periodicity(
         rotation_angle_rad,
         "any",
         rotation_axis,
+        tol,
     );
 
     if gcd_to_use > 1 {
@@ -612,6 +737,15 @@ pub fn rotated_periodicity(
         for dict in &mut outer_export {
             dict.scale_indices(gcd_to_use);
         }
+        periodic_export = revalidate_periodic_pairs(
+            blocks,
+            periodic_export,
+            &mut outer_export,
+            rotation_angle_rad,
+            rotation_axis,
+            tol,
+            "rotated_periodicity",
+        );
     }
 
     (periodic_export, outer_export)
@@ -713,12 +847,13 @@ fn try_split_match(
     seen_pair_keys: &mut HashSet<(FaceKey, FaceKey)>,
     periodic_exports: &mut Vec<FaceMatch>,
     pool: &mut FacePool,
+    tol: Float,
 ) -> bool {
     if !is_valid_face(face_a, block_a_rot) || !is_valid_face(face_b, block_b) {
         return false;
     }
     if let Some((pair_faces, match_points, splits)) =
-        periodicity_check_with_points(face_a, face_b, block_a_rot, block_b, MATCH_TOL)
+        periodicity_check_with_points(face_a, face_b, block_a_rot, block_b, tol)
     {
         let pair_key = ordered_pair(pair_faces[0].index_key(), pair_faces[1].index_key());
         if seen_pair_keys.contains(&pair_key) {
@@ -928,8 +1063,9 @@ fn match_bounds(
     (i_lo, i_hi, j_lo, j_hi, k_lo, k_hi)
 }
 
-/// Fixed matching tolerance for node coincidence checks.
-const MATCH_TOL: Float = 1e-4;
+/// Default node-coincidence tolerance for the rotational periodicity
+/// functions. Use the `*_with_tol` variants to supply your own.
+pub const DEFAULT_MATCH_TOL: Float = 1e-4;
 
 // ============================================================================
 // Orientation inference from match points

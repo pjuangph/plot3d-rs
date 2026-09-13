@@ -78,6 +78,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use crate::{
     block::Block,
     block_face_functions::{create_face_from_diagonals, get_outer_faces, split_face, Face},
+    correspondence::{certify_correspondence, certify_face_match, Patch},
     face_record::{match_point_bounds, FaceKey, FaceMatch, FaceRecord, MatchPoint, Orientation},
     verification::{determine_plane, extract_canonical_grid, try_all_permutations},
     Float,
@@ -513,6 +514,13 @@ fn create_split_faces(
 
 /// Compute the coincident nodes between two faces on separate blocks.
 ///
+/// Nearest-node pairing proposes a rectangular sub-patch on each side; the
+/// pair is returned only if those sub-patches correspond node-for-node
+/// under one structured mapping within `tol` (see
+/// [`crate::correspondence::certify_correspondence`]). A partial overlap
+/// whose interior nodes do not line up — a non-conformal interface — is not
+/// reported as a match.
+///
 /// # Arguments
 /// * `face1` - Candidate face on `block1`.
 /// * `face2` - Candidate face on `block2`.
@@ -563,6 +571,21 @@ pub fn get_face_intersection(
     let dims = [i_hi - i_lo + 1, j_hi - j_lo + 1, k_hi - k_lo + 1];
     let expected_area: usize = dims.iter().filter(|&&d| d > 1).product();
     if expected_area > 0 && matches.len() < expected_area {
+        return (Vec::new(), Vec::new(), Vec::new());
+    }
+
+    // The nearest-node pairing above is candidate evidence only. The
+    // claimed rectangular sub-patches must correspond node-for-node under
+    // one structured mapping — every node, both sides — or there is no
+    // conformal interface here.
+    let (i2_lo, i2_hi, j2_lo, j2_hi, k2_lo, k2_hi) = match_point_bounds(&matches, false);
+    let (Ok(sub1), Ok(sub2)) = (
+        Patch::new(0, [i_lo, j_lo, k_lo], [i_hi, j_hi, k_hi]),
+        Patch::new(0, [i2_lo, j2_lo, k2_lo], [i2_hi, j2_hi, k2_hi]),
+    ) else {
+        return (Vec::new(), Vec::new(), Vec::new());
+    };
+    if certify_correspondence(block1, &sub1, block2, &sub2, |p| p, tol).is_err() {
         return (Vec::new(), Vec::new(), Vec::new());
     }
 
@@ -685,7 +708,7 @@ fn find_full_face_matches(
     candidate_pairs: &[(usize, usize)],
     tol: Float,
 ) -> (Vec<FaceMatch>, HashSet<FaceKey>) {
-    use crate::block_face_functions::full_face_match;
+    use crate::block_face_functions::corner_match;
     use crate::verification::{determine_plane, extract_canonical_grid, try_all_permutations};
 
     let mut face_matches = Vec::new();
@@ -700,8 +723,9 @@ fn find_full_face_matches(
                 if consumed.contains(&face_j.index_key()) {
                     continue;
                 }
-                // Quick corner pre-filter
-                if full_face_match(face_i, face_j, tol).is_none() {
+                // Quick corner pre-filter (proposal only; every node is
+                // compared by `try_all_permutations` below).
+                if corner_match(face_i, face_j, tol).is_none() {
                     continue;
                 }
 
@@ -940,14 +964,15 @@ fn phase3_overlaps_existing(
 }
 
 /// [`connectivity`] on a GCD-reduced copy of `blocks`, with the resulting
-/// indices scaled back to full resolution.
+/// indices scaled back to full resolution and every match re-certified on
+/// the full-resolution nodes.
 ///
 /// # Tolerance
 ///
 /// The matching tolerance is derived by [`adaptive_tolerance`] from the
 /// **full-resolution** `blocks`, not from the reduced grid the matching
 /// runs on, so this entry point and [`connectivity`] use one tolerance for a
-/// given mesh.
+/// given mesh. Use [`connectivity_fast_with_tol`] to supply one explicitly.
 ///
 /// Reduction leaves the storage noise unchanged — the reduced nodes are the
 /// same stored numbers — but multiplies the cell size by the GCD, so a
@@ -957,12 +982,21 @@ fn phase3_overlaps_existing(
 /// effect is to widen, by a factor of `gcd`, the band of genuinely separated
 /// faces that are declared coincident. On the repo's `VSPT_ASCII.xyz`
 /// fixture (`max|coord|` 47.8, GCD 4) that would have been `3.82e-5`
-/// against [`connectivity`]'s `5.72e-6`. Because matches found on the
-/// reduced grid are scaled back to full resolution here without being
-/// re-verified, this entry point must never be more permissive than
-/// [`connectivity`].
+/// against [`connectivity`]'s `5.72e-6`.
 pub fn connectivity_fast(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
-    let tol = adaptive_tolerance(blocks);
+    connectivity_fast_with_tol(blocks, adaptive_tolerance(blocks))
+}
+
+/// [`connectivity_fast`] with an explicit node-matching tolerance.
+///
+/// The reduced grid is used for *discovery only*. Every match it proposes
+/// is re-certified node-for-node on the original full-resolution blocks
+/// (interior nodes included, under the proposed orientation where one was
+/// recorded) before it is returned. A proposal that fails at full
+/// resolution is not an interface: its two faces are returned as outer
+/// faces instead, and a warning naming the worst node is printed to stderr
+/// — the tuple return has no way to carry the finding itself.
+pub fn connectivity_fast_with_tol(blocks: &[Block], tol: Float) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
     let gcd_to_use = crate::utils::compute_min_gcd(blocks);
     let reduced_blocks = crate::block_face_functions::reduce_blocks(blocks, gcd_to_use);
     let (mut matches, mut outer_faces) = connectivity_with_tol(&reduced_blocks, tol);
@@ -974,7 +1008,84 @@ pub fn connectivity_fast(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) 
     for face in &mut outer_faces {
         face.scale_indices(gcd_to_use);
     }
+    if gcd_to_use > 1 {
+        let identity = |p: [Float; 3]| p;
+        let (kept, rejected) =
+            revalidate_full_resolution(blocks, matches, &[&identity], tol, "connectivity_fast");
+        matches = kept;
+        demote_to_outer(&mut outer_faces, rejected);
+    }
     (matches, outer_faces)
+}
+
+/// Re-certify reduced-grid proposals on the full-resolution blocks under
+/// any one of `transforms` (e.g. both rotation directions).
+///
+/// A proposal with a recorded orientation must certify as recorded; one
+/// without is searched for its unique certifying orientation. Returns the
+/// certified matches and the rejected ones.
+pub(crate) fn revalidate_full_resolution(
+    blocks: &[Block],
+    proposed: Vec<FaceMatch>,
+    transforms: &[&dyn Fn([Float; 3]) -> [Float; 3]],
+    tol: Float,
+    stage: &str,
+) -> (Vec<FaceMatch>, Vec<FaceMatch>) {
+    let mut kept = Vec::with_capacity(proposed.len());
+    let mut rejected = Vec::new();
+    for fm in proposed {
+        let mut outcome: Result<(), String> = Err("no transform supplied".to_string());
+        for t in transforms {
+            outcome = certify_face_match(blocks, &fm, |p| t(p), tol).map(|_| ());
+            if outcome.is_ok() {
+                break;
+            }
+        }
+        match outcome {
+            Ok(()) => kept.push(fm),
+            Err(why) => {
+                eprintln!(
+                    "{stage}: reduced-grid match block {} [{},{},{} -> {},{},{}] <-> block {} [{},{},{} -> {},{},{}] does not hold at full resolution (tol {tol:e}): {why}; returning both faces as outer faces",
+                    fm.block1.block_index, fm.block1.il, fm.block1.jl, fm.block1.kl,
+                    fm.block1.ih, fm.block1.jh, fm.block1.kh,
+                    fm.block2.block_index, fm.block2.il, fm.block2.jl, fm.block2.kl,
+                    fm.block2.ih, fm.block2.jh, fm.block2.kh,
+                );
+                rejected.push(fm);
+            }
+        }
+    }
+    (kept, rejected)
+}
+
+/// Append the faces of rejected proposals to the outer-face list with fresh
+/// sequential ids.
+pub(crate) fn demote_to_outer(outer_faces: &mut Vec<FaceRecord>, rejected: Vec<FaceMatch>) {
+    let mut next_id = outer_faces.iter().filter_map(|f| f.id).max().unwrap_or(0) + 1;
+    let mut seen: HashSet<FaceKey> = outer_faces.iter().map(|f| f.index_key()).collect();
+    for fm in rejected {
+        for rec in [fm.block1, fm.block2] {
+            let (lo, hi) = rec.bounds();
+            let mut r = FaceRecord {
+                block_index: rec.block_index,
+                il: lo[0],
+                jl: lo[1],
+                kl: lo[2],
+                ih: hi[0],
+                jh: hi[1],
+                kh: hi[2],
+                id: None,
+                u_physical: None,
+                v_physical: None,
+            };
+            if !seen.insert(r.index_key()) {
+                continue;
+            }
+            r.id = Some(next_id);
+            next_id += 1;
+            outer_faces.push(r);
+        }
+    }
 }
 
 /// Determine face-to-face connectivity and exterior faces for all blocks.
