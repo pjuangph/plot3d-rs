@@ -179,11 +179,32 @@ pub fn cell_has_collapsed_edge(b: &Block, i: usize, j: usize, k: usize) -> bool 
 /// Per-cell aspect ratio `max(edge_len) / min(edge_len)` over the three
 /// edge vectors. Always `>= 1`; a perfect cube returns `1.0`. Port of
 /// `metrics_3d.cell_aspect_ratio`.
+///
+/// **A cell with a zero-length edge has NO aspect ratio, and this returns
+/// [`Float::INFINITY`] for it rather than a finite number.** That cell sits
+/// on a collapsed grid line — see [`cell_has_collapsed_edge`], which
+/// documents why such lines are a deliberate turbomachinery construction and
+/// not damage — and the condition belongs to the degenerate-cell check, which
+/// already reports it by name.
+///
+/// This previously floored the denominator at `1e-30`, which did not avoid the
+/// problem so much as disguise it: a legitimate 13 µm edge over a collapsed
+/// one returned `1.3e25`, a precise-looking number that is pure arithmetic
+/// artefact. Measured on rotor35 (2.94 M cells, 0.5 µm first cell at
+/// `wall_spacing: 5.0e-7`) it was reported as `wall aspect ratio
+/// 13045882770553017259261952 > 100000` — twenty orders of magnitude beyond
+/// anything the geometry can produce, and reported as an ASPECT-RATIO fault
+/// on a mesh whose real and already-reported condition was 960 cells on a
+/// collapsed line. `INFINITY` still exceeds any threshold, so nothing is
+/// silenced; a reader just sees a degeneracy instead of believing a number.
 pub fn cell_aspect_ratio(b: &Block, i: usize, j: usize, k: usize) -> Float {
     let (ei, ej, ek) = cell_edges(b, i, j, k);
     let (li, lj, lk) = (norm(ei), norm(ej), norm(ek));
     let mx = li.max(lj).max(lk);
-    let mn = li.min(lj).min(lk).max(1e-30 as Float);
+    let mn = li.min(lj).min(lk);
+    if mn == 0.0 {
+        return Float::INFINITY;
+    }
     mx / mn
 }
 
@@ -924,6 +945,17 @@ pub fn run_all(blocks: &[Block], t: &Thresholds, preset_name: &str) -> MeshQuali
                 for i in 0..nci {
                     let idx = (k * ncj + j) * nci + i;
                     let v = ar[idx];
+                    // A cell on a collapsed grid line has no aspect ratio
+                    // (`cell_aspect_ratio` returns INFINITY for it). Skip it
+                    // here so ONE condition is not reported twice under two
+                    // names: the degenerate-cell check above already names
+                    // those cells, and letting them set the max here turned a
+                    // legitimate O-grid construction into a spurious
+                    // aspect-ratio violation that trained readers to dismiss
+                    // the whole check.
+                    if !v.is_finite() {
+                        continue;
+                    }
                     if v > wall_max {
                         wall_max = v;
                         wall_idx = idx;
@@ -1262,6 +1294,56 @@ mod tests {
             z[dst] = z[src];
         }
         Block::new(n, n, n, x, y, z)
+    }
+
+    /// A collapsed cell has NO aspect ratio, and must not be given a finite
+    /// one — nor allowed to set the block's reported aspect-ratio maximum.
+    ///
+    /// Regression for a real misreport. `cell_aspect_ratio` used to floor its
+    /// denominator at `1e-30`, so a cell with a legitimate 13 µm edge and a
+    /// collapsed one returned `1.3e25`. On rotor35 (0.5 µm first cell) that
+    /// surfaced as `wall aspect ratio 13045882770553017259261952 > 100000`:
+    /// a precise-looking number that is pure arithmetic, twenty orders of
+    /// magnitude past anything the geometry can produce, reported as an
+    /// ASPECT-RATIO fault when the real and separately-reported condition was
+    /// a collapsed grid line. One condition, named twice, the second time
+    /// wrongly — which taught readers to dismiss the check entirely.
+    ///
+    /// The old floor made this test impossible to write as an equality, so
+    /// note what the assertions below actually pin: the value is NOT finite
+    /// (the `1e-30` floor always produced a finite one), and the violation
+    /// list carries no `aspect_ratio` entry sourced from the pinched cell.
+    #[test]
+    fn a_collapsed_cell_has_no_aspect_ratio_and_does_not_set_the_maximum() {
+        let b = collapsed_line_block(5);
+
+        // The pinched cell: undefined, not a large number.
+        let ar = cell_aspect_ratio(&b, 0, 0, 0);
+        assert!(
+            !ar.is_finite(),
+            "a zero-length edge has no aspect ratio; got the finite value {ar:e}, \
+             which is the 1e-30-floor artefact this test exists to refuse"
+        );
+        assert!(cell_has_collapsed_edge(&b, 0, 0, 0));
+
+        // A healthy cell in the same block still gets a real, finite ratio —
+        // so the guard above cannot be passing by disabling the metric.
+        let healthy = cell_aspect_ratio(&b, 2, 2, 2);
+        assert!(
+            healthy.is_finite() && healthy >= 1.0,
+            "healthy cell must still report a finite ratio >= 1, got {healthy:e}"
+        );
+
+        // And the collapsed cell must not become the block's reported max.
+        let report = run_all(&[b], &Thresholds::STANDARD, "STANDARD");
+        for v in report.violations.iter().filter(|v| v.check == "aspect_ratio") {
+            assert!(
+                v.actual.is_finite(),
+                "an aspect_ratio violation was raised with a non-finite value \
+                 ({:e}) — the collapsed cell set the maximum",
+                v.actual
+            );
+        }
     }
 
     #[test]
