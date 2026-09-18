@@ -720,16 +720,40 @@ pub fn run_all(blocks: &[Block], t: &Thresholds, preset_name: &str) -> MeshQuali
         //   INVERTED   — the cell is genuinely turned inside out. The
         //                divergence-theorem volume is negative. Fatal:
         //                it breaks the finite-volume discretization.
-        //   DEGENERATE — the cell sits on a collapsed/pinched grid line,
-        //                so `cell_signed_volume`'s anchor corner has a
-        //                zero-length edge and the triple product is
-        //                exactly 0 — but the cell still has real positive
-        //                volume. NOT fatal: the grid is valid and the
-        //                reference solver ran on it.
+        //   DEGENERATE — `cell_signed_volume` is <= 0 but the cell still has
+        //                real positive volume. NOT fatal: the grid is valid
+        //                and the reference solver ran on it. Two distinct
+        //                causes, and BOTH must be tolerated:
+        //                  (a) collapsed/pinched grid line — the anchor
+        //                      corner has a zero-length edge, so the triple
+        //                      product is exactly 0 (O-grid pinch lines).
+        //                  (b) corner warp on a high-aspect-ratio cell —
+        //                      `cell_signed_volume` is a ONE-CORNER triple
+        //                      product, exact only on a parallelepiped. On a
+        //                      warped hex it measures the anchor corner's
+        //                      Jacobian, which can go slightly negative while
+        //                      the cell's true volume is comfortably positive.
+        //                      Wall-resolved boundary layers produce exactly
+        //                      this: 0.5 um first cells at AR ~1e5.
         //
         // We therefore adjudicate with `cell_volume_divergence` (the
         // operator the solver actually integrates with) and only call it
         // an error when that says the cell is inverted.
+        //
+        // CORRECTED 2026-09-18: this block previously required
+        // `cell_has_collapsed_edge()` — an EXACT bit-equality test on two of
+        // the eight corners — before it would accept a positive-volume cell,
+        // which silently narrowed the rule to cause (a) and contradicted the
+        // policy stated immediately above. Cause (b) has no bit-identical
+        // corner pair, so wall cells with genuinely positive volume were
+        // escalated to Error. Found on CMC009 at reduce_factor 1: 32 cells of
+        // 18,923,520, all in the j-max wall layer of 10 blade-surface blocks,
+        // every one with `cell_volume_divergence > 0` (3.2e-16 .. 1e-14, the
+        // expected size of a 0.5 um wall cell) and aspect ratios ~1.2e5. The
+        // same mesh passes at reduce_factor 2 only because merging two wall
+        // layers halves the aspect ratio and the corner Jacobian stays
+        // positive — i.e. coarsening was masking a metric artifact, not a
+        // mesh defect. The cells remain reported, at Warn.
         let signed = cell_field(b, cell_signed_volume);
         let mut neg_count = 0usize;
         let mut degen_count = 0usize;
@@ -740,8 +764,10 @@ pub fn run_all(blocks: &[Block], t: &Thresholds, preset_name: &str) -> MeshQuali
             }
             let (i, j, k) = cell_ijk(idx, nci, ncj);
             let vd = cell_volume_divergence(b, i, j, k);
-            if vd > 0.0 && cell_has_collapsed_edge(b, i, j, k) {
-                // Collapsed grid line, real positive volume — report, don't abort.
+            if vd > 0.0 {
+                // Real positive volume by the operator the solver integrates
+                // with — report, don't abort. Cause (a) or (b) above; we do
+                // not care which, because neither is unusable geometry.
                 degen_count += 1;
                 if degen_first.is_none() {
                     degen_first = Some((i, j, k, vd));
@@ -820,7 +846,12 @@ pub fn run_all(blocks: &[Block], t: &Thresholds, preset_name: &str) -> MeshQuali
         // it is a real stiffness hazard — but at Warn severity when the
         // cell is only degenerate, so the run is not blocked.
         let true_vol = cell_field(b, cell_volume_divergence);
-        let all_degenerate_are_collapsed = degen_count > 0 && neg_count == 0;
+        // Renamed 2026-09-18 from `all_degenerate_are_collapsed`. The old name
+        // described the collapsed-edge test that used to gate the block above;
+        // what the condition actually encodes — and all the site below needs —
+        // is "some cells tripped the signed-volume test, and none of them is
+        // genuinely inverted."
+        let nothing_is_inverted = degen_count > 0 && neg_count == 0;
         let mut absvol: Vec<Float> = true_vol.iter().map(|v| v.abs()).collect();
         absvol.sort_by(|a, c| a.partial_cmp(c).unwrap_or(std::cmp::Ordering::Equal));
         let median = median_sorted(&absvol);
@@ -849,13 +880,19 @@ pub fn run_all(blocks: &[Block], t: &Thresholds, preset_name: &str) -> MeshQuali
             let ratio = vmin / median;
             if ratio < t.min_cell_volume_ratio {
                 let (i, j, k) = cell_ijk(vmin_idx, nci, ncj);
-                // If the smallest cell is small BECAUSE it sits on a
-                // collapsed line (and nothing in this block is actually
-                // inverted), this is the known-degenerate case already
-                // reported above — advisory, not fatal.
-                let sev = if all_degenerate_are_collapsed
-                    && cell_has_collapsed_edge(b, i, j, k)
-                {
+                // If nothing in this block is actually inverted, a merely
+                // small cell is the known-degenerate case already reported
+                // above — advisory, not fatal.
+                //
+                // CORRECTED 2026-09-18, same defect as the negative-volume
+                // block above: this also required `cell_has_collapsed_edge()`,
+                // which restricted the exemption to O-grid pinch lines and
+                // escalated a warped-but-valid high-aspect-ratio wall cell to
+                // Error. That conjunct was redundant as well as wrong —
+                // `nothing_is_inverted` already establishes that no cell in
+                // this block has non-positive divergence-theorem volume, which
+                // is the only thing that makes a small cell unusable.
+                let sev = if nothing_is_inverted {
                     Severity::Warn
                 } else {
                     Severity::Error
