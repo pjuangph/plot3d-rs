@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+### Added
+
+- `find_axis_faces()` — identify outer faces that lie on the `r = 0` axis of
+  revolution in an axisymmetric mesh. Classification is based on a relative
+  radial tolerance applied to the mesh's global maximum radius, ensuring robust
+  detection across meshes of different scales.
+
 ## 0.1.16
 
 ### Fixed
