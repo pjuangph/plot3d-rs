@@ -166,7 +166,7 @@ pub use correspondence::{
     certify_correspondence, certify_face_match, certify_permutation, CertifiedMapping,
     MappingFailure, NodeDiscrepancy, Patch, PatchError,
 };
-pub use cylindrical::{find_angular_bounding_faces, to_radius, to_theta};
+pub use cylindrical::{find_angular_bounding_faces, find_axis_faces, to_radius, to_theta};
 pub use differencing::{find_edges, find_face_edges, BlockDiff, FaceDiff};
 pub use face_record::{
     FaceKey, FaceMatch, FaceMatchPrinter, FaceRecord, FaceRecordTraits, MatchPoint, Orientation,
