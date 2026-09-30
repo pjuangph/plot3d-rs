@@ -295,11 +295,16 @@ pub enum Handedness {
 /// (median is robust to a handful of locally-bad cells). A left-handed
 /// block has essentially every cell at negative signed volume.
 pub fn block_handedness(b: &Block) -> Handedness {
-    let mut sv = cell_field(b, cell_signed_volume);
+    // Non-finite signed volumes (non-finite coordinates) carry no orientation
+    // information and are excluded; `run_all` reports them as located Errors.
+    let mut sv: Vec<Float> = cell_field(b, cell_signed_volume)
+        .into_iter()
+        .filter(|v| v.is_finite())
+        .collect();
     if sv.is_empty() {
         return Handedness::Degenerate;
     }
-    sv.sort_by(|a, c| a.partial_cmp(c).unwrap_or(std::cmp::Ordering::Equal));
+    sv.sort_by(|a, c| a.total_cmp(c));
     let median = median_sorted(&sv);
     // Scale the "≈ 0" tolerance by the typical cell size so it works for
     // meshes in any units.
@@ -511,7 +516,7 @@ fn percentile(values: &[Float], p: Float) -> Float {
         return 0.0;
     }
     let mut v = values.to_vec();
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    v.sort_by(|a, b| a.total_cmp(b));
     let pos = p * (v.len() - 1) as Float;
     let lo = pos.floor() as usize;
     let hi = pos.ceil() as usize;
@@ -946,7 +951,7 @@ pub fn run_all(blocks: &[Block], t: &Thresholds, preset_name: &str) -> MeshQuali
             .collect();
         let n_invalid = true_vol.len() - posvol.len();
         if !posvol.is_empty() {
-            posvol.sort_by(|a, c| a.partial_cmp(c).unwrap_or(std::cmp::Ordering::Equal));
+            posvol.sort_by(|a, c| a.total_cmp(c));
             let median = median_sorted(&posvol);
             let mut vmin = Float::INFINITY;
             let mut vmin_idx = 0usize;

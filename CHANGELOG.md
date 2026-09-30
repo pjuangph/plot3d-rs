@@ -19,6 +19,9 @@
   the sign. Supported positive-volume collapsed-line cells keep their
   non-fatal `degenerate_cell` diagnostic, whose message now separates coincident
   nodes from a non-positive corner Jacobian.
+- Quality checks no longer panic on non-finite input; they report a located
+  Error. All sorts use a total order, and block handedness ignores non-finite
+  signed volumes.
 
 ### Added
 
