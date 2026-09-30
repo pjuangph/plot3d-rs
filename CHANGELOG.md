@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.2
+
+### Added
+
+- `to_string_pretty_compact`, the layout for every connectivity JSON file: two-space
+  indentation, but an array of scalars is written on one line (`"lb": [3,0,0]`) and a matrix
+  takes one row per line, instead of `serde_json::to_string_pretty`'s one element per line.
+  The output parses back to the identical value. The `cascade_connectivity` example now
+  writes its file with it.
+
 ## 0.3.1
 
 ### Fixed

@@ -36,6 +36,74 @@ use crate::face_record::{
 };
 use serde_json::{json, Value};
 
+const JSON_INDENT: &str = "  ";
+
+fn json_is_scalar(v: &Value) -> bool {
+    !matches!(v, Value::Array(_) | Value::Object(_))
+}
+
+fn json_inline_array(items: &[Value]) -> String {
+    let parts: Vec<String> = items
+        .iter()
+        .map(|v| serde_json::to_string(v).expect("a scalar serialises"))
+        .collect();
+    format!("[{}]", parts.join(","))
+}
+
+fn json_write_value(v: &Value, depth: usize, out: &mut String) {
+    match v {
+        Value::Array(items) if items.is_empty() => out.push_str("[]"),
+        Value::Array(items) if items.iter().all(json_is_scalar) => {
+            out.push_str(&json_inline_array(items))
+        }
+        Value::Array(items) => {
+            out.push_str("[\n");
+            let pad = JSON_INDENT.repeat(depth + 1);
+            for (i, item) in items.iter().enumerate() {
+                out.push_str(&pad);
+                match item {
+                    Value::Array(row) if row.iter().all(json_is_scalar) => {
+                        out.push_str(&json_inline_array(row))
+                    }
+                    _ => json_write_value(item, depth + 1, out),
+                }
+                out.push_str(if i + 1 < items.len() { ",\n" } else { "\n" });
+            }
+            out.push_str(&JSON_INDENT.repeat(depth));
+            out.push(']');
+        }
+        Value::Object(map) if map.is_empty() => out.push_str("{}"),
+        Value::Object(map) => {
+            out.push_str("{\n");
+            let pad = JSON_INDENT.repeat(depth + 1);
+            let n = map.len();
+            for (i, (k, val)) in map.iter().enumerate() {
+                out.push_str(&pad);
+                out.push_str(&serde_json::to_string(k).expect("a key serialises"));
+                out.push_str(": ");
+                json_write_value(val, depth + 1, out);
+                out.push_str(if i + 1 < n { ",\n" } else { "\n" });
+            }
+            out.push_str(&JSON_INDENT.repeat(depth));
+            out.push('}');
+        }
+        scalar => out.push_str(&serde_json::to_string(scalar).expect("a scalar serialises")),
+    }
+}
+
+/// Pretty-print a connectivity document in the layout every plot3d-rs JSON file uses.
+///
+/// Indentation is two spaces, but an array of scalars is written on one line
+/// (`"lb": [3,0,0]`) and a matrix (an array of scalar arrays) takes one row per line,
+/// instead of `serde_json::to_string_pretty`'s one element per line. The output parses
+/// back to the identical [`Value`]. Use this, not `to_string_pretty`, for any
+/// connectivity file so the files stay short enough to read and diff.
+pub fn to_string_pretty_compact(value: &Value) -> String {
+    let mut out = String::new();
+    json_write_value(value, 0, &mut out);
+    out
+}
+
 /// Convert a [`FaceRecord`] to JSON with directed `lb`/`ub` corners.
 ///
 /// Uses `il/jl/kl` as `lb` and `ih/jh/kh` as `ub` directly — no sorting.
@@ -424,5 +492,47 @@ mod tests {
         });
         let err = face_match_from_json(&json).unwrap_err();
         assert!(err.contains("block1"));
+    }
+}
+
+#[cfg(test)]
+mod compact_json_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_face_record_lays_out_index_triples_on_one_line() {
+        let v = json!({
+            "block1": { "block_index": 3, "lb": [3, 0, 0], "ub": [3, 32, 0] },
+            "permutation_index": 0
+        });
+        let want = "{\n  \"block1\": {\n    \"block_index\": 3,\n    \"lb\": [3,0,0],\n    \"ub\": [3,32,0]\n  },\n  \"permutation_index\": 0\n}";
+        assert_eq!(to_string_pretty_compact(&v), want);
+    }
+
+    #[test]
+    fn a_matrix_takes_one_row_per_line_and_an_array_of_objects_expands() {
+        let v = json!({
+            "m": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            "list": [ { "a": 1 }, { "a": 2 } ],
+            "empty_a": [],
+            "empty_o": {}
+        });
+        let want = "{\n  \"empty_a\": [],\n  \"empty_o\": {},\n  \"list\": [\n    {\n      \"a\": 1\n    },\n    {\n      \"a\": 2\n    }\n  ],\n  \"m\": [\n    [1.0,0.0,0.0],\n    [0.0,1.0,0.0]\n  ]\n}";
+        assert_eq!(to_string_pretty_compact(&v), want);
+    }
+
+    #[test]
+    fn the_output_parses_back_to_the_identical_value() {
+        let v = json!({
+            "s": "quote \" and \\ and \n newline",
+            "n": [1, -2, 3.5e-7, 1e30, true, null, "x"],
+            "nested": { "k": [[1, 2], [3, 4]], "deep": { "z": [ { "q": [7, 8] } ] } },
+            "f": 0.1
+        });
+        let text = to_string_pretty_compact(&v);
+        let back: Value = serde_json::from_str(&text).expect("valid JSON");
+        assert_eq!(back, v);
+        assert!(text.contains("[7,8]"));
     }
 }

@@ -194,7 +194,7 @@ pub use rotational_periodicity::{
 pub mod serialization;
 pub use serialization::{
     face_match_from_json, face_match_to_json, face_record_from_json, face_record_to_json,
-    permutation_matrices_json,
+    permutation_matrices_json, to_string_pretty_compact,
 };
 pub use split_block::{split_blocks, SplitDirection};
 pub use translational_periodicity::{

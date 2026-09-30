@@ -86,7 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "periodic_matches": pm,
         "n_outer_after": remaining_outer.len(),
     });
-    std::fs::write(&out_path, serde_json::to_string_pretty(&result)?)?;
+    std::fs::write(&out_path, plot3d::to_string_pretty_compact(&result))?;
     println!("wrote {}", out_path);
     Ok(())
 }
