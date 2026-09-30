@@ -13,11 +13,23 @@
 //! the cell centroid) so a caller can point the user straight at the
 //! bad cell.
 //!
-//! Severity policy (caller-facing): negative / degenerate cell volume is
-//! `Error` (it breaks the finite-volume discretization); skewness,
-//! aspect ratio, and orthogonality are `Warn` (the solver runs on an
-//! imperfect mesh, the user just needs to know where). Left-handed
-//! blocks are *fixable* — [`make_right_handed`] flips them.
+//! Severity policy (caller-facing): a cell with a non-finite coordinate, a
+//! non-finite volume, or a non-positive divergence-theorem volume is
+//! `Error` (it breaks the finite-volume discretization). Skewness, aspect
+//! ratio, orthogonality, positive-volume collapsed-line cells, and a small
+//! cell volume relative to the block median (global size disparity, which
+//! graded meshes have legitimately) are `Warn` (the solver runs on an
+//! imperfect mesh, the user just needs to know where). A positive integrated
+//! volume is necessary for a usable cell but does not prove the hexahedron is
+//! free of folding or self-intersection; this battery is not a complete
+//! geometric-validity certificate. Left-handed blocks are *fixable* —
+//! [`make_right_handed`] flips them.
+
+/// Revision of the meaning of the findings [`run_all`] produces. Bumped
+/// whenever a check's severity, criterion or scope changes, so consumers that
+/// cache a report can key the cache on it and never replay a verdict computed
+/// under an older meaning.
+pub const MESH_QUALITY_REVISION: u32 = 2;
 
 use crate::{Block, Float};
 
@@ -358,8 +370,11 @@ pub struct Thresholds {
     pub max_ar_interior: Float,
     /// Maximum aspect ratio for wall first-cells (BL legitimately high).
     pub max_ar_wall: Float,
-    /// Minimum cell volume relative to the block median — catches
-    /// near-degenerate cells that survive a sign check.
+    /// Advisory limit on the smallest finite positive cell volume relative
+    /// to the block median. A ratio below it is reported as a `Warn`
+    /// (global size disparity; may reflect intentional grading), never an
+    /// `Error`; cells with non-positive or non-finite volume are `Error`s
+    /// under their own checks.
     pub min_cell_volume_ratio: Float,
     /// Cell layers dropped from each axis-endpoint before computing the
     /// skewness percentiles (excludes wall first-cells from the stats).
@@ -593,7 +608,7 @@ pub struct MeshQualityReport {
 }
 
 impl MeshQualityReport {
-    /// Number of `Error`-severity violations (negative/degenerate volume).
+    /// Number of `Error`-severity violations (non-finite or non-positive volume).
     pub fn n_error(&self) -> usize {
         self.violations
             .iter()
@@ -691,10 +706,13 @@ const MAX_LISTED_NEGATIVE: usize = 64;
 ///
 /// Per block (blocks with fewer than 2 nodes on any axis are skipped —
 /// they have no cells): handedness classification, then the per-cell
-/// checks — negative signed volume, degenerate (min-volume / median),
-/// equiangle skewness, minimum orthogonality, aspect ratio. Negative /
-/// degenerate volume → `Error`; skewness / orthogonality / aspect ratio
-/// → `Warn`.
+/// checks — non-finite coordinates, per-cell divergence-theorem volume
+/// validity (non-finite or non-positive), positive-volume collapsed cells,
+/// small volume relative to the block median, equiangle skewness, minimum
+/// orthogonality, aspect ratio. Non-finite coordinate / non-finite volume /
+/// non-positive volume → `Error`; collapsed cells, small-volume ratio,
+/// skewness / orthogonality / aspect ratio → `Warn`. A block with a
+/// non-finite coordinate reports those cells and skips its remaining checks.
 ///
 /// `run_all` does not mutate the blocks and never panics — it returns the
 /// report and the caller decides what is fatal. Apply [`make_right_handed`]
@@ -712,88 +730,164 @@ pub fn run_all(blocks: &[Block], t: &Thresholds, preset_name: &str) -> MeshQuali
             continue; // no cells — nothing to score
         }
 
-        // --- negative signed volume (per cell) ---
+        // --- per-cell validity: coordinates, then integrated volume ---
         //
-        // Two DIFFERENT defects hide behind "signed volume <= 0", and
-        // conflating them makes a legitimate reference grid unusable:
+        // Every cell is judged on the divergence-theorem volume
+        // (`cell_volume_divergence`), the operator the solver integrates
+        // with, independently of the anchor-corner triple product
+        // (`cell_signed_volume`). The triple product is exact only on a
+        // parallelepiped; it says nothing about cells whose other corners
+        // are displaced, so it cannot certify a cell.
         //
-        //   INVERTED   — the cell is genuinely turned inside out. The
-        //                divergence-theorem volume is negative. Fatal:
-        //                it breaks the finite-volume discretization.
-        //   DEGENERATE — `cell_signed_volume` is <= 0 but the cell still has
-        //                real positive volume. NOT fatal: the grid is valid
-        //                and the reference solver ran on it. Two distinct
-        //                causes, and BOTH must be tolerated:
-        //                  (a) collapsed/pinched grid line — the anchor
-        //                      corner has a zero-length edge, so the triple
-        //                      product is exactly 0 (O-grid pinch lines).
-        //                  (b) corner warp on a high-aspect-ratio cell —
-        //                      `cell_signed_volume` is a ONE-CORNER triple
-        //                      product, exact only on a parallelepiped. On a
-        //                      warped hex it measures the anchor corner's
-        //                      Jacobian, which can go slightly negative while
-        //                      the cell's true volume is comfortably positive.
-        //                      Wall-resolved boundary layers produce exactly
-        //                      this: 0.5 um first cells at AR ~1e5.
-        //
-        // We therefore adjudicate with `cell_volume_divergence` (the
-        // operator the solver actually integrates with) and only call it
-        // an error when that says the cell is inverted.
-        //
-        // CORRECTED 2026-09-18: this block previously required
-        // `cell_has_collapsed_edge()` — an EXACT bit-equality test on two of
-        // the eight corners — before it would accept a positive-volume cell,
-        // which silently narrowed the rule to cause (a) and contradicted the
-        // policy stated immediately above. Cause (b) has no bit-identical
-        // corner pair, so wall cells with genuinely positive volume were
-        // escalated to Error. Found on CMC009 at reduce_factor 1: 32 cells of
-        // 18,923,520, all in the j-max wall layer of 10 blade-surface blocks,
-        // every one with `cell_volume_divergence > 0` (3.2e-16 .. 1e-14, the
-        // expected size of a 0.5 um wall cell) and aspect ratios ~1.2e5. The
-        // same mesh passes at reduce_factor 2 only because merging two wall
-        // layers halves the aspect ratio and the corner Jacobian stays
-        // positive — i.e. coarsening was masking a metric artifact, not a
-        // mesh defect. The cells remain reported, at Warn.
-        let signed = cell_field(b, cell_signed_volume);
-        let mut neg_count = 0usize;
-        let mut degen_count = 0usize;
-        let mut degen_first: Option<(usize, usize, usize, Float)> = None;
-        for (idx, &sv) in signed.iter().enumerate() {
-            if sv > 0.0 {
-                continue;
-            }
-            let (i, j, k) = cell_ijk(idx, nci, ncj);
-            let vd = cell_volume_divergence(b, i, j, k);
-            if vd > 0.0 {
-                // Real positive volume by the operator the solver integrates
-                // with — report, don't abort. Cause (a) or (b) above; we do
-                // not care which, because neither is unusable geometry.
-                degen_count += 1;
-                if degen_first.is_none() {
-                    degen_first = Some((i, j, k, vd));
+        //   non-finite node coordinate -> Error (located; statistics for the
+        //                                 block are skipped, they would be
+        //                                 meaningless)
+        //   non-finite volume          -> Error (arithmetic failure, e.g.
+        //                                 overflow; not an inversion)
+        //   volume <= 0                -> Error (inverted or zero-volume)
+        //   volume > 0, anchor triple product <= 0 -> Warn `degenerate_cell`:
+        //       (a) coincident corner nodes (collapsed / pinched grid line,
+        //           e.g. an O-grid folded onto a camber line), or
+        //       (b) a non-positive corner Jacobian on a warped
+        //           high-aspect-ratio cell (wall-resolved boundary layers).
+        //       The integrated volume is usable in both cases. A positive
+        //       integrated volume does not by itself prove the hexahedron is
+        //       free of folding or self-intersection.
+        if b.x.iter().chain(&b.y).chain(&b.z).any(|v| !v.is_finite()) {
+            let mut n_bad = 0usize;
+            for k in 0..nck {
+                for j in 0..ncj {
+                    for i in 0..nci {
+                        let finite = [0usize, 1].iter().all(|&dk| {
+                            [0usize, 1].iter().all(|&dj| {
+                                [0usize, 1].iter().all(|&di| {
+                                    let (x, y, z) = b.xyz(i + di, j + dj, k + dk);
+                                    x.is_finite() && y.is_finite() && z.is_finite()
+                                })
+                            })
+                        });
+                        if finite {
+                            continue;
+                        }
+                        n_bad += 1;
+                        if n_bad <= MAX_LISTED_NEGATIVE {
+                            violations.push(Violation {
+                                check: "nonfinite_coordinates",
+                                severity: Severity::Error,
+                                actual: Float::NAN,
+                                threshold: 0.0,
+                                location: Some(CellLocation {
+                                    block: bi,
+                                    i,
+                                    j,
+                                    k,
+                                    centroid: cell_centroid(b, i, j, k),
+                                }),
+                                message: "cell has a non-finite (NaN or infinite) \
+                                          corner-node coordinate"
+                                    .to_string(),
+                            });
+                        }
+                    }
                 }
-                continue;
             }
-            neg_count += 1;
-            if neg_count <= MAX_LISTED_NEGATIVE {
+            if n_bad > MAX_LISTED_NEGATIVE {
                 violations.push(Violation {
-                    check: "negative_volume",
+                    check: "nonfinite_coordinates",
                     severity: Severity::Error,
-                    actual: sv,
+                    actual: n_bad as Float,
                     threshold: 0.0,
-                    location: Some(CellLocation {
-                        block: bi,
-                        i,
-                        j,
-                        k,
-                        centroid: cell_centroid(b, i, j, k),
-                    }),
+                    location: None,
                     message: format!(
-                        "signed cell volume {sv:.3e} <= 0 and divergence-theorem \
-                         volume {vd:.3e} (inverted cell)"
+                        "block {bi}: {n_bad} cells with non-finite corner-node \
+                         coordinates ({} more not listed individually)",
+                        n_bad - MAX_LISTED_NEGATIVE
                     ),
                 });
             }
+            continue;
+        }
+
+        let signed = cell_field(b, cell_signed_volume);
+        let true_vol = cell_field(b, cell_volume_divergence);
+        let mut neg_count = 0usize;
+        let mut nonfinite_count = 0usize;
+        let mut degen_count = 0usize;
+        let mut degen_coincident = 0usize;
+        let mut degen_first: Option<(usize, usize, usize, Float)> = None;
+        for (idx, (&sv, &vd)) in signed.iter().zip(true_vol.iter()).enumerate() {
+            let (i, j, k) = cell_ijk(idx, nci, ncj);
+            if !vd.is_finite() {
+                nonfinite_count += 1;
+                if nonfinite_count <= MAX_LISTED_NEGATIVE {
+                    violations.push(Violation {
+                        check: "nonfinite_volume",
+                        severity: Severity::Error,
+                        actual: vd,
+                        threshold: 0.0,
+                        location: Some(CellLocation {
+                            block: bi,
+                            i,
+                            j,
+                            k,
+                            centroid: cell_centroid(b, i, j, k),
+                        }),
+                        message: format!(
+                            "divergence-theorem cell volume is non-finite ({vd}) \
+                             although all node coordinates are finite: arithmetic \
+                             overflow, not an inversion"
+                        ),
+                    });
+                }
+                continue;
+            }
+            if vd <= 0.0 {
+                neg_count += 1;
+                if neg_count <= MAX_LISTED_NEGATIVE {
+                    violations.push(Violation {
+                        check: "negative_volume",
+                        severity: Severity::Error,
+                        actual: vd,
+                        threshold: 0.0,
+                        location: Some(CellLocation {
+                            block: bi,
+                            i,
+                            j,
+                            k,
+                            centroid: cell_centroid(b, i, j, k),
+                        }),
+                        message: format!(
+                            "divergence-theorem cell volume {vd:.3e} <= 0 \
+                             (anchor-corner signed volume {sv:.3e}): inverted or \
+                             zero-volume cell"
+                        ),
+                    });
+                }
+                continue;
+            }
+            if !(sv > 0.0) {
+                degen_count += 1;
+                if cell_has_collapsed_edge(b, i, j, k) {
+                    degen_coincident += 1;
+                }
+                if degen_first.is_none() {
+                    degen_first = Some((i, j, k, vd));
+                }
+            }
+        }
+        if nonfinite_count > MAX_LISTED_NEGATIVE {
+            violations.push(Violation {
+                check: "nonfinite_volume",
+                severity: Severity::Error,
+                actual: nonfinite_count as Float,
+                threshold: 0.0,
+                location: None,
+                message: format!(
+                    "block {bi}: {nonfinite_count} cells with non-finite volume \
+                     ({} more not listed individually)",
+                    nonfinite_count - MAX_LISTED_NEGATIVE
+                ),
+            });
         }
         if neg_count > MAX_LISTED_NEGATIVE {
             violations.push(Violation {
@@ -803,7 +897,7 @@ pub fn run_all(blocks: &[Block], t: &Thresholds, preset_name: &str) -> MeshQuali
                 threshold: 0.0,
                 location: None,
                 message: format!(
-                    "block {bi}: {neg_count} cells with non-positive signed volume \
+                    "block {bi}: {neg_count} cells with non-positive volume \
                      ({} more not listed individually)",
                     neg_count - MAX_LISTED_NEGATIVE
                 ),
@@ -824,82 +918,59 @@ pub fn run_all(blocks: &[Block], t: &Thresholds, preset_name: &str) -> MeshQuali
                     centroid: cell_centroid(b, i, j, k),
                 }),
                 message: format!(
-                    "block {bi}: {degen_count} cell(s) on a COLLAPSED GRID LINE \
-                     (coincident corner nodes). These are not inverted — the \
-                     divergence-theorem volume is positive (e.g. {vd:.3e} at the \
-                     first such cell) — so the discretization is well posed. But \
-                     such cells are orders of magnitude smaller than their \
-                     neighbours and will throttle an explicit local time step; \
-                     merge them into a neighbour rather than advancing them as \
-                     independent control volumes."
+                    "block {bi}: {degen_count} cell(s) with a non-positive \
+                     anchor-corner triple product but positive divergence-theorem \
+                     volume (e.g. {vd:.3e} at the first such cell): \
+                     {degen_coincident} with coincident corner nodes (collapsed \
+                     grid line), {} with distinct nodes (non-positive corner \
+                     Jacobian on a warped cell). They are not inverted, so the \
+                     discretization is well posed, but such cells are typically \
+                     far smaller than their neighbours and will throttle an \
+                     explicit local time step.",
+                    degen_count - degen_coincident
                 ),
             });
         }
 
-        // --- degenerate: min |volume| relative to the block median ---
+        // --- small cell volume relative to the block median ---
         //
-        // Scored on the divergence-theorem volume for the same reason as
-        // above: the corner-anchored triple product reads exactly 0 on a
-        // collapsed grid line, which would peg this ratio at 0 and fire a
-        // spurious Error on a valid grid. A cell that is genuinely tiny
-        // (rather than merely corner-degenerate) still trips this check —
-        // it is a real stiffness hazard — but at Warn severity when the
-        // cell is only degenerate, so the run is not blocked.
-        let true_vol = cell_field(b, cell_volume_divergence);
-        // Renamed 2026-09-18 from `all_degenerate_are_collapsed`. The old name
-        // described the collapsed-edge test that used to gate the block above;
-        // what the condition actually encodes — and all the site below needs —
-        // is "some cells tripped the signed-volume test, and none of them is
-        // genuinely inverted."
-        let nothing_is_inverted = degen_count > 0 && neg_count == 0;
-        let mut absvol: Vec<Float> = true_vol.iter().map(|v| v.abs()).collect();
-        absvol.sort_by(|a, c| a.partial_cmp(c).unwrap_or(std::cmp::Ordering::Equal));
-        let median = median_sorted(&absvol);
-        if median <= 0.0 {
-            violations.push(Violation {
-                check: "min_cell_volume",
-                severity: Severity::Error,
-                actual: 0.0,
-                threshold: 1.0,
-                location: None,
-                message: format!(
-                    "block {bi}: median cell volume is non-positive — block is degenerate"
-                ),
-            });
-        } else {
-            // argmin over the original (unsorted) true-volume magnitudes
+        // Advisory only. A large min/median ratio disparity is a global
+        // size-disparity indicator and is legitimate for graded wall-resolved
+        // meshes; genuinely invalid cells are reported above under their own
+        // Error checks. The statistic uses finite positive volumes only, so a
+        // negative volume is never folded in through an absolute value.
+        let mut posvol: Vec<Float> = true_vol
+            .iter()
+            .copied()
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .collect();
+        let n_invalid = true_vol.len() - posvol.len();
+        if !posvol.is_empty() {
+            posvol.sort_by(|a, c| a.partial_cmp(c).unwrap_or(std::cmp::Ordering::Equal));
+            let median = median_sorted(&posvol);
             let mut vmin = Float::INFINITY;
             let mut vmin_idx = 0usize;
-            for (idx, &sv) in true_vol.iter().enumerate() {
-                let a = sv.abs();
-                if a < vmin {
-                    vmin = a;
+            for (idx, &v) in true_vol.iter().enumerate() {
+                if v.is_finite() && v > 0.0 && v < vmin {
+                    vmin = v;
                     vmin_idx = idx;
                 }
             }
             let ratio = vmin / median;
             if ratio < t.min_cell_volume_ratio {
                 let (i, j, k) = cell_ijk(vmin_idx, nci, ncj);
-                // If nothing in this block is actually inverted, a merely
-                // small cell is the known-degenerate case already reported
-                // above — advisory, not fatal.
-                //
-                // CORRECTED 2026-09-18, same defect as the negative-volume
-                // block above: this also required `cell_has_collapsed_edge()`,
-                // which restricted the exemption to O-grid pinch lines and
-                // escalated a warped-but-valid high-aspect-ratio wall cell to
-                // Error. That conjunct was redundant as well as wrong —
-                // `nothing_is_inverted` already establishes that no cell in
-                // this block has non-positive divergence-theorem volume, which
-                // is the only thing that makes a small cell unusable.
-                let sev = if nothing_is_inverted {
-                    Severity::Warn
+                let subset = if n_invalid > 0 {
+                    format!(
+                        " [computed over the {} valid positive-volume cells; {n_invalid} \
+                         invalid cell(s) excluded]",
+                        posvol.len()
+                    )
                 } else {
-                    Severity::Error
+                    String::new()
                 };
                 violations.push(Violation {
                     check: "min_cell_volume",
-                    severity: sev,
+                    severity: Severity::Warn,
                     actual: ratio,
                     threshold: t.min_cell_volume_ratio,
                     location: Some(CellLocation {
@@ -910,7 +981,9 @@ pub fn run_all(blocks: &[Block], t: &Thresholds, preset_name: &str) -> MeshQuali
                         centroid: cell_centroid(b, i, j, k),
                     }),
                     message: format!(
-                        "min cell volume / median = {ratio:.2e} < {:.0e} (near-degenerate)",
+                        "min cell volume / median = {ratio:.2e} < {:.0e}: small cell \
+                         volume relative to block median (global size disparity; may \
+                         reflect intentional grading){subset}",
                         t.min_cell_volume_ratio
                     ),
                 });
@@ -1526,5 +1599,294 @@ mod tests {
         assert!((percentile(&v, 0.0) - 0.0).abs() < 1e-6);
         assert!((percentile(&v, 1.0) - 4.0).abs() < 1e-6);
         assert!((percentile(&v, 0.5) - 2.0).abs() < 1e-6);
+    }
+
+    // -------------------------------------------------------------------
+    // Volume-validity fixtures
+    // -------------------------------------------------------------------
+
+    /// Cartesian-product block: node `(i,j,k) = (xs[i], ys[j], zs[k])`, in the
+    /// crate's structured ordering (`i` fastest).
+    fn cartesian(xs: &[Float], ys: &[Float], zs: &[Float]) -> Block {
+        let (nx, ny, nz) = (xs.len(), ys.len(), zs.len());
+        let mut x = Vec::with_capacity(nx * ny * nz);
+        let mut y = Vec::with_capacity(nx * ny * nz);
+        let mut z = Vec::with_capacity(nx * ny * nz);
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    x.push(xs[i]);
+                    y.push(ys[j]);
+                    z.push(zs[k]);
+                }
+            }
+        }
+        Block::new(nx, ny, nz, x, y, z)
+    }
+
+    fn errors_of<'a>(r: &'a MeshQualityReport, check: &str) -> Vec<&'a Violation> {
+        r.violations
+            .iter()
+            .filter(|v| v.check == check && v.severity == Severity::Error)
+            .collect()
+    }
+
+    /// Relative agreement bound between the divergence-theorem volume and the
+    /// analytic box volume for fixture A. Each of the six face terms is
+    /// bounded by about 4 dy (x and z faces) or 12 dy (y faces, `y ~ 6 dy` for
+    /// geometric growth 1.2) against a volume of `dy`, so the cancellation
+    /// amplification is at most ~7 and the error at most a few units of
+    /// machine epsilon times 7: about 1e-15 (f64) and 4e-6 (f32). The bounds
+    /// below sit above those figures by 10^5 (f64) and 2.5 (f32) at most,
+    /// and are not tuned to pass.
+    #[cfg(not(feature = "f32"))]
+    const GRADED_VOLUME_REL_TOL: Float = 1e-10;
+    #[cfg(feature = "f32")]
+    const GRADED_VOLUME_REL_TOL: Float = 1e-5;
+
+    /// A valid, positively oriented, strongly graded block is not fatal, and
+    /// its small-volume ratio is reported as a Warn in every preset.
+    ///
+    /// Geometry: 2 cells in `x` and `z` at unit spacing and
+    /// 255 `y` layers with `dy[j] = 1e-12 * 1.2^j` (cumulative sums built in
+    /// f64, then stored as `Float`; the layer width is always at least a sixth
+    /// of the node coordinate, so every node and layer width is representable
+    /// in f32 as well). Every cell is an axis-aligned box, so anchor triple
+    /// product, divergence volume and analytic volume agree in sign.
+    ///
+    /// The precondition block proves the block has no invalid volume, no
+    /// coincident corner and a min/median ratio below all three thresholds,
+    /// so the only route to an Error is the ratio finding itself; the report
+    /// block proves the ratio finding was actually produced (path entered).
+    ///
+    /// Mutations killed: restoring the `degen_count > 0 && neg_count == 0`
+    /// conjunct or making the ratio fatal (Error appears); deleting the
+    /// warning (the finding no longer exists).
+    #[test]
+    fn graded_valid_block_gets_a_warn_not_an_error_in_every_preset() {
+        let (nx, nz, nyc) = (3usize, 3usize, 255usize);
+        let xs: Vec<Float> = (0..nx).map(|i| i as Float).collect();
+        let zs: Vec<Float> = (0..nz).map(|i| i as Float).collect();
+        let mut ys64 = vec![0.0f64];
+        for j in 0..nyc {
+            let dy = 1e-12 * 1.2f64.powi(j as i32);
+            ys64.push(ys64[j] + dy);
+        }
+        let ys: Vec<Float> = ys64.iter().map(|&v| v as Float).collect();
+        let b = cartesian(&xs, &ys, &zs);
+
+        let (nci, ncj, nck) = (nx - 1, nyc, nz - 1);
+        let mut analytic = Vec::new();
+        for k in 0..nck {
+            for j in 0..ncj {
+                for i in 0..nci {
+                    let (p0x, p0y, p0z) = b.xyz(i, j, k);
+                    let (p1x, p1y, p1z) = b.xyz(i + 1, j + 1, k + 1);
+                    let v = (p1x - p0x) * (p1y - p0y) * (p1z - p0z);
+                    let sv = cell_signed_volume(&b, i, j, k);
+                    let vd = cell_volume_divergence(&b, i, j, k);
+                    assert!(v.is_finite() && v > 0.0, "analytic volume at ({i},{j},{k})");
+                    assert!(sv.is_finite() && sv > 0.0, "anchor triple product at ({i},{j},{k})");
+                    assert!(vd.is_finite() && vd > 0.0, "divergence volume at ({i},{j},{k})");
+                    assert!(
+                        ((vd - v) / v).abs() < GRADED_VOLUME_REL_TOL,
+                        "divergence volume {vd:e} vs analytic {v:e} at ({i},{j},{k})"
+                    );
+                    assert!(!cell_has_collapsed_edge(&b, i, j, k));
+                    analytic.push(v);
+                }
+            }
+        }
+        let vmin = analytic.iter().copied().fold(Float::INFINITY, Float::min);
+        let mut sorted = analytic.clone();
+        sorted.sort_by(|a, c| a.partial_cmp(c).unwrap());
+        let ratio = vmin / median_sorted(&sorted);
+        for t in [Thresholds::STRICT, Thresholds::STANDARD, Thresholds::RELAXED] {
+            assert!(
+                ratio < t.min_cell_volume_ratio,
+                "fixture ratio {ratio:e} must be below threshold {:e}",
+                t.min_cell_volume_ratio
+            );
+        }
+
+        for (t, name) in [
+            (Thresholds::STRICT, "STRICT"),
+            (Thresholds::STANDARD, "STANDARD"),
+            (Thresholds::RELAXED, "RELAXED"),
+        ] {
+            let report = run_all(&[b.clone()], &t, name);
+            let found: Vec<_> = report
+                .violations
+                .iter()
+                .filter(|v| v.check == "min_cell_volume")
+                .collect();
+            assert_eq!(found.len(), 1, "{name}: a min_cell_volume finding must exist");
+            assert_eq!(found[0].severity, Severity::Warn, "{name}");
+            let loc = found[0].location.as_ref().expect("located");
+            assert_eq!(loc.j, 0, "{name}: located in the smallest layer");
+            assert!(
+                errors_of(&report, "negative_volume").is_empty()
+                    && errors_of(&report, "min_cell_volume").is_empty(),
+                "{name}: no volume Error"
+            );
+            assert_eq!(report.n_error(), 0, "{name}: {}", report.format_report());
+        }
+    }
+
+    /// One inverted slab (`x = [0,1,0.5,2,3]`) in an otherwise positive block:
+    /// the analytic volume of slab `i = 1` is `-0.5`, the divergence volume
+    /// has the same sign, and exactly the four cells of that slab are
+    /// Errors. Mutation killed: a blanket downgrade of volume errors.
+    #[test]
+    fn inverted_slab_is_fatal_at_the_right_cells() {
+        let xs: [Float; 5] = [0.0, 1.0, 0.5, 2.0, 3.0];
+        let ys: [Float; 3] = [0.0, 1.0, 2.0];
+        let b = cartesian(&xs, &ys, &ys);
+        for k in 0..2 {
+            for j in 0..2 {
+                assert_eq!(cell_signed_volume(&b, 1, j, k), -0.5);
+                assert!((cell_volume_divergence(&b, 1, j, k) + 0.5).abs() < 1e-6);
+                assert!(cell_volume_divergence(&b, 0, j, k) > 0.0);
+            }
+        }
+        let report = run_all(&[b], &Thresholds::STANDARD, "STANDARD");
+        let errs = errors_of(&report, "negative_volume");
+        assert_eq!(errs.len(), 4, "{}", report.format_report());
+        assert!(errs.iter().all(|v| v.location.as_ref().unwrap().i == 1));
+        assert_eq!(report.n_error(), 4);
+    }
+
+    /// A zero-thickness slab (`x = [0,1,1,2,3]`) has exactly zero signed and
+    /// divergence volume and is an Error at slab `i = 1`. Mutation killed:
+    /// changing the `vd <= 0` rejection to `vd < 0`.
+    #[test]
+    fn zero_volume_slab_is_fatal() {
+        let xs: [Float; 5] = [0.0, 1.0, 1.0, 2.0, 3.0];
+        let ys: [Float; 3] = [0.0, 1.0, 2.0];
+        let b = cartesian(&xs, &ys, &ys);
+        for k in 0..2 {
+            for j in 0..2 {
+                assert_eq!(cell_signed_volume(&b, 1, j, k), 0.0);
+                assert_eq!(cell_volume_divergence(&b, 1, j, k), 0.0);
+            }
+        }
+        let report = run_all(&[b], &Thresholds::STANDARD, "STANDARD");
+        let errs = errors_of(&report, "negative_volume");
+        assert_eq!(errs.len(), 4, "{}", report.format_report());
+        assert!(errs.iter().all(|v| v.location.as_ref().unwrap().i == 1));
+    }
+
+    /// Positive anchor corner, negative integrated volume.
+    ///
+    /// Bottom-plane nodes in the crate's ordering (`i` fastest, cell edges
+    /// `e_i = P(i+1,j,k) - P`, `e_j = P(i,j+1,k) - P`): `p00 = (0,0)`,
+    /// `p10 = (1,0)`, `p01 = (0,1)`, `p11 = (-2,-2)`, extruded to `z = 1`.
+    /// The anchor edges are `(1,0,0)`, `(0,1,0)`, `(0,0,1)` (triple product
+    /// `+1`); the quad `p00,p10,p11,p01` has shoelace area `-2`, so the
+    /// extruded volume is `-2`, and the divergence-theorem volume reproduces
+    /// it exactly (small dyadic values, exact in f32 and f64). Both
+    /// properties are asserted before the report is examined.
+    /// Mutation killed: restoring `if sv > 0 { continue; }`.
+    #[test]
+    fn positive_anchor_negative_volume_is_fatal() {
+        let bottom: [(Float, Float); 4] = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (-2.0, -2.0)];
+        let mut x = Vec::new();
+        let mut y = Vec::new();
+        let mut z = Vec::new();
+        for k in 0..2 {
+            for &(px, py) in &bottom {
+                x.push(px);
+                y.push(py);
+                z.push(k as Float);
+            }
+        }
+        let b = Block::new(2, 2, 2, x, y, z);
+
+        let (ei, ej, ek) = cell_edges(&b, 0, 0, 0);
+        assert_eq!(ei, [1.0, 0.0, 0.0]);
+        assert_eq!(ej, [0.0, 1.0, 0.0]);
+        assert_eq!(ek, [0.0, 0.0, 1.0]);
+        assert!(cell_signed_volume(&b, 0, 0, 0) > 0.0, "anchor basis is positive");
+        let poly = [(0.0, 0.0), (1.0, 0.0), (-2.0, -2.0), (0.0, 1.0)];
+        let mut area2 = 0.0 as Float;
+        for n in 0..4 {
+            let (x0, y0) = poly[n];
+            let (x1, y1) = poly[(n + 1) % 4];
+            area2 += x0 * y1 - x1 * y0;
+        }
+        assert_eq!(area2 / 2.0, -2.0, "analytic signed area");
+        assert!((cell_volume_divergence(&b, 0, 0, 0) + 2.0).abs() < 1e-5);
+
+        let report = run_all(&[b], &Thresholds::STANDARD, "STANDARD");
+        let errs = errors_of(&report, "negative_volume");
+        assert_eq!(errs.len(), 1, "{}", report.format_report());
+        let loc = errs[0].location.as_ref().unwrap();
+        assert_eq!((loc.i, loc.j, loc.k), (0, 0, 0));
+    }
+
+    /// A non-finite coordinate is a located Error under
+    /// `nonfinite_coordinates` and nothing else is reported: the block's
+    /// statistics are skipped. Cell `(2,2,2)` of a 4-node cube owns the node
+    /// `(3,3,3)`, which is NOT on any of its anchor's three edges
+    /// (`(3,2,2)`, `(2,3,2)`, `(2,2,3)`), so the anchor triple product stays
+    /// finite and positive (asserted: the old anchor-only pass accepted it).
+    /// A corrupted anchor node is covered too: the eight cells that own it are
+    /// all reported. Mutation killed: removing the finite-coordinate check.
+    #[test]
+    fn non_finite_coordinates_are_a_located_error() {
+        for bad in [Float::NAN, Float::INFINITY, Float::NEG_INFINITY] {
+            for comp in 0..3 {
+                // Far corner, outside the anchor's edges.
+                let mut b = unit_cube(4);
+                let idx = b.idx(3, 3, 3);
+                match comp {
+                    0 => b.x[idx] = bad,
+                    1 => b.y[idx] = bad,
+                    _ => b.z[idx] = bad,
+                }
+                assert!(cell_signed_volume(&b, 2, 2, 2) > 0.0);
+                assert!(!cell_volume_divergence(&b, 2, 2, 2).is_finite());
+                let report = run_all(&[b], &Thresholds::STANDARD, "STANDARD");
+                assert_eq!(report.violations.len(), 1, "{}", report.format_report());
+                let v = &report.violations[0];
+                assert_eq!(v.check, "nonfinite_coordinates");
+                assert_eq!(v.severity, Severity::Error);
+                let loc = v.location.as_ref().unwrap();
+                assert_eq!((loc.block, loc.i, loc.j, loc.k), (0, 2, 2, 2));
+
+                // Interior node shared by eight cells.
+                let mut b = unit_cube(4);
+                let idx = b.idx(2, 2, 2);
+                match comp {
+                    0 => b.x[idx] = bad,
+                    1 => b.y[idx] = bad,
+                    _ => b.z[idx] = bad,
+                }
+                let report = run_all(&[b], &Thresholds::STANDARD, "STANDARD");
+                assert!(report
+                    .violations
+                    .iter()
+                    .all(|v| v.check == "nonfinite_coordinates" && v.severity == Severity::Error));
+                let mut cells: Vec<_> = report
+                    .violations
+                    .iter()
+                    .map(|v| {
+                        let l = v.location.as_ref().unwrap();
+                        (l.i, l.j, l.k)
+                    })
+                    .collect();
+                cells.sort();
+                let mut expect = Vec::new();
+                for k in 1..3 {
+                    for j in 1..3 {
+                        for i in 1..3 {
+                            expect.push((i, j, k));
+                        }
+                    }
+                }
+                expect.sort();
+                assert_eq!(cells, expect);
+            }
+        }
     }
 }

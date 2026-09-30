@@ -177,6 +177,7 @@ pub use metrics::{compute_cell_centers, compute_cell_volumes, compute_face_metri
 pub use mesh_quality::{
     block_handedness, cell_aspect_ratio, cell_distinct_node_count, cell_signed_volume,
     cell_skewness, element_type_inventory, make_right_handed, run_all as run_mesh_quality,
+    MESH_QUALITY_REVISION,
     BlockElementSummary, CellLocation, ElementInventory, ElementType, Handedness,
     MeshQualityReport, Severity, Thresholds, Violation,
 };
