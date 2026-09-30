@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.3.1
+
+### Fixed
+
+- False fatal mesh-quality reports for positively oriented, graded grids. The
+  minimum cell-volume / block-median ratio (`min_cell_volume`) is now always
+  advisory (`Warn`) and no longer depends on the presence of corner-degenerate
+  cells elsewhere in the block. It is computed over finite positive volumes
+  only, and its message now reads "small cell volume relative to block median
+  (global size disparity; may reflect intentional grading)".
+- Every cell's divergence-theorem volume is now validated independently of its
+  anchor-corner triple product. Non-finite node coordinates
+  (`nonfinite_coordinates`), non-finite volumes (`nonfinite_volume`) and
+  volumes `<= 0` (`negative_volume`) are located `Error`s. Previously a cell
+  with a positive anchor-corner triple product but a negative integrated volume
+  was never examined, and the volume statistic took an absolute value that hid
+  the sign. Supported positive-volume collapsed-line cells keep their
+  non-fatal `degenerate_cell` diagnostic, whose message now separates coincident
+  nodes from a non-positive corner Jacobian.
+
+### Added
+
+- `MESH_QUALITY_REVISION`, bumped whenever the meaning of a quality finding
+  changes, so consumers that cache a report can key the cache on it.
+
+### Known limitations, not changed here
+
+- Block handedness compares the median signed volume against
+  `max(abs(signed_volume)) * 1e-12 + MIN_POSITIVE`, so extreme grading can
+  label a positively oriented block `Degenerate`.
+- The "wall aspect ratio" value is the maximum over all cells; no wall boundary
+  information is used.
+- Thin blocks (fewer than three cells along an axis) fall back to treating all
+  cells as interior for the aspect ratio, and disable skewness boundary
+  cropping in every direction.
+- `Thresholds::STRICT.max_ar_interior` (100000) is looser than
+  `STANDARD.max_ar_interior` (5000), so the presets are not uniformly ordered.
+- `edge_angle_deg` uses an absolute `1e-30` denominator floor, which is
+  scale-dependent for very small geometry.
+- The divergence-theorem volume sums terms with absolute face-centroid
+  coordinates, so tiny cells far from the origin lose precision to
+  cancellation.
+
 ## 0.3.0
 
 ### Added
