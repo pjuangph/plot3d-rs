@@ -86,13 +86,16 @@ impl PointGrid3 {
         for kx in lo.0..=hi.0 {
             for ky in lo.1..=hi.1 {
                 for kz in lo.2..=hi.2 {
-                    let Some(ids) = self.map.get(&(kx, ky, kz)) else { continue };
+                    let Some(ids) = self.map.get(&(kx, ky, kz)) else {
+                        continue;
+                    };
                     for &i in ids {
                         if !pred(i) {
                             continue;
                         }
                         let q = self.pts[i];
-                        let d2 = (p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2);
+                        let d2 =
+                            (p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2);
                         if d2 <= tol2 && best.map_or(true, |(_, b)| d2 < b) {
                             best = Some((i, d2));
                         }
@@ -161,7 +164,9 @@ impl PointGrid2 {
         let mut best: Option<(usize, Float)> = None;
         for kx in lo.0..=hi.0 {
             for ky in lo.1..=hi.1 {
-                let Some(ids) = self.map.get(&(kx, ky)) else { continue };
+                let Some(ids) = self.map.get(&(kx, ky)) else {
+                    continue;
+                };
                 for &i in ids {
                     if !pred(i) {
                         continue;
@@ -182,7 +187,10 @@ impl PointGrid2 {
     }
 
     pub fn count_with_partner(&self, queries: &[[Float; 2]], tol: Float) -> usize {
-        queries.iter().filter(|q| self.nearest_within(**q, tol).is_some()).count()
+        queries
+            .iter()
+            .filter(|q| self.nearest_within(**q, tol).is_some())
+            .count()
     }
 }
 

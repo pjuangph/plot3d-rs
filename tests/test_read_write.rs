@@ -1,6 +1,6 @@
 use plot3d::utils::write_fortran_record;
 use plot3d::{
-    read_plot3d_ascii, read_plot3d_binary, write_plot3d, Block, BinaryFormat, Endian, Float,
+    read_plot3d_ascii, read_plot3d_binary, write_plot3d, BinaryFormat, Block, Endian, Float,
     FloatPrecision,
 };
 
@@ -112,12 +112,19 @@ fn test_fortran_roundtrip_concatenated() {
     let blocks = sample_blocks();
     for (elabel, endian) in [("le", Endian::Little), ("be", Endian::Big)] {
         for (plabel, precision) in [("f32", FloatPrecision::F32), ("f64", FloatPrecision::F64)] {
-            let path = std::env::temp_dir()
-                .join(format!("plot3d_fortran_rt_{elabel}_{plabel}.xyzb"));
+            let path =
+                std::env::temp_dir().join(format!("plot3d_fortran_rt_{elabel}_{plabel}.xyzb"));
             let path = path.to_str().unwrap();
-            write_plot3d(path, &blocks, true, BinaryFormat::Fortran, precision, endian).unwrap();
-            let round =
-                read_plot3d_binary(path, BinaryFormat::Fortran, precision, endian).unwrap();
+            write_plot3d(
+                path,
+                &blocks,
+                true,
+                BinaryFormat::Fortran,
+                precision,
+                endian,
+            )
+            .unwrap();
+            let round = read_plot3d_binary(path, BinaryFormat::Fortran, precision, endian).unwrap();
             assert_blocks_eq(&blocks, &round);
             let _ = std::fs::remove_file(path);
         }

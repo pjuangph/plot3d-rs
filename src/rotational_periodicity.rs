@@ -427,9 +427,8 @@ fn rotational_periodicity_core(
                     // Try both rotation directions for this candidate
                     let mut found_corners = false;
                     for &rot_matrix in &[rot_forward, rot_backward] {
-                        let corners_hit = count_rotated_corners_on_face(
-                            face_a, face_b, block_b, rot_matrix, tol,
-                        );
+                        let corners_hit =
+                            count_rotated_corners_on_face(face_a, face_b, block_b, rot_matrix, tol);
                         if corners_hit >= 2 {
                             match_found = Some((idx_a, idx_b, rot_matrix));
                             found_corners = true;
@@ -562,8 +561,7 @@ fn rotational_periodicity_core(
                         }
                         // Identity matrix since edges are already extracted from rotated block
                         let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-                        let match_count =
-                            count_edge_matches(edges_a, &edges_b, identity, tol);
+                        let match_count = count_edge_matches(edges_a, &edges_b, identity, tol);
                         if match_count >= 2 {
                             match_found = Some((idx_a, idx_b, is_forward));
                             break 'phase3_search;

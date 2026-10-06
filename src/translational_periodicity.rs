@@ -204,8 +204,9 @@ fn build_periodic_match(
     let ub1 = [rec1.ih, rec1.jh, rec1.kh];
     let lb2_orig = [rec2_orig.il, rec2_orig.jl, rec2_orig.kl];
     let ub2_orig = [rec2_orig.ih, rec2_orig.jh, rec2_orig.kh];
-    let (corrected_lb2, corrected_ub2) =
-        compute_periodic_lb_ub(blk1, lb1, ub1, blk2, lb2_orig, ub2_orig, axis_idx, shift_amt);
+    let (corrected_lb2, corrected_ub2) = compute_periodic_lb_ub(
+        blk1, lb1, ub1, blk2, lb2_orig, ub2_orig, axis_idx, shift_amt,
+    );
     let mut rec2 = rec2_orig.clone();
     rec2.il = corrected_lb2[0];
     rec2.jl = corrected_lb2[1];
@@ -381,7 +382,9 @@ pub fn translational_periodicity_with_tols(
         if consumed_lower.contains(&face_l.index_key()) {
             continue;
         }
-        let Some(bl) = face_l.block_index() else { continue };
+        let Some(bl) = face_l.block_index() else {
+            continue;
+        };
         let matched = upper_pool.iter().find_map(|face_u| {
             if consumed_upper.contains(&face_u.index_key()) {
                 return None;
@@ -422,16 +425,15 @@ pub fn translational_periodicity_with_tols(
             let blk2_r = &blocks_reduced[rec2_orig.block_index];
             let lb1 = [rec1.il, rec1.jl, rec1.kl];
             let lb2 = [rec2_orig.il, rec2_orig.jl, rec2_orig.kl];
-            let shift_amt = if block_axis_val(blk1_r, lb1, axis_idx)
-                < block_axis_val(blk2_r, lb2, axis_idx)
-            {
-                delta_axis
-            } else {
-                -delta_axis
-            };
-            if let Some(fm) =
-                build_periodic_match(blk1_r, &rec1, blk2_r, &rec2_orig, axis_idx, shift_amt, full_tol)
-            {
+            let shift_amt =
+                if block_axis_val(blk1_r, lb1, axis_idx) < block_axis_val(blk2_r, lb2, axis_idx) {
+                    delta_axis
+                } else {
+                    -delta_axis
+                };
+            if let Some(fm) = build_periodic_match(
+                blk1_r, &rec1, blk2_r, &rec2_orig, axis_idx, shift_amt, full_tol,
+            ) {
                 consumed_lower.insert(face_l.index_key());
                 consumed_upper.insert(face_u.index_key());
                 original_block2_recs.push(rec2_orig);
@@ -539,16 +541,15 @@ pub fn translational_periodicity_with_tols(
             let blk2_r = &blocks_reduced[rec2_orig.block_index];
             let lb1 = [rec1.il, rec1.jl, rec1.kl];
             let lb2 = [rec2_orig.il, rec2_orig.jl, rec2_orig.kl];
-            let shift_amt = if block_axis_val(blk1_r, lb1, axis_idx)
-                < block_axis_val(blk2_r, lb2, axis_idx)
-            {
-                delta_axis
-            } else {
-                -delta_axis
-            };
-            if let Some(fm) =
-                build_periodic_match(blk1_r, &rec1, blk2_r, &rec2_orig, axis_idx, shift_amt, tol_pair)
-            {
+            let shift_amt =
+                if block_axis_val(blk1_r, lb1, axis_idx) < block_axis_val(blk2_r, lb2, axis_idx) {
+                    delta_axis
+                } else {
+                    -delta_axis
+                };
+            if let Some(fm) = build_periodic_match(
+                blk1_r, &rec1, blk2_r, &rec2_orig, axis_idx, shift_amt, tol_pair,
+            ) {
                 accepted = Some((idx, fm, tol_pair));
                 break;
             }
@@ -715,11 +716,7 @@ pub fn translational_periodicity_with_tols(
         }
 
         // Best-coverage pairs first; retire only fully-covered sides.
-        pair_hits.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0)
-                .unwrap()
-                .then(b.1.cmp(&a.1))
-        });
+        pair_hits.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap().then(b.1.cmp(&a.1)));
         let mut fully_used: HashSet<FaceKey> = HashSet::new();
         for (frac, _n_shared, ia, ib, d_pair, tol_pair) in pair_hits {
             let (fa, fb) = (&remaining_faces[ia], &remaining_faces[ib]);
@@ -767,8 +764,13 @@ pub fn translational_periodicity_with_tols(
             rec.scale_indices(gcd_to_use);
         }
         // Reduced-grid discovery is a proposal; certify on the full grid.
-        let (kept, kept_recs) =
-            revalidate_translational(blocks, periodic_matches, &original_block2_recs, &match_tols, axis_idx);
+        let (kept, kept_recs) = revalidate_translational(
+            blocks,
+            periodic_matches,
+            &original_block2_recs,
+            &match_tols,
+            axis_idx,
+        );
         periodic_matches = kept;
         original_block2_recs = kept_recs;
     }
@@ -823,7 +825,11 @@ fn revalidate_translational(
     };
     let mut kept = Vec::with_capacity(proposed.len());
     let mut kept_recs = Vec::with_capacity(proposed.len());
-    for ((fm, orig2), &tol) in proposed.into_iter().zip(original_block2_recs).zip(match_tols) {
+    for ((fm, orig2), &tol) in proposed
+        .into_iter()
+        .zip(original_block2_recs)
+        .zip(match_tols)
+    {
         let ok = (|| {
             let b1 = blocks.get(fm.block1.block_index)?;
             let b2 = blocks.get(fm.block2.block_index)?;
@@ -1064,7 +1070,10 @@ mod tests {
         face.set_block_index(0);
         assert_eq!(median_inplane_spacing(&face, &block, "x"), None);
         let tols = TranslationalTolerances::default();
-        assert_eq!(pair_tolerance(&face, &face, &[block], None, "x", &tols), None);
+        assert_eq!(
+            pair_tolerance(&face, &face, &[block], None, "x", &tols),
+            None
+        );
     }
 
     #[test]
@@ -1094,7 +1103,8 @@ mod tests {
             }
         }
         let block = Block::new(3, 3, 1, x, y, z);
-        let face = crate::block_face_functions::create_face_from_diagonals(&block, 0, 0, 0, 2, 2, 0);
+        let face =
+            crate::block_face_functions::create_face_from_diagonals(&block, 0, 0, 0, 2, 2, 0);
         let mut face = face;
         face.set_block_index(0);
         let blocks = [block];
@@ -1112,6 +1122,9 @@ mod tests {
             adaptive_floor: 10.0,
             ..custom
         };
-        assert_eq!(pair_tolerance(&face, &face, &blocks, None, "z", &floored), Some(10.0));
+        assert_eq!(
+            pair_tolerance(&face, &face, &blocks, None, "z", &floored),
+            Some(10.0)
+        );
     }
 }

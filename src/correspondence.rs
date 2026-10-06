@@ -38,9 +38,17 @@ pub struct Patch {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PatchError {
     /// Not exactly one constant axis (a volume, an edge or a point).
-    NotAFace { block: usize, lo: [usize; 3], hi: [usize; 3] },
+    NotAFace {
+        block: usize,
+        lo: [usize; 3],
+        hi: [usize; 3],
+    },
     /// The range exceeds the block's dimensions.
-    OutOfBlock { block: usize, hi: [usize; 3], dims: [usize; 3] },
+    OutOfBlock {
+        block: usize,
+        hi: [usize; 3],
+        dims: [usize; 3],
+    },
     /// The block index exceeds the block list.
     BlockOutOfRange { block: usize, nblocks: usize },
 }
@@ -52,7 +60,10 @@ impl std::fmt::Display for PatchError {
                 write!(f, "block {block} lo={lo:?} hi={hi:?} is not a face patch (exactly one constant axis required)")
             }
             PatchError::OutOfBlock { block, hi, dims } => {
-                write!(f, "block {block} patch hi={hi:?} exceeds block dims {dims:?}")
+                write!(
+                    f,
+                    "block {block} patch hi={hi:?} exceeds block dims {dims:?}"
+                )
             }
             PatchError::BlockOutOfRange { block, nblocks } => {
                 write!(f, "block {block} out of range ({nblocks} blocks)")
@@ -377,7 +388,9 @@ where
 
     let mut passing: Vec<(u8, NodeDiscrepancy)> = Vec::new();
     for &perm in &ordered {
-        let scan = scan_permutation(block_a, patch_a, block_b, patch_b, &transform, tol, perm, true);
+        let scan = scan_permutation(
+            block_a, patch_a, block_b, patch_b, &transform, tol, perm, true,
+        );
         if scan.passed {
             passing.push((perm, scan.worst));
         }
@@ -396,8 +409,9 @@ where
         0 => {
             let mut best: Option<(u8, NodeDiscrepancy)> = None;
             for &perm in &ordered {
-                let scan =
-                    scan_permutation(block_a, patch_a, block_b, patch_b, &transform, tol, perm, false);
+                let scan = scan_permutation(
+                    block_a, patch_a, block_b, patch_b, &transform, tol, perm, false,
+                );
                 let better = match &best {
                     None => true,
                     Some((_, w)) => scan.worst.distance < w.distance,
@@ -440,7 +454,9 @@ where
     if permuted_dims(perm, dims_b.0, dims_b.1) != dims_a {
         return Err(MappingFailure::IncompatibleDimensions { dims_a, dims_b });
     }
-    let scan = scan_permutation(block_a, patch_a, block_b, patch_b, &transform, tol, perm, false);
+    let scan = scan_permutation(
+        block_a, patch_a, block_b, patch_b, &transform, tol, perm, false,
+    );
     if scan.passed {
         Ok(CertifiedMapping {
             permutation_index: perm,
@@ -487,7 +503,12 @@ pub fn correspondence_points(patch_a: &Patch, patch_b: &Patch, perm: u8) -> Vec<
 /// Patch B's [`FaceRecord`] with directed diagonal corners: `il/jl/kl` is the
 /// image of A's `lo` corner and `ih/jh/kh` the image of A's `hi` corner, so a
 /// reversed axis shows as `il > ih` (the GridPro/GlennHT convention).
-pub fn directed_record(patch_a: &Patch, patch_b: &Patch, perm: u8, id: Option<usize>) -> FaceRecord {
+pub fn directed_record(
+    patch_a: &Patch,
+    patch_b: &Patch,
+    perm: u8,
+    id: Option<usize>,
+) -> FaceRecord {
     let (nu_a, nv_a) = patch_a.dims();
     let (nu_b, nv_b) = patch_b.dims();
     let (u0, v0) = map_uv(perm, 0, 0, nu_b, nv_b);

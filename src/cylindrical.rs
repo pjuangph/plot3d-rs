@@ -238,12 +238,8 @@ mod tests {
         // global_max_radius = 1.0, tol_rel = 1e-6 => tol_abs = 1e-6.
         // r = 1e-3 here is three orders of magnitude above that.
         let r = 1e-3;
-        let near_axis_face = quad_face([
-            [0.0, r, 0.0],
-            [1.0, r, 0.0],
-            [1.0, r, 0.0],
-            [0.0, r, 0.0],
-        ]);
+        let near_axis_face =
+            quad_face([[0.0, r, 0.0], [1.0, r, 0.0], [1.0, r, 0.0], [0.0, r, 0.0]]);
         let (records, faces) = find_axis_faces(&blocks, &[near_axis_face], 'x', 1e-6);
         assert!(faces.is_empty(), "r={r} above tol_abs must not classify");
         assert!(records.is_empty());

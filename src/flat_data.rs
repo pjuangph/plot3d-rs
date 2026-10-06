@@ -49,7 +49,6 @@ use crate::Float;
 #[derive(Clone, Debug)]
 pub struct FlatMesh {
     // -- Cell data (length = n_cells) --
-
     /// Total number of cells across all blocks.
     pub n_cells: usize,
     /// Cell volume computed via the divergence-theorem method.
@@ -63,7 +62,6 @@ pub struct FlatMesh {
     pub cell_center_z: Vec<Float>,
 
     // -- Face data (length = n_faces) --
-
     /// Total number of faces (interior + cross-block + boundary).
     pub n_faces: usize,
     /// Owner cell for each face. The face area vector points away from
@@ -90,13 +88,11 @@ pub struct FlatMesh {
     pub face_centroid_z: Vec<Float>,
 
     // -- Boundary face metadata --
-
     /// Surface ID for boundary faces (used for BC assignment).
     /// `-1` for interior and cross-block faces.
     pub face_surface_id: Vec<i32>,
 
     // -- Reverse mapping (for post-processing / writing results back to Plot3D) --
-
     /// Which original block each cell came from. Length = `n_cells`.
     pub cell_block_id: Vec<u32>,
     /// Local cell index within the original block. Length = `n_cells`.
@@ -116,8 +112,16 @@ impl FlatMesh {
         let (min_vol, max_vol) = if self.cell_volume.is_empty() {
             (0.0 as Float, 0.0 as Float)
         } else {
-            let min_v = self.cell_volume.iter().cloned().fold(Float::INFINITY, Float::min);
-            let max_v = self.cell_volume.iter().cloned().fold(Float::NEG_INFINITY, Float::max);
+            let min_v = self
+                .cell_volume
+                .iter()
+                .cloned()
+                .fold(Float::INFINITY, Float::min);
+            let max_v = self
+                .cell_volume
+                .iter()
+                .cloned()
+                .fold(Float::NEG_INFINITY, Float::max);
             (min_v, max_v)
         };
 
@@ -132,8 +136,7 @@ impl FlatMesh {
              \x20 Volume (total): {:.6e}\n\
              \x20 Volume (min):   {:.6e}\n\
              \x20 Volume (max):   {:.6e}",
-            self.n_cells, self.n_faces, n_interior, n_boundary,
-            total_vol, min_vol, max_vol,
+            self.n_cells, self.n_faces, n_interior, n_boundary, total_vol, min_vol, max_vol,
         )
     }
 }
@@ -396,11 +399,7 @@ pub fn build_flat_mesh(
         // The cell adjacent to this boundary face:
         // If the face is at the low end (const_v == 0), the cell is at cell index 0 along that axis.
         // If at the high end, the cell is at cell index n_cells_along_axis - 1.
-        let cell_const = if is_high {
-            n_nodes[axis] - 2
-        } else {
-            0
-        };
+        let cell_const = if is_high { n_nodes[axis] - 2 } else { 0 };
 
         for v in 0..n_v {
             for u in 0..n_u {
@@ -413,14 +412,10 @@ pub fn build_flat_mesh(
 
                 // Retrieve the face area vector from the appropriate face metric.
                 // The face metric index depends on which face family this is.
-                let (ax, ay, az) = boundary_face_area(
-                    axis, const_v, ijk, blk, fm,
-                );
+                let (ax, ay, az) = boundary_face_area(axis, const_v, ijk, blk, fm);
                 // Face centroid (a position — unaffected by the low-end
                 // sign flip applied to the area vector below).
-                let (cx, cy, cz) = boundary_face_centroid(
-                    axis, const_v, ijk, blk, fm,
-                );
+                let (cx, cy, cz) = boundary_face_centroid(axis, const_v, ijk, blk, fm);
 
                 face_owner.push(gid as u32);
                 face_neighbor.push(-1);
@@ -649,9 +644,7 @@ fn cross_block_face_data(
         None => {
             // Legacy heuristic — kept for callers that haven't run
             // the cascade verifier (e.g. unit tests with no orientation).
-            let swap = (n_u1 == n_v2)
-                && (n_v1 == n_u2)
-                && !((n_u1 == n_u2) && (n_v1 == n_v2));
+            let swap = (n_u1 == n_v2) && (n_v1 == n_u2) && !((n_u1 == n_u2) && (n_v1 == n_v2));
             let u_rev = f2_raw[var_axes2[0]][0] > f2_raw[var_axes2[0]][1];
             let v_rev = f2_raw[var_axes2[1]][0] > f2_raw[var_axes2[1]][1];
             (swap, u_rev, v_rev)
@@ -679,17 +672,13 @@ fn cross_block_face_data(
             ijk2[var_axes2[0]] = f2_lo[var_axes2[0]] + u2_mapped;
             ijk2[var_axes2[1]] = f2_lo[var_axes2[1]] + v2_mapped;
 
-            let gid1 = graph.block_offset[b1]
-                + cell_index(ijk1[0], ijk1[1], ijk1[2], nci1, ncj1);
-            let gid2 = graph.block_offset[b2]
-                + cell_index(ijk2[0], ijk2[1], ijk2[2], nci2, ncj2);
+            let gid1 = graph.block_offset[b1] + cell_index(ijk1[0], ijk1[1], ijk1[2], nci1, ncj1);
+            let gid2 = graph.block_offset[b2] + cell_index(ijk2[0], ijk2[1], ijk2[2], nci2, ncj2);
 
             // Face area vector from block1's metrics at the interface face.
             // For the high-side face, the area vector already points in the +axis
             // direction (toward block2). For the low-side face, we negate.
-            let (mut ax, mut ay, mut az) = boundary_face_area(
-                axis1, f1_const_val, ijk1, blk1, fm1,
-            );
+            let (mut ax, mut ay, mut az) = boundary_face_area(axis1, f1_const_val, ijk1, blk1, fm1);
             if !is_high1 {
                 // Face at low end of block1: outward from block1 is the -axis
                 // direction, which means toward block2. The raw area vector points
@@ -700,9 +689,7 @@ fn cross_block_face_data(
             }
 
             // Face centroid (a position — no sign flip for low-end faces).
-            let (cx, cy, cz) = boundary_face_centroid(
-                axis1, f1_const_val, ijk1, blk1, fm1,
-            );
+            let (cx, cy, cz) = boundary_face_centroid(axis1, f1_const_val, ijk1, blk1, fm1);
 
             result.push((gid1 as u32, gid2 as u32, ax, ay, az, cx, cy, cz));
         }
@@ -723,16 +710,35 @@ mod tests {
 
     /// Build a uniform block spanning [x0, x1] x [y0, y1] x [z0, z1].
     fn uniform_block(
-        ni: usize, nj: usize, nk: usize,
-        x0: f64, x1: f64, y0: f64, y1: f64, z0: f64, z1: f64,
+        ni: usize,
+        nj: usize,
+        nk: usize,
+        x0: f64,
+        x1: f64,
+        y0: f64,
+        y1: f64,
+        z0: f64,
+        z1: f64,
     ) -> Block {
         let n = ni * nj * nk;
         let mut x = Vec::with_capacity(n);
         let mut y = Vec::with_capacity(n);
         let mut z = Vec::with_capacity(n);
-        let dx = if ni > 1 { (x1 - x0) / (ni as f64 - 1.0) } else { 0.0 };
-        let dy = if nj > 1 { (y1 - y0) / (nj as f64 - 1.0) } else { 0.0 };
-        let dz = if nk > 1 { (z1 - z0) / (nk as f64 - 1.0) } else { 0.0 };
+        let dx = if ni > 1 {
+            (x1 - x0) / (ni as f64 - 1.0)
+        } else {
+            0.0
+        };
+        let dy = if nj > 1 {
+            (y1 - y0) / (nj as f64 - 1.0)
+        } else {
+            0.0
+        };
+        let dz = if nk > 1 {
+            (z1 - z0) / (nk as f64 - 1.0)
+        } else {
+            0.0
+        };
         for k in 0..nk {
             for j in 0..nj {
                 for i in 0..ni {
@@ -753,17 +759,83 @@ mod tests {
         // All 6 block faces are outer boundaries
         let outer_faces = vec![
             // imin face
-            FaceRecord { block_index: 0, il: 0, jl: 0, kl: 0, ih: 0, jh: 2, kh: 2, id: Some(1), u_physical: None, v_physical: None },
+            FaceRecord {
+                block_index: 0,
+                il: 0,
+                jl: 0,
+                kl: 0,
+                ih: 0,
+                jh: 2,
+                kh: 2,
+                id: Some(1),
+                u_physical: None,
+                v_physical: None,
+            },
             // imax face
-            FaceRecord { block_index: 0, il: 2, jl: 0, kl: 0, ih: 2, jh: 2, kh: 2, id: Some(2), u_physical: None, v_physical: None },
+            FaceRecord {
+                block_index: 0,
+                il: 2,
+                jl: 0,
+                kl: 0,
+                ih: 2,
+                jh: 2,
+                kh: 2,
+                id: Some(2),
+                u_physical: None,
+                v_physical: None,
+            },
             // jmin face
-            FaceRecord { block_index: 0, il: 0, jl: 0, kl: 0, ih: 2, jh: 0, kh: 2, id: Some(3), u_physical: None, v_physical: None },
+            FaceRecord {
+                block_index: 0,
+                il: 0,
+                jl: 0,
+                kl: 0,
+                ih: 2,
+                jh: 0,
+                kh: 2,
+                id: Some(3),
+                u_physical: None,
+                v_physical: None,
+            },
             // jmax face
-            FaceRecord { block_index: 0, il: 0, jl: 2, kl: 0, ih: 2, jh: 2, kh: 2, id: Some(4), u_physical: None, v_physical: None },
+            FaceRecord {
+                block_index: 0,
+                il: 0,
+                jl: 2,
+                kl: 0,
+                ih: 2,
+                jh: 2,
+                kh: 2,
+                id: Some(4),
+                u_physical: None,
+                v_physical: None,
+            },
             // kmin face
-            FaceRecord { block_index: 0, il: 0, jl: 0, kl: 0, ih: 2, jh: 2, kh: 0, id: Some(5), u_physical: None, v_physical: None },
+            FaceRecord {
+                block_index: 0,
+                il: 0,
+                jl: 0,
+                kl: 0,
+                ih: 2,
+                jh: 2,
+                kh: 0,
+                id: Some(5),
+                u_physical: None,
+                v_physical: None,
+            },
             // kmax face
-            FaceRecord { block_index: 0, il: 0, jl: 0, kl: 2, ih: 2, jh: 2, kh: 2, id: Some(6), u_physical: None, v_physical: None },
+            FaceRecord {
+                block_index: 0,
+                il: 0,
+                jl: 0,
+                kl: 2,
+                ih: 2,
+                jh: 2,
+                kh: 2,
+                id: Some(6),
+                u_physical: None,
+                v_physical: None,
+            },
         ];
 
         let mesh = build_flat_mesh(&[blk], &[], &outer_faces);
@@ -785,9 +857,17 @@ mod tests {
         // Boundary faces: 4 per outer face x 6 faces = 24
         // Total: 12 + 24 = 36
         let n_boundary = mesh.face_neighbor.iter().filter(|&&n| n < 0).count();
-        assert_eq!(n_boundary, 24, "Expected 24 boundary faces, got {}", n_boundary);
+        assert_eq!(
+            n_boundary, 24,
+            "Expected 24 boundary faces, got {}",
+            n_boundary
+        );
         let n_interior = mesh.n_faces - n_boundary;
-        assert_eq!(n_interior, 12, "Expected 12 interior faces, got {}", n_interior);
+        assert_eq!(
+            n_interior, 12,
+            "Expected 12 interior faces, got {}",
+            n_interior
+        );
 
         // Stats should not panic
         let stats = mesh.stats();
@@ -802,12 +882,28 @@ mod tests {
 
         let fm = FaceMatch {
             block1: FaceRecord {
-                block_index: 0, il: 2, jl: 0, kl: 0, ih: 2, jh: 2, kh: 2,
-                id: None, u_physical: None, v_physical: None,
+                block_index: 0,
+                il: 2,
+                jl: 0,
+                kl: 0,
+                ih: 2,
+                jh: 2,
+                kh: 2,
+                id: None,
+                u_physical: None,
+                v_physical: None,
             },
             block2: FaceRecord {
-                block_index: 1, il: 0, jl: 0, kl: 0, ih: 0, jh: 2, kh: 2,
-                id: None, u_physical: None, v_physical: None,
+                block_index: 1,
+                il: 0,
+                jl: 0,
+                kl: 0,
+                ih: 0,
+                jh: 2,
+                kh: 2,
+                id: None,
+                u_physical: None,
+                v_physical: None,
             },
             points: vec![],
             orientation: None,
@@ -822,7 +918,9 @@ mod tests {
             .filter(|&f| {
                 let o = mesh.face_owner[f] as usize;
                 let n = mesh.face_neighbor[f];
-                if n < 0 { return false; }
+                if n < 0 {
+                    return false;
+                }
                 let n = n as usize;
                 mesh.cell_block_id[o] != mesh.cell_block_id[n]
             })

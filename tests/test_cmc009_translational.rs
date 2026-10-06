@@ -85,8 +85,7 @@ fn translational_y_pitch_resolves_to_index_zero() {
         [[1, 0], [0, 1]],
     )];
 
-    let (verified, mismatched) =
-        verify_translational_periodicity(&blocks, &pf, None, 'y', TOL);
+    let (verified, mismatched) = verify_translational_periodicity(&blocks, &pf, None, 'y', TOL);
 
     assert_eq!(mismatched.len(), 0, "exact translational match must verify");
     assert_eq!(verified.len(), 1);
@@ -111,8 +110,7 @@ fn translational_z_span_resolves_to_index_zero() {
         [[1, 0], [0, 1]],
     )];
 
-    let (verified, mismatched) =
-        verify_translational_periodicity(&blocks, &pf, None, 'z', TOL);
+    let (verified, mismatched) = verify_translational_periodicity(&blocks, &pf, None, 'z', TOL);
 
     assert_eq!(mismatched.len(), 0);
     assert_eq!(verified.len(), 1);
@@ -142,8 +140,7 @@ fn translational_wrong_axis_does_not_match() {
         [[1, 0], [0, 1]],
     )];
 
-    let (verified, mismatched) =
-        verify_translational_periodicity(&blocks, &pf, None, 'z', TOL);
+    let (verified, mismatched) = verify_translational_periodicity(&blocks, &pf, None, 'z', TOL);
 
     assert_eq!(verified.len(), 0, "axis mismatch must not silently pass");
     assert_eq!(mismatched.len(), 1);

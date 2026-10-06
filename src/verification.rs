@@ -167,10 +167,7 @@ pub fn verify_match(
 /// Compute the maximum Euclidean distance between corresponding points.
 ///
 /// Returns `Float::MAX` if the arrays differ in length.
-fn max_point_distance(
-    pts_a: &[(Float, Float, Float)],
-    pts_b: &[(Float, Float, Float)],
-) -> Float {
+fn max_point_distance(pts_a: &[(Float, Float, Float)], pts_b: &[(Float, Float, Float)]) -> Float {
     if pts_a.len() != pts_b.len() {
         return Float::MAX;
     }
@@ -339,13 +336,15 @@ pub fn verify_connectivity(
         //     CMC009) that pre-date the orientation field. The verifier
         //     scans all 8 canonical permutations and back-fills the
         //     winning index.
-        let declared_perm = sfm.orientation.as_ref().map(|o| {
-            match o.permutation_matrix {
-                Some(m) => Orientation::index_from_permutation_matrix(m)
-                    .unwrap_or(o.permutation_index),
+        let declared_perm = sfm
+            .orientation
+            .as_ref()
+            .map(|o| match o.permutation_matrix {
+                Some(m) => {
+                    Orientation::index_from_permutation_matrix(m).unwrap_or(o.permutation_index)
+                }
                 None => o.permutation_index,
-            }
-        });
+            });
 
         let mut matched = false;
         let mut best_dist: Float = Float::MAX;
@@ -356,10 +355,7 @@ pub fn verify_connectivity(
             if out_nu == nu_a && out_nv == nv_a && verify_match(&pts_a, &permuted, tol) {
                 let mut corrected = face_matches[idx].clone();
                 let plane = determine_plane(b1, b2);
-                let preserved_matrix = sfm
-                    .orientation
-                    .as_ref()
-                    .and_then(|o| o.permutation_matrix);
+                let preserved_matrix = sfm.orientation.as_ref().and_then(|o| o.permutation_matrix);
                 corrected.orientation = Some(Orientation {
                     permutation_index: perm_idx,
                     plane,
@@ -369,7 +365,9 @@ pub fn verify_connectivity(
                 matched = true;
             } else {
                 let d = max_point_distance(&pts_a, &permuted);
-                if d < best_dist { best_dist = d; }
+                if d < best_dist {
+                    best_dist = d;
+                }
             }
         } else {
             // UNDECLARED path — discover the orientation by trying all
@@ -401,33 +399,58 @@ pub fn verify_connectivity(
                 let ca1 = b1.constant_axis();
                 let ca2 = b2.constant_axis();
                 let axis_label = |a: Option<usize>| match a {
-                    Some(0) => "I", Some(1) => "J", Some(2) => "K", _ => "?"
+                    Some(0) => "I",
+                    Some(1) => "J",
+                    Some(2) => "K",
+                    _ => "?",
                 };
-                let cross_tag = if ca1 != ca2 { "CROSS-AXIS" } else { "SAME-AXIS" };
+                let cross_tag = if ca1 != ca2 {
+                    "CROSS-AXIS"
+                } else {
+                    "SAME-AXIS"
+                };
                 // Diagnostic-only scan of all 8 perms for reporting
                 // (this is NOT a fallback — `matched` stays false).
                 for p in 0u8..8 {
                     let (permuted, out_nu, out_nv) = apply_permutation(&pts_b, nu_b, nv_b, p);
-                    if out_nu != nu_a || out_nv != nv_a { continue; }
+                    if out_nu != nu_a || out_nv != nv_a {
+                        continue;
+                    }
                     let d = max_point_distance(&pts_a, &permuted);
-                    if d < best_dist { best_dist = d; }
+                    if d < best_dist {
+                        best_dist = d;
+                    }
                 }
-                eprintln!("verify_connectivity: MISMATCH at index {} [{}]", idx, cross_tag);
+                eprintln!(
+                    "verify_connectivity: MISMATCH at index {} [{}]",
+                    idx, cross_tag
+                );
                 eprintln!(
                     "  block {}: lo=({},{},{}) hi=({},{},{}) const={}",
                     orig.block1.block_index,
-                    orig.block1.i_lo(), orig.block1.j_lo(), orig.block1.k_lo(),
-                    orig.block1.i_hi(), orig.block1.j_hi(), orig.block1.k_hi(),
+                    orig.block1.i_lo(),
+                    orig.block1.j_lo(),
+                    orig.block1.k_lo(),
+                    orig.block1.i_hi(),
+                    orig.block1.j_hi(),
+                    orig.block1.k_hi(),
                     axis_label(ca1)
                 );
                 eprintln!(
                     "  block {}: lo=({},{},{}) hi=({},{},{}) const={}",
                     orig.block2.block_index,
-                    orig.block2.i_lo(), orig.block2.j_lo(), orig.block2.k_lo(),
-                    orig.block2.i_hi(), orig.block2.j_hi(), orig.block2.k_hi(),
+                    orig.block2.i_lo(),
+                    orig.block2.j_lo(),
+                    orig.block2.k_lo(),
+                    orig.block2.i_hi(),
+                    orig.block2.j_hi(),
+                    orig.block2.k_hi(),
                     axis_label(ca2)
                 );
-                eprintln!("  grid_a: {}x{}, grid_b: {}x{}, best_dist: {:.6e}", nu_a, nv_a, nu_b, nv_b, best_dist);
+                eprintln!(
+                    "  grid_a: {}x{}, grid_b: {}x{}, best_dist: {:.6e}",
+                    nu_a, nv_a, nu_b, nv_b, best_dist
+                );
             }
             let _ = best_dist;
             mismatched.push(face_matches[idx].clone());
@@ -531,20 +554,14 @@ pub fn verify_periodicity(
                 None => None,
             };
             if let Some(perm_idx) = declared_perm {
-                let (permuted, out_nu, out_nv) =
-                    apply_permutation(&pts_b, nu_b, nv_b, perm_idx);
-                if out_nu == nu_a
-                    && out_nv == nv_a
-                    && verify_match(&pts_a, &permuted, tol)
-                {
+                let (permuted, out_nu, out_nv) = apply_permutation(&pts_b, nu_b, nv_b, perm_idx);
+                if out_nu == nu_a && out_nv == nv_a && verify_match(&pts_a, &permuted, tol) {
                     let mut corrected = face_matches[idx].clone();
                     let plane = determine_plane(b1, b2);
                     // Back-fill the canonical index (preserves any
                     // declared matrix on the original entry).
-                    let preserved_matrix = sfm
-                        .orientation
-                        .as_ref()
-                        .and_then(|o| o.permutation_matrix);
+                    let preserved_matrix =
+                        sfm.orientation.as_ref().and_then(|o| o.permutation_matrix);
                     corrected.orientation = Some(Orientation {
                         permutation_index: perm_idx,
                         plane,
@@ -565,8 +582,7 @@ pub fn verify_periodicity(
             // distance.  This is NOT a fallback — `found` stays false if
             // the declared orientation didn't match within `tol`.
             for p in 0u8..8 {
-                let (permuted, out_nu, out_nv) =
-                    apply_permutation(&pts_b, nu_b, nv_b, p);
+                let (permuted, out_nu, out_nv) = apply_permutation(&pts_b, nu_b, nv_b, p);
                 if out_nu != nu_a || out_nv != nv_a {
                     continue;
                 }
@@ -585,29 +601,51 @@ pub fn verify_periodicity(
                 let ca1 = b1.constant_axis();
                 let ca2 = b2.constant_axis();
                 let axis_label = |a: Option<usize>| match a {
-                    Some(0) => "I", Some(1) => "J", Some(2) => "K", _ => "?"
+                    Some(0) => "I",
+                    Some(1) => "J",
+                    Some(2) => "K",
+                    _ => "?",
                 };
-                let cross_tag = if ca1 != ca2 { "CROSS-AXIS" } else { "SAME-AXIS" };
-                eprintln!("verify_periodicity: MISMATCH at index {} [{}]", idx, cross_tag);
+                let cross_tag = if ca1 != ca2 {
+                    "CROSS-AXIS"
+                } else {
+                    "SAME-AXIS"
+                };
+                eprintln!(
+                    "verify_periodicity: MISMATCH at index {} [{}]",
+                    idx, cross_tag
+                );
                 eprintln!(
                     "  block {}: lo=({},{},{}) hi=({},{},{}) const={}",
                     orig.block1.block_index,
-                    orig.block1.i_lo(), orig.block1.j_lo(), orig.block1.k_lo(),
-                    orig.block1.i_hi(), orig.block1.j_hi(), orig.block1.k_hi(),
+                    orig.block1.i_lo(),
+                    orig.block1.j_lo(),
+                    orig.block1.k_lo(),
+                    orig.block1.i_hi(),
+                    orig.block1.j_hi(),
+                    orig.block1.k_hi(),
                     axis_label(ca1)
                 );
                 eprintln!(
                     "  block {}: lo=({},{},{}) hi=({},{},{}) const={}",
                     orig.block2.block_index,
-                    orig.block2.i_lo(), orig.block2.j_lo(), orig.block2.k_lo(),
-                    orig.block2.i_hi(), orig.block2.j_hi(), orig.block2.k_hi(),
+                    orig.block2.i_lo(),
+                    orig.block2.j_lo(),
+                    orig.block2.k_lo(),
+                    orig.block2.i_hi(),
+                    orig.block2.j_hi(),
+                    orig.block2.k_hi(),
                     axis_label(ca2)
                 );
                 if let Some((nua, nva, nub, nvb)) = best_dims {
-                    eprintln!("  grid_a: {}x{}, grid_b: {}x{}, best_dist: {:.6e}", nua, nva, nub, nvb, best_dist);
+                    eprintln!(
+                        "  grid_a: {}x{}, grid_b: {}x{}, best_dist: {:.6e}",
+                        nua, nva, nub, nvb, best_dist
+                    );
                 }
             }
-            let _ = best_dist; let _ = best_dims;
+            let _ = best_dist;
+            let _ = best_dims;
             mismatched.push(face_matches[idx].clone());
         }
     }
@@ -776,7 +814,6 @@ pub fn verify_translational_periodicity(
                 break;
             }
 
-
             let grid_a = match extract_canonical_grid(block1_shifted, b1) {
                 Some(g) => g,
                 None => continue,
@@ -790,26 +827,21 @@ pub fn verify_translational_periodicity(
             // DECLARED path: orientation present → matrix-honest, no
             // brute-force. UNDECLARED path: scan all 8 perms (legacy
             // connectivity.json without the orientation field).
-            let declared_perm = sfm.orientation.as_ref().map(|o| {
-                match o.permutation_matrix {
-                    Some(m) => Orientation::index_from_permutation_matrix(m)
-                        .unwrap_or(o.permutation_index),
-                    None => o.permutation_index,
-                }
-            });
+            let declared_perm =
+                sfm.orientation
+                    .as_ref()
+                    .map(|o| match o.permutation_matrix {
+                        Some(m) => Orientation::index_from_permutation_matrix(m)
+                            .unwrap_or(o.permutation_index),
+                        None => o.permutation_index,
+                    });
             if let Some(perm_idx) = declared_perm {
-                let (permuted, out_nu, out_nv) =
-                    apply_permutation(&pts_b, nu_b, nv_b, perm_idx);
-                if out_nu == nu_a
-                    && out_nv == nv_a
-                    && verify_match(&pts_a, &permuted, tol)
-                {
+                let (permuted, out_nu, out_nv) = apply_permutation(&pts_b, nu_b, nv_b, perm_idx);
+                if out_nu == nu_a && out_nv == nv_a && verify_match(&pts_a, &permuted, tol) {
                     let mut corrected = face_matches[idx].clone();
                     let plane = determine_plane(b1, b2);
-                    let preserved_matrix = sfm
-                        .orientation
-                        .as_ref()
-                        .and_then(|o| o.permutation_matrix);
+                    let preserved_matrix =
+                        sfm.orientation.as_ref().and_then(|o| o.permutation_matrix);
                     corrected.orientation = Some(Orientation {
                         permutation_index: perm_idx,
                         plane,
@@ -840,8 +872,7 @@ pub fn verify_translational_periodicity(
 
             // Diagnostic-only scan of all 8 perms (NOT a fallback).
             for p in 0u8..8 {
-                let (permuted, out_nu, out_nv) =
-                    apply_permutation(&pts_b, nu_b, nv_b, p);
+                let (permuted, out_nu, out_nv) = apply_permutation(&pts_b, nu_b, nv_b, p);
                 if out_nu != nu_a || out_nv != nv_a {
                     continue;
                 }
@@ -867,7 +898,11 @@ pub fn verify_translational_periodicity(
                     Some(2) => "K",
                     _ => "?",
                 };
-                let cross_tag = if ca1 != ca2 { "CROSS-AXIS" } else { "SAME-AXIS" };
+                let cross_tag = if ca1 != ca2 {
+                    "CROSS-AXIS"
+                } else {
+                    "SAME-AXIS"
+                };
                 eprintln!(
                     "verify_translational_periodicity[{}, Δ_per_match={:+.3e}]: \
                      MISMATCH at index {} [{}]",
@@ -876,15 +911,23 @@ pub fn verify_translational_periodicity(
                 eprintln!(
                     "  block {}: lo=({},{},{}) hi=({},{},{}) const={}",
                     orig.block1.block_index,
-                    orig.block1.i_lo(), orig.block1.j_lo(), orig.block1.k_lo(),
-                    orig.block1.i_hi(), orig.block1.j_hi(), orig.block1.k_hi(),
+                    orig.block1.i_lo(),
+                    orig.block1.j_lo(),
+                    orig.block1.k_lo(),
+                    orig.block1.i_hi(),
+                    orig.block1.j_hi(),
+                    orig.block1.k_hi(),
                     axis_label(ca1),
                 );
                 eprintln!(
                     "  block {}: lo=({},{},{}) hi=({},{},{}) const={}",
                     orig.block2.block_index,
-                    orig.block2.i_lo(), orig.block2.j_lo(), orig.block2.k_lo(),
-                    orig.block2.i_hi(), orig.block2.j_hi(), orig.block2.k_hi(),
+                    orig.block2.i_lo(),
+                    orig.block2.j_lo(),
+                    orig.block2.k_lo(),
+                    orig.block2.i_hi(),
+                    orig.block2.j_hi(),
+                    orig.block2.k_hi(),
                     axis_label(ca2),
                 );
                 if let Some((nua, nva, nub, nvb)) = best_dims {

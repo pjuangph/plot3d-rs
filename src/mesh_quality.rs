@@ -65,12 +65,7 @@ fn norm(a: [Float; 3]) -> Float {
 /// The three edge vectors `(e_i, e_j, e_k)` emanating from corner
 /// `(i, j, k)` of cell `(i, j, k)`. Matches `metrics_3d.cell_edges`:
 /// `e_i = P(i+1,j,k) - P(i,j,k)`, etc.
-fn cell_edges(
-    b: &Block,
-    i: usize,
-    j: usize,
-    k: usize,
-) -> ([Float; 3], [Float; 3], [Float; 3]) {
+fn cell_edges(b: &Block, i: usize, j: usize, k: usize) -> ([Float; 3], [Float; 3], [Float; 3]) {
     let p = |ii: usize, jj: usize, kk: usize| -> [Float; 3] {
         let (x, y, z) = b.xyz(ii, jj, kk);
         [x, y, z]
@@ -255,10 +250,7 @@ fn cell_dims(b: &Block) -> (usize, usize, usize) {
 /// Compute a per-cell scalar field over a block, cell-indexed
 /// `(k * ncj + j) * nci + i`. Returns an empty `Vec` for a block with no
 /// cells (any cell dimension `0`).
-fn cell_field<F: Fn(&Block, usize, usize, usize) -> Float>(
-    b: &Block,
-    f: F,
-) -> Vec<Float> {
+fn cell_field<F: Fn(&Block, usize, usize, usize) -> Float>(b: &Block, f: F) -> Vec<Float> {
     let (nci, ncj, nck) = cell_dims(b);
     if nci == 0 || ncj == 0 || nck == 0 {
         return Vec::new();
@@ -546,8 +538,7 @@ fn stats_dropped(
     if field.is_empty() {
         return (0.0, 0.0, 0);
     }
-    let can_crop =
-        drop > 0 && nci > 2 * drop && ncj > 2 * drop && nck > 2 * drop;
+    let can_crop = drop > 0 && nci > 2 * drop && ncj > 2 * drop && nck > 2 * drop;
     let span = |n: usize| -> (usize, usize) {
         if can_crop {
             (drop, n - drop)
@@ -661,9 +652,7 @@ impl MeshQualityReport {
             .map(|(b, _)| b)
             .collect();
         if !left.is_empty() {
-            s.push_str(&format!(
-                "  left-handed blocks (need flipping): {left:?}\n"
-            ));
+            s.push_str(&format!("  left-handed blocks (need flipping): {left:?}\n"));
         }
         if !degen.is_empty() {
             s.push_str(&format!("  degenerate blocks: {degen:?}\n"));
@@ -690,9 +679,7 @@ impl MeshQualityReport {
                     loc.centroid[2],
                     v.message,
                 )),
-                None => {
-                    s.push_str(&format!("  [{sev}] {}: {}\n", v.check, v.message))
-                }
+                None => s.push_str(&format!("  [{sev}] {}: {}\n", v.check, v.message)),
             }
         }
         s
@@ -1006,10 +993,7 @@ pub fn run_all(blocks: &[Block], t: &Thresholds, preset_name: &str) -> MeshQuali
                 actual: skew_p99,
                 threshold: t.skew_p99_deg,
                 location: None,
-                message: format!(
-                    "skewness p99 = {skew_p99:.1}° > {:.1}°",
-                    t.skew_p99_deg
-                ),
+                message: format!("skewness p99 = {skew_p99:.1}° > {:.1}°", t.skew_p99_deg),
             });
         }
         if skew_max > t.skew_max_deg {
@@ -1030,8 +1014,7 @@ pub fn run_all(blocks: &[Block], t: &Thresholds, preset_name: &str) -> MeshQuali
             });
         }
         // orthogonality: global min angle = 90 - global max skewness
-        let global_skew_max =
-            skew.iter().copied().fold(Float::NEG_INFINITY, Float::max);
+        let global_skew_max = skew.iter().copied().fold(Float::NEG_INFINITY, Float::max);
         let ortho_min = 90.0 - global_skew_max;
         if ortho_min < t.min_orthogonality_deg {
             violations.push(Violation {
@@ -1076,12 +1059,7 @@ pub fn run_all(blocks: &[Block], t: &Thresholds, preset_name: &str) -> MeshQuali
                         wall_idx = idx;
                     }
                     let is_interior = !interior_ok
-                        || (i > 0
-                            && i < nci - 1
-                            && j > 0
-                            && j < ncj - 1
-                            && k > 0
-                            && k < nck - 1);
+                        || (i > 0 && i < nci - 1 && j > 0 && j < ncj - 1 && k > 0 && k < nck - 1);
                     if is_interior && v > interior_max {
                         interior_max = v;
                         interior_idx = idx;
@@ -1123,10 +1101,7 @@ pub fn run_all(blocks: &[Block], t: &Thresholds, preset_name: &str) -> MeshQuali
                     k,
                     centroid: cell_centroid(b, i, j, k),
                 }),
-                message: format!(
-                    "wall aspect ratio {wall_max:.0} > {:.0}",
-                    t.max_ar_wall
-                ),
+                message: format!("wall aspect ratio {wall_max:.0} > {:.0}", t.max_ar_wall),
             });
         }
     }
@@ -1279,9 +1254,7 @@ pub fn element_type_inventory(blocks: &[Block]) -> ElementInventory {
         for k in 0..nck {
             for j in 0..ncj {
                 for i in 0..nci {
-                    match ElementType::from_distinct_nodes(
-                        cell_distinct_node_count(b, i, j, k),
-                    ) {
+                    match ElementType::from_distinct_nodes(cell_distinct_node_count(b, i, j, k)) {
                         ElementType::Hex => s.n_hex += 1,
                         ElementType::Prism => s.n_prism += 1,
                         ElementType::Pyramid => s.n_pyramid += 1,
@@ -1298,8 +1271,12 @@ pub fn element_type_inventory(blocks: &[Block]) -> ElementInventory {
         }
         if s.min_volume < g_min {
             g_min = s.min_volume;
-            g_cell =
-                (bi, s.min_volume_cell.0, s.min_volume_cell.1, s.min_volume_cell.2);
+            g_cell = (
+                bi,
+                s.min_volume_cell.0,
+                s.min_volume_cell.1,
+                s.min_volume_cell.2,
+            );
         }
         t_hex += s.n_hex;
         t_prism += s.n_prism;
@@ -1332,7 +1309,10 @@ impl ElementInventory {
             self.total
         ));
         s.push_str(&format!("  {:>10} ELEMENTS OF HEX     TYPE\n", self.n_hex));
-        s.push_str(&format!("  {:>10} ELEMENTS OF PRISM   TYPE\n", self.n_prism));
+        s.push_str(&format!(
+            "  {:>10} ELEMENTS OF PRISM   TYPE\n",
+            self.n_prism
+        ));
         s.push_str(&format!(
             "  {:>10} ELEMENTS OF PYRAMID TYPE\n",
             self.n_pyramid
@@ -1451,7 +1431,11 @@ mod tests {
 
         // And the collapsed cell must not become the block's reported max.
         let report = run_all(&[b], &Thresholds::STANDARD, "STANDARD");
-        for v in report.violations.iter().filter(|v| v.check == "aspect_ratio") {
+        for v in report
+            .violations
+            .iter()
+            .filter(|v| v.check == "aspect_ratio")
+        {
             assert!(
                 v.actual.is_finite(),
                 "an aspect_ratio violation was raised with a non-finite value \
@@ -1515,8 +1499,7 @@ mod tests {
             report
                 .violations
                 .iter()
-                .any(|v| v.check == "negative_volume"
-                    && matches!(v.severity, Severity::Error)),
+                .any(|v| v.check == "negative_volume" && matches!(v.severity, Severity::Error)),
             "a genuinely inverted cell must remain a fatal negative_volume error"
         );
     }
@@ -1547,8 +1530,7 @@ mod tests {
         // Mirror the cube along i → left-handed.
         let cube = unit_cube(5);
         let dims = (cube.imax, cube.jmax, cube.kmax);
-        let (mut x, mut y, mut z) =
-            (cube.x.clone(), cube.y.clone(), cube.z.clone());
+        let (mut x, mut y, mut z) = (cube.x.clone(), cube.y.clone(), cube.z.clone());
         crate::block_analysis::flip_block_axis(&mut x, &mut y, &mut z, dims, 0);
         let lh = Block::new(cube.imax, cube.jmax, cube.kmax, x, y, z);
         assert_eq!(block_handedness(&lh), Handedness::LeftHanded);
@@ -1586,9 +1568,12 @@ mod tests {
         // Genuine inversion remains fatal — see
         // `genuinely_inverted_cell_is_still_fatal`.
         assert!(
-            report.violations.iter().any(|v| v.check == "degenerate_cell"
-                && v.severity == Severity::Warn
-                && v.location.is_some()),
+            report
+                .violations
+                .iter()
+                .any(|v| v.check == "degenerate_cell"
+                    && v.severity == Severity::Warn
+                    && v.location.is_some()),
             "a collapsed cell must be flagged (with a location) as degenerate"
         );
         assert_eq!(
@@ -1691,8 +1676,14 @@ mod tests {
                     let sv = cell_signed_volume(&b, i, j, k);
                     let vd = cell_volume_divergence(&b, i, j, k);
                     assert!(v.is_finite() && v > 0.0, "analytic volume at ({i},{j},{k})");
-                    assert!(sv.is_finite() && sv > 0.0, "anchor triple product at ({i},{j},{k})");
-                    assert!(vd.is_finite() && vd > 0.0, "divergence volume at ({i},{j},{k})");
+                    assert!(
+                        sv.is_finite() && sv > 0.0,
+                        "anchor triple product at ({i},{j},{k})"
+                    );
+                    assert!(
+                        vd.is_finite() && vd > 0.0,
+                        "divergence volume at ({i},{j},{k})"
+                    );
                     assert!(
                         ((vd - v) / v).abs() < GRADED_VOLUME_REL_TOL,
                         "divergence volume {vd:e} vs analytic {v:e} at ({i},{j},{k})"
@@ -1706,7 +1697,11 @@ mod tests {
         let mut sorted = analytic.clone();
         sorted.sort_by(|a, c| a.partial_cmp(c).unwrap());
         let ratio = vmin / median_sorted(&sorted);
-        for t in [Thresholds::STRICT, Thresholds::STANDARD, Thresholds::RELAXED] {
+        for t in [
+            Thresholds::STRICT,
+            Thresholds::STANDARD,
+            Thresholds::RELAXED,
+        ] {
             assert!(
                 ratio < t.min_cell_volume_ratio,
                 "fixture ratio {ratio:e} must be below threshold {:e}",
@@ -1725,7 +1720,11 @@ mod tests {
                 .iter()
                 .filter(|v| v.check == "min_cell_volume")
                 .collect();
-            assert_eq!(found.len(), 1, "{name}: a min_cell_volume finding must exist");
+            assert_eq!(
+                found.len(),
+                1,
+                "{name}: a min_cell_volume finding must exist"
+            );
             assert_eq!(found[0].severity, Severity::Warn, "{name}");
             let loc = found[0].location.as_ref().expect("located");
             assert_eq!(loc.j, 0, "{name}: located in the smallest layer");
@@ -1811,7 +1810,10 @@ mod tests {
         assert_eq!(ei, [1.0, 0.0, 0.0]);
         assert_eq!(ej, [0.0, 1.0, 0.0]);
         assert_eq!(ek, [0.0, 0.0, 1.0]);
-        assert!(cell_signed_volume(&b, 0, 0, 0) > 0.0, "anchor basis is positive");
+        assert!(
+            cell_signed_volume(&b, 0, 0, 0) > 0.0,
+            "anchor basis is positive"
+        );
         let poly = [(0.0, 0.0), (1.0, 0.0), (-2.0, -2.0), (0.0, 1.0)];
         let mut area2 = 0.0 as Float;
         for n in 0..4 {

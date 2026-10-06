@@ -24,7 +24,11 @@ fn canon(m: &FaceMatch) -> serde_json::Value {
     };
     let s1 = side(&m.block1);
     let s2 = side(&m.block2);
-    let (a, b) = if (s2.0, s2.1) < (s1.0, s1.1) { (s2, s1) } else { (s1, s2) };
+    let (a, b) = if (s2.0, s2.1) < (s1.0, s1.1) {
+        (s2, s1)
+    } else {
+        (s1, s2)
+    };
     serde_json::json!({
         "b1": a.0, "lo1": a.1, "hi1": a.2,
         "b2": b.0, "lo2": b.1, "hi2": b.2,
@@ -47,7 +51,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let blocks = read_plot3d_ascii(mesh_path)?;
     println!(
         "blocks: {:?}",
-        blocks.iter().map(|b| (b.imax, b.jmax, b.kmax)).collect::<Vec<_>>()
+        blocks
+            .iter()
+            .map(|b| (b.imax, b.jmax, b.kmax))
+            .collect::<Vec<_>>()
     );
 
     let t0 = std::time::Instant::now();

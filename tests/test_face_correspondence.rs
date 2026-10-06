@@ -11,8 +11,8 @@ use plot3d::{
     certify_correspondence, connectivity, connectivity_fast, connectivity_fast_with_tol,
     corner_match, create_face_from_diagonals, full_face_match, get_outer_faces,
     get_outer_faces_with_tol, rotated_periodicity, rotated_periodicity_with_tol,
-    translational_periodicity, translational_periodicity_with_tols, Block, Face, FaceRecord,
-    Float, MappingFailure, Patch, TranslationalTolerances,
+    translational_periodicity, translational_periodicity_with_tols, Block, Face, FaceRecord, Float,
+    MappingFailure, Patch, TranslationalTolerances,
 };
 
 /// Structured block with `dims` nodes at `origin + d * (i, j, k)`, passed
@@ -25,7 +25,11 @@ fn grid_block(
 ) -> Block {
     let [ni, nj, nk] = dims;
     let n = ni * nj * nk;
-    let (mut x, mut y, mut z) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
+    let (mut x, mut y, mut z) = (
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+    );
     for k in 0..nk {
         for j in 0..nj {
             for i in 0..ni {
@@ -134,8 +138,14 @@ fn corners_agree_but_interior_node_does_not_is_not_a_full_face_match() {
 
     // Without the bulge the same faces certify with the identity mapping.
     let exact = corner_fooling_pair(0.0);
-    let o = full_face_match(&imax_face(&exact[0], 0), &exact[0], &imin_face(&exact[1], 1), &exact[1], tol)
-        .expect("exact faces certify");
+    let o = full_face_match(
+        &imax_face(&exact[0], 0),
+        &exact[0],
+        &imin_face(&exact[1], 1),
+        &exact[1],
+        tol,
+    )
+    .expect("exact faces certify");
     assert_eq!(o.permutation_index, 0);
 }
 
@@ -156,7 +166,11 @@ fn certification_finds_reversed_and_transposed_mappings_and_verifier_agrees() {
     let pa = Patch::new(0, [2, 0, 0], [2, 3, 4]).unwrap();
     let pb = Patch::new(1, [0, 0, 0], [4, 0, 3]).unwrap();
     let m = certify_correspondence(&a, &pa, &b, &pb, |p| p, tol).expect("certifies");
-    assert!(m.permutation_index & 4 != 0, "expected a transposed mapping, got {}", m.permutation_index);
+    assert!(
+        m.permutation_index & 4 != 0,
+        "expected a transposed mapping, got {}",
+        m.permutation_index
+    );
     assert_eq!(m.nodes_checked, 20);
 
     // The certified index is the verifier's index: apply_permutation with it
@@ -165,7 +179,10 @@ fn certification_finds_reversed_and_transposed_mappings_and_verifier_agrees() {
     let (verified, mismatched) = plot3d::verify_connectivity(&[a, b], &[fm], tol);
     assert_eq!(verified.len(), 1);
     assert!(mismatched.is_empty());
-    assert_eq!(verified[0].orientation.as_ref().unwrap().permutation_index, m.permutation_index);
+    assert_eq!(
+        verified[0].orientation.as_ref().unwrap().permutation_index,
+        m.permutation_index
+    );
 }
 
 #[test]
@@ -187,12 +204,19 @@ fn collapsed_patch_is_reported_ambiguous_not_guessed() {
 fn connectivity_fast_rejects_a_reduced_grid_match_that_fails_at_full_resolution() {
     let tol = 1e-6;
     let blocks = corner_fooling_pair(50.0 * tol);
-    assert_eq!(plot3d::compute_min_gcd(&blocks), 4, "fixture must reduce to corners only");
+    assert_eq!(
+        plot3d::compute_min_gcd(&blocks),
+        4,
+        "fixture must reduce to corners only"
+    );
 
     // The reduced grid (corners only) proposes the interface; the full grid
     // refutes it, and both faces come back as outer faces.
     let (matches, outer) = connectivity_fast_with_tol(&blocks, tol);
-    assert!(matches.is_empty(), "bulged interface must not be returned: {matches:?}");
+    assert!(
+        matches.is_empty(),
+        "bulged interface must not be returned: {matches:?}"
+    );
     assert!(outer_contains(&outer, 0, [4, 0, 0], [4, 4, 4]));
     assert!(outer_contains(&outer, 1, [0, 0, 0], [0, 4, 4]));
     assert_eq!(outer.len(), 12);
@@ -231,10 +255,18 @@ fn connectivity_fast_default_path_is_unchanged_on_a_clean_mesh() {
 
 /// Annular sector: i along x, j along r, k along theta in [0, pitch]; the
 /// kmin and kmax faces are periodic under rotation about x by `pitch`.
-fn sector(dims: [usize; 3], pitch: Float, edit: impl Fn(usize, usize, usize, [Float; 3]) -> [Float; 3]) -> Block {
+fn sector(
+    dims: [usize; 3],
+    pitch: Float,
+    edit: impl Fn(usize, usize, usize, [Float; 3]) -> [Float; 3],
+) -> Block {
     let [ni, nj, nk] = dims;
     let n = ni * nj * nk;
-    let (mut x, mut y, mut z) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
+    let (mut x, mut y, mut z) = (
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+    );
     for k in 0..nk {
         for j in 0..nj {
             for i in 0..ni {
@@ -268,23 +300,30 @@ fn rotated_periodicity_rejects_a_reduced_grid_pair_that_fails_at_full_resolution
     let outer = all_outer_records(&blocks);
     assert_eq!(outer.len(), 6);
 
-    let (pairs, remaining) = rotated_periodicity_with_tol(&blocks, &[], &outer, pitch_deg, 'x', true, tol);
-    assert!(pairs.is_empty(), "bulged periodic pair must not survive full-resolution certification: {pairs:?}");
+    let (pairs, remaining) =
+        rotated_periodicity_with_tol(&blocks, &[], &outer, pitch_deg, 'x', true, tol);
+    assert!(
+        pairs.is_empty(),
+        "bulged periodic pair must not survive full-resolution certification: {pairs:?}"
+    );
     assert_eq!(remaining.len(), 6);
     assert!(outer_contains(&remaining, 0, [0, 0, 0], [8, 8, 0]));
     assert!(outer_contains(&remaining, 0, [0, 0, 8], [8, 8, 8]));
 
     // Full-resolution discovery agrees.
-    let (pairs_full, _) = rotated_periodicity_with_tol(&blocks, &[], &outer, pitch_deg, 'x', false, tol);
+    let (pairs_full, _) =
+        rotated_periodicity_with_tol(&blocks, &[], &outer, pitch_deg, 'x', false, tol);
     assert!(pairs_full.is_empty());
 
     // The exact sector is periodic on both paths.
     let exact = vec![sector([9, 9, 9], pitch, |_, _, _, p| p)];
     let outer = all_outer_records(&exact);
-    let (pairs, remaining) = rotated_periodicity_with_tol(&exact, &[], &outer, pitch_deg, 'x', true, tol);
+    let (pairs, remaining) =
+        rotated_periodicity_with_tol(&exact, &[], &outer, pitch_deg, 'x', true, tol);
     assert_eq!(pairs.len(), 1);
     assert_eq!(remaining.len(), 4);
-    let (pairs_full, _) = rotated_periodicity_with_tol(&exact, &[], &outer, pitch_deg, 'x', false, tol);
+    let (pairs_full, _) =
+        rotated_periodicity_with_tol(&exact, &[], &outer, pitch_deg, 'x', false, tol);
     assert_eq!(pairs_full.len(), 1);
     // And the pair verifies at full resolution with the orientation returned.
     let (verified, mismatched) = plot3d::verify_periodicity(&exact, &pairs_full, pitch, 'x', tol);
@@ -318,9 +357,16 @@ fn partial_face_match_certifies_the_whole_claimed_subpatch() {
         .iter()
         .filter(|m| (m.block1.block_index, m.block2.block_index) == (0, 2))
         .collect();
-    assert_eq!(ab.len(), 1, "A-B is a conformal half-face interface: {matches:?}");
+    assert_eq!(
+        ab.len(),
+        1,
+        "A-B is a conformal half-face interface: {matches:?}"
+    );
     assert_eq!(ab[0].block1.bounds(), ([2, 0, 0], [2, 4, 4]));
-    assert!(ac.is_empty(), "A-C is non-conformal and must not be reported as an interface: {ac:?}");
+    assert!(
+        ac.is_empty(),
+        "A-C is non-conformal and must not be reported as an interface: {ac:?}"
+    );
     // C's imin face and the unmatched half of A's face are exterior.
     assert!(outer_contains(&outer, 2, [0, 0, 0], [0, 4, 4]));
     assert!(outer_contains(&outer, 0, [2, 4, 0], [2, 8, 4]));
@@ -355,13 +401,26 @@ fn translational_periodicity_finds_pairs_whose_nodes_straddle_rounding_bins() {
     for i in 0..dims[0] {
         let xl = x0 + 0.1 * i as Float;
         let xu = xl + slide;
-        assert_ne!((xl / tol_pair).round() as i64, (xu / tol_pair).round() as i64, "round i={i}");
-        assert_ne!((xl / tol_pair).floor() as i64, (xu / tol_pair).floor() as i64, "floor i={i}");
+        assert_ne!(
+            (xl / tol_pair).round() as i64,
+            (xu / tol_pair).round() as i64,
+            "round i={i}"
+        );
+        assert_ne!(
+            (xl / tol_pair).floor() as i64,
+            (xu / tol_pair).floor() as i64,
+            "floor i={i}"
+        );
     }
     let blocks = vec![block];
     let outer = all_outer_records(&blocks);
-    let (pairs, remaining) = translational_periodicity(&blocks, &outer, None, "y", None, 0.02, 4, 1, 1);
-    assert_eq!(pairs.len(), 1, "periodic pair within tolerance must be found: {pairs:?}");
+    let (pairs, remaining) =
+        translational_periodicity(&blocks, &outer, None, "y", None, 0.02, 4, 1, 1);
+    assert_eq!(
+        pairs.len(),
+        1,
+        "periodic pair within tolerance must be found: {pairs:?}"
+    );
     assert_eq!(remaining.len(), 4);
     let m = &pairs[0];
     let faces: Vec<_> = [&m.block1, &m.block2].iter().map(|r| r.bounds()).collect();
@@ -378,7 +437,8 @@ fn translational_periodicity_finds_pairs_whose_nodes_straddle_rounding_bins() {
     });
     let blocks = vec![far];
     let outer = all_outer_records(&blocks);
-    let (pairs, remaining) = translational_periodicity(&blocks, &outer, None, "y", None, 0.02, 4, 1, 1);
+    let (pairs, remaining) =
+        translational_periodicity(&blocks, &outer, None, "y", None, 0.02, 4, 1, 1);
     assert!(pairs.is_empty(), "{pairs:?}");
     assert_eq!(remaining.len(), 6);
 }
@@ -395,7 +455,8 @@ fn translational_pair_with_a_bulged_interior_node_is_not_certified() {
     });
     let blocks = vec![block];
     let outer = all_outer_records(&blocks);
-    let (pairs, remaining) = translational_periodicity(&blocks, &outer, None, "y", None, 0.02, 4, 1, 1);
+    let (pairs, remaining) =
+        translational_periodicity(&blocks, &outer, None, "y", None, 0.02, 4, 1, 1);
     assert!(pairs.is_empty(), "{pairs:?}");
     assert_eq!(remaining.len(), 6);
 }
@@ -436,9 +497,11 @@ fn rotated_periodicity_with_tol_lets_the_caller_decide() {
     });
     let blocks = vec![block];
     let outer = all_outer_records(&blocks);
-    let (tight, _) = rotated_periodicity_with_tol(&blocks, &[], &outer, pitch_deg, 'x', false, 1e-6);
+    let (tight, _) =
+        rotated_periodicity_with_tol(&blocks, &[], &outer, pitch_deg, 'x', false, 1e-6);
     assert!(tight.is_empty());
-    let (loose, _) = rotated_periodicity_with_tol(&blocks, &[], &outer, pitch_deg, 'x', false, 1e-4);
+    let (loose, _) =
+        rotated_periodicity_with_tol(&blocks, &[], &outer, pitch_deg, 'x', false, 1e-4);
     assert_eq!(loose.len(), 1);
     // The default is the historical 1e-4.
     assert_eq!(plot3d::DEFAULT_MATCH_TOL, 1e-4);
@@ -464,7 +527,9 @@ fn translational_periodicity_with_tols_lets_the_caller_decide() {
     assert_eq!(defaults.adaptive_floor, 1e-4);
     assert_eq!(defaults.adaptive_spacing_fraction, 0.03);
 
-    let (found, _) = translational_periodicity_with_tols(&blocks, &outer, None, "y", None, 0.02, 4, 1, 1, &defaults);
+    let (found, _) = translational_periodicity_with_tols(
+        &blocks, &outer, None, "y", None, 0.02, 4, 1, 1, &defaults,
+    );
     assert_eq!(found.len(), 1);
 
     // A caller who knows the mesh is accurate to 1e-3 refuses the slid face.
@@ -473,11 +538,24 @@ fn translational_periodicity_with_tols_lets_the_caller_decide() {
         adaptive_floor: 1e-3,
         ..Default::default()
     };
-    let (none, _) = translational_periodicity_with_tols(&blocks, &outer, None, "y", None, 0.02, 4, 1, 1, &strict);
+    let (none, _) = translational_periodicity_with_tols(
+        &blocks, &outer, None, "y", None, 0.02, 4, 1, 1, &strict,
+    );
     assert!(none.is_empty(), "{none:?}");
 
     // And node_tol_xyz still overrides everything.
-    let (found, _) = translational_periodicity_with_tols(&blocks, &outer, None, "y", Some(5e-3), 0.02, 4, 1, 1, &strict);
+    let (found, _) = translational_periodicity_with_tols(
+        &blocks,
+        &outer,
+        None,
+        "y",
+        Some(5e-3),
+        0.02,
+        4,
+        1,
+        1,
+        &strict,
+    );
     assert_eq!(found.len(), 1);
 }
 
@@ -492,14 +570,21 @@ fn outer_face_self_match_and_vertex_match_tolerances_are_parameters() {
         p
     });
     let (_, self_pairs_default) = get_outer_faces(&block);
-    assert!(self_pairs_default.is_empty(), "default 1e-8 does not pair them");
+    assert!(
+        self_pairs_default.is_empty(),
+        "default 1e-8 does not pair them"
+    );
     let (_, self_pairs) = get_outer_faces_with_tol(&block, 1e-7);
     assert_eq!(self_pairs.len(), 1);
     assert_eq!(plot3d::block_face_functions::DEFAULT_TOL, 1e-8);
 
     let fa = imin_face(&block, 0);
     let fb = imax_face(&block, 0);
-    assert_eq!(fa.match_indices(&fb).len(), 4, "5e-8 is within the 1e-6 default");
+    assert_eq!(
+        fa.match_indices(&fb).len(),
+        4,
+        "5e-8 is within the 1e-6 default"
+    );
     assert!(fa.match_indices_with_tol(&fb, 1e-9).is_empty());
     assert_eq!(plot3d::block_face_functions::VERTEX_MATCH_TOL, 1e-6);
 }

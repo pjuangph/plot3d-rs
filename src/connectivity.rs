@@ -936,9 +936,10 @@ fn phase3_overlaps_existing(
     let ranges_overlap = |a_lo: usize, a_hi: usize, b_lo: usize, b_hi: usize| -> bool {
         !(a_hi < b_lo || b_hi < a_lo)
     };
-    let all_overlap = |lo_a: [usize; 3], hi_a: [usize; 3], lo_b: [usize; 3], hi_b: [usize; 3]| -> bool {
-        (0..3).all(|d| ranges_overlap(lo_a[d], hi_a[d], lo_b[d], hi_b[d]))
-    };
+    let all_overlap =
+        |lo_a: [usize; 3], hi_a: [usize; 3], lo_b: [usize; 3], hi_b: [usize; 3]| -> bool {
+            (0..3).all(|d| ranges_overlap(lo_a[d], hi_a[d], lo_b[d], hi_b[d]))
+        };
 
     for m in existing {
         let mbi = m.block1.block_index;
@@ -954,9 +955,7 @@ fn phase3_overlaps_existing(
         } else {
             continue;
         };
-        if all_overlap(a1_lo, a1_hi, m1_lo, m1_hi)
-            && all_overlap(a2_lo, a2_hi, m2_lo, m2_hi)
-        {
+        if all_overlap(a1_lo, a1_hi, m1_lo, m1_hi) && all_overlap(a2_lo, a2_hi, m2_lo, m2_hi) {
             return true;
         }
     }
@@ -996,7 +995,10 @@ pub fn connectivity_fast(blocks: &[Block]) -> (Vec<FaceMatch>, Vec<FaceRecord>) 
 /// resolution is not an interface: its two faces are returned as outer
 /// faces instead, and a warning naming the worst node is printed to stderr
 /// — the tuple return has no way to carry the finding itself.
-pub fn connectivity_fast_with_tol(blocks: &[Block], tol: Float) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
+pub fn connectivity_fast_with_tol(
+    blocks: &[Block],
+    tol: Float,
+) -> (Vec<FaceMatch>, Vec<FaceRecord>) {
     let gcd_to_use = crate::utils::compute_min_gcd(blocks);
     let reduced_blocks = crate::block_face_functions::reduce_blocks(blocks, gcd_to_use);
     let (mut matches, mut outer_faces) = connectivity_with_tol(&reduced_blocks, tol);

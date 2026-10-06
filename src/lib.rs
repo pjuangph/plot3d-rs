@@ -159,8 +159,8 @@ pub use block_face_functions::{
 };
 pub use connectivity::{
     adaptive_tolerance, align_face_orientations, connectivity, connectivity_fast,
-    connectivity_fast_with_tol, connectivity_with_tol, face_matches_to_dict,
-    get_face_intersection, TOL_FLOOR,
+    connectivity_fast_with_tol, connectivity_with_tol, face_matches_to_dict, get_face_intersection,
+    TOL_FLOOR,
 };
 pub use correspondence::{
     certify_correspondence, certify_face_match, certify_permutation, CertifiedMapping,
@@ -173,17 +173,16 @@ pub use face_record::{
     OrientationPlane, PeriodicPair, PERMUTATION_MATRICES,
 };
 pub use graph::{build_weighted_graph_from_face_matches, write_ddcmp, BlockGraph, WeightAggregate};
-pub use metrics::{compute_cell_centers, compute_cell_volumes, compute_face_metrics, FaceMetrics};
-pub use mesh_quality::{
-    block_handedness, cell_aspect_ratio, cell_distinct_node_count, cell_signed_volume,
-    cell_skewness, element_type_inventory, make_right_handed, run_all as run_mesh_quality,
-    MESH_QUALITY_REVISION,
-    BlockElementSummary, CellLocation, ElementInventory, ElementType, Handedness,
-    MeshQualityReport, Severity, Thresholds, Violation,
-};
 pub use merge_blocks::{
     combine_2_blocks_mixed_pairing, combine_blocks_mixed_pairs, combine_nxnxn_cubes_mixed_pairs,
 };
+pub use mesh_quality::{
+    block_handedness, cell_aspect_ratio, cell_distinct_node_count, cell_signed_volume,
+    cell_skewness, element_type_inventory, make_right_handed, run_all as run_mesh_quality,
+    BlockElementSummary, CellLocation, ElementInventory, ElementType, Handedness,
+    MeshQualityReport, Severity, Thresholds, Violation, MESH_QUALITY_REVISION,
+};
+pub use metrics::{compute_cell_centers, compute_cell_volumes, compute_face_metrics, FaceMetrics};
 pub use point_match::point_match;
 pub use read::{read_ap_nasa, read_plot3d_ascii, read_plot3d_binary, BinaryFormat, FloatPrecision};
 pub use rotational_periodicity::{
@@ -192,6 +191,8 @@ pub use rotational_periodicity::{
     DEFAULT_MATCH_TOL,
 };
 pub mod serialization;
+pub use dual_graph::{build_cell_graph, cell_index, global_cell_id, CellGraph};
+pub use flat_data::{build_flat_mesh, FlatMesh};
 pub use serialization::{
     face_match_from_json, face_match_to_json, face_record_from_json, face_record_to_json,
     permutation_matrices_json, to_string_pretty_compact,
@@ -207,5 +208,3 @@ pub use verification::{
     verify_translational_periodicity,
 };
 pub use write::write_plot3d;
-pub use dual_graph::{build_cell_graph, cell_index, global_cell_id, CellGraph};
-pub use flat_data::{build_flat_mesh, FlatMesh};

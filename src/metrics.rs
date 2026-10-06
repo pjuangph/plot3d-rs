@@ -433,9 +433,24 @@ pub fn compute_face_metrics(block: &Block) -> FaceMetrics {
     }
 
     FaceMetrics {
-        si_x, si_y, si_z, ci_x, ci_y, ci_z,
-        sj_x, sj_y, sj_z, cj_x, cj_y, cj_z,
-        sk_x, sk_y, sk_z, ck_x, ck_y, ck_z,
+        si_x,
+        si_y,
+        si_z,
+        ci_x,
+        ci_y,
+        ci_z,
+        sj_x,
+        sj_y,
+        sj_z,
+        cj_x,
+        cj_y,
+        cj_z,
+        sk_x,
+        sk_y,
+        sk_z,
+        ck_x,
+        ck_y,
+        ck_z,
     }
 }
 
@@ -503,16 +518,34 @@ pub fn compute_cell_centers(block: &Block) -> (Vec<Float>, Vec<Float>, Vec<Float
                 let n7 = nidx(i + 1, j + 1, k + 1);
 
                 xc[cid] = eighth
-                    * (block.x[n0] + block.x[n1] + block.x[n2] + block.x[n3]
-                        + block.x[n4] + block.x[n5] + block.x[n6] + block.x[n7]);
+                    * (block.x[n0]
+                        + block.x[n1]
+                        + block.x[n2]
+                        + block.x[n3]
+                        + block.x[n4]
+                        + block.x[n5]
+                        + block.x[n6]
+                        + block.x[n7]);
 
                 yc[cid] = eighth
-                    * (block.y[n0] + block.y[n1] + block.y[n2] + block.y[n3]
-                        + block.y[n4] + block.y[n5] + block.y[n6] + block.y[n7]);
+                    * (block.y[n0]
+                        + block.y[n1]
+                        + block.y[n2]
+                        + block.y[n3]
+                        + block.y[n4]
+                        + block.y[n5]
+                        + block.y[n6]
+                        + block.y[n7]);
 
                 zc[cid] = eighth
-                    * (block.z[n0] + block.z[n1] + block.z[n2] + block.z[n3]
-                        + block.z[n4] + block.z[n5] + block.z[n6] + block.z[n7]);
+                    * (block.z[n0]
+                        + block.z[n1]
+                        + block.z[n2]
+                        + block.z[n3]
+                        + block.z[n4]
+                        + block.z[n5]
+                        + block.z[n6]
+                        + block.z[n7]);
             }
         }
     }
@@ -555,7 +588,11 @@ mod tests {
         let block = unit_cube_block(2);
         let vols = compute_cell_volumes(&block);
         assert_eq!(vols.len(), 1);
-        assert!((vols[0] - 1.0).abs() < 1e-12, "Expected volume 1.0, got {}", vols[0]);
+        assert!(
+            (vols[0] - 1.0).abs() < 1e-12,
+            "Expected volume 1.0, got {}",
+            vols[0]
+        );
     }
 
     #[test]

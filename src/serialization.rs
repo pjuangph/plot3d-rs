@@ -143,10 +143,7 @@ pub fn face_match_to_json(fm: &FaceMatch) -> Value {
         "permutation_index": perm_idx,
     });
     if let Some(m) = fm.orientation.as_ref().and_then(|o| o.permutation_matrix) {
-        obj["permutation_matrix"] = json!([
-            [m[0][0], m[0][1]],
-            [m[1][0], m[1][1]],
-        ]);
+        obj["permutation_matrix"] = json!([[m[0][0], m[0][1]], [m[1][0], m[1][1]],]);
     }
     obj
 }
@@ -289,10 +286,10 @@ pub fn face_match_from_json(val: &Value) -> Result<FaceMatch, String> {
         .get("block2")
         .ok_or_else(|| "face_match: missing 'block2'".to_string())?;
 
-    let block1 = face_record_from_json(block1_val)
-        .map_err(|e| format!("face_match.block1: {}", e))?;
-    let block2 = face_record_from_json(block2_val)
-        .map_err(|e| format!("face_match.block2: {}", e))?;
+    let block1 =
+        face_record_from_json(block1_val).map_err(|e| format!("face_match.block1: {}", e))?;
+    let block2 =
+        face_record_from_json(block2_val).map_err(|e| format!("face_match.block2: {}", e))?;
 
     // Parse the optional `permutation_matrix` (2x2 i8). Preferred over
     // `permutation_index` because it carries enough information to look

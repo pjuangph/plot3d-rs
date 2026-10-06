@@ -5,10 +5,9 @@
 //! workflow from the Plot3D_utilities repository.
 
 use plot3d::{
-    connectivity_fast, create_rotation_matrix, face_match_to_json, face_matches_to_dict,
-    read_plot3d_binary, rotated_periodicity, verify_connectivity, verify_periodicity,
-    align_face_orientations, permutation_matrices_json,
-    BinaryFormat, Endian, Float, FloatPrecision,
+    align_face_orientations, connectivity_fast, create_rotation_matrix, face_match_to_json,
+    face_matches_to_dict, permutation_matrices_json, read_plot3d_binary, rotated_periodicity,
+    verify_connectivity, verify_periodicity, BinaryFormat, Endian, Float, FloatPrecision,
 };
 use serde_json::{json, Value};
 
@@ -19,9 +18,13 @@ const TOL: Float = 1e-4;
 
 /// Build the full connectivity.json payload as a serde_json::Value.
 fn build_connectivity_json() -> (Vec<plot3d::Block>, Value) {
-    let blocks =
-        read_plot3d_binary(MESH_PATH, BinaryFormat::Raw, FloatPrecision::F32, Endian::Little)
-            .expect("read mesh failed");
+    let blocks = read_plot3d_binary(
+        MESH_PATH,
+        BinaryFormat::Raw,
+        FloatPrecision::F32,
+        Endian::Little,
+    )
+    .expect("read mesh failed");
 
     let rotation_angle_deg = 360.0 / NBLADES as Float;
     let rotation_angle_rad = rotation_angle_deg.to_radians();
@@ -44,8 +47,13 @@ fn build_connectivity_json() -> (Vec<plot3d::Block>, Value) {
         true,
     );
 
-    let (periodic_pairs, _unverified) =
-        verify_periodicity(&blocks, &periodic_pairs, rotation_angle_rad, ROTATION_AXIS, TOL);
+    let (periodic_pairs, _unverified) = verify_periodicity(
+        &blocks,
+        &periodic_pairs,
+        rotation_angle_rad,
+        ROTATION_AXIS,
+        TOL,
+    );
 
     // Rotation matrix for JSON
     let rot_mat = create_rotation_matrix(rotation_angle_rad, ROTATION_AXIS);
@@ -53,7 +61,10 @@ fn build_connectivity_json() -> (Vec<plot3d::Block>, Value) {
 
     // Serialize
     let fm_json: Vec<Value> = face_matches.iter().map(|m| face_match_to_json(m)).collect();
-    let pf_json: Vec<Value> = periodic_pairs.iter().map(|m| face_match_to_json(m)).collect();
+    let pf_json: Vec<Value> = periodic_pairs
+        .iter()
+        .map(|m| face_match_to_json(m))
+        .collect();
     let of_json: Vec<Value> = outer_faces_remaining
         .iter()
         .map(|f| {
@@ -280,7 +291,12 @@ fn test_no_overlapping_face_matches() {
     fn ranges_overlap(a: (usize, usize), b: (usize, usize)) -> bool {
         !(a.1 < b.0 || b.1 < a.0)
     }
-    fn side_overlaps(a_lb: [usize; 3], a_ub: [usize; 3], b_lb: [usize; 3], b_ub: [usize; 3]) -> bool {
+    fn side_overlaps(
+        a_lb: [usize; 3],
+        a_ub: [usize; 3],
+        b_lb: [usize; 3],
+        b_ub: [usize; 3],
+    ) -> bool {
         (0..3).all(|d| ranges_overlap(norm(a_lb[d], a_ub[d]), norm(b_lb[d], b_ub[d])))
     }
 

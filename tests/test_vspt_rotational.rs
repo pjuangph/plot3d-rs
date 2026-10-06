@@ -41,8 +41,13 @@ fn load_vspt_blocks() -> Option<Vec<plot3d::Block>> {
     let bin_path = "tests/data/vspt_mesh_scaled.xyz";
     if std::path::Path::new(bin_path).exists() {
         return Some(
-            read_plot3d_binary(bin_path, BinaryFormat::Raw, FloatPrecision::F32, Endian::Little)
-                .expect("read vspt_mesh_scaled.xyz"),
+            read_plot3d_binary(
+                bin_path,
+                BinaryFormat::Raw,
+                FloatPrecision::F32,
+                Endian::Little,
+            )
+            .expect("read vspt_mesh_scaled.xyz"),
         );
     }
     None
@@ -164,9 +169,12 @@ fn vspt_wrong_matrix_does_not_silently_match() {
         [[1, 0], [0, 1]], // wrong — should be [[-1, 0], [0, 1]]
     )];
 
-    let (verified, mismatched) =
-        verify_periodicity(&blocks, &bad, VSPT_THETA_RAD, 'x', TOL);
+    let (verified, mismatched) = verify_periodicity(&blocks, &bad, VSPT_THETA_RAD, 'x', TOL);
 
     assert_eq!(verified.len(), 0, "wrong matrix must not silently pass");
-    assert_eq!(mismatched.len(), 1, "wrong matrix must be reported as mismatched");
+    assert_eq!(
+        mismatched.len(),
+        1,
+        "wrong matrix must be reported as mismatched"
+    );
 }

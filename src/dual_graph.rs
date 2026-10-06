@@ -290,18 +290,12 @@ fn build_cross_block_face_edges(
     let (swapped, f2_u_reversed, f2_v_reversed) = match orientation {
         Some(o) => {
             let pi = o.permutation_index;
-            (
-                (pi & 0b100) != 0,
-                (pi & 0b001) != 0,
-                (pi & 0b010) != 0,
-            )
+            ((pi & 0b100) != 0, (pi & 0b001) != 0, (pi & 0b010) != 0)
         }
         None => {
             // Legacy heuristic — kept for callers that haven't run
             // the cascade verifier (e.g. unit tests with no orientation).
-            let swap = (n_u1 == n_v2)
-                && (n_v1 == n_u2)
-                && !((n_u1 == n_u2) && (n_v1 == n_v2));
+            let swap = (n_u1 == n_v2) && (n_v1 == n_u2) && !((n_u1 == n_u2) && (n_v1 == n_v2));
             let u_rev = f2_raw[var_axes2[0]][0] > f2_raw[var_axes2[0]][1];
             let v_rev = f2_raw[var_axes2[1]][0] > f2_raw[var_axes2[1]][1];
             (swap, u_rev, v_rev)
@@ -327,16 +321,8 @@ fn build_cross_block_face_edges(
             ijk2[axis2] = cell2_const;
 
             // Apply reversal if needed
-            let u2_mapped = if f2_u_reversed {
-                n_u2 - 1 - u2
-            } else {
-                u2
-            };
-            let v2_mapped = if f2_v_reversed {
-                n_v2 - 1 - v2
-            } else {
-                v2
-            };
+            let u2_mapped = if f2_u_reversed { n_u2 - 1 - u2 } else { u2 };
+            let v2_mapped = if f2_v_reversed { n_v2 - 1 - v2 } else { v2 };
 
             ijk2[var_axes2[0]] = f2_lo[var_axes2[0]] + u2_mapped;
             ijk2[var_axes2[1]] = f2_lo[var_axes2[1]] + v2_mapped;
@@ -364,16 +350,35 @@ mod tests {
     /// Build a uniform block spanning [x0, x1] x [y0, y1] x [z0, z1]
     /// with `ni x nj x nk` nodes.
     fn uniform_block(
-        ni: usize, nj: usize, nk: usize,
-        x0: f64, x1: f64, y0: f64, y1: f64, z0: f64, z1: f64,
+        ni: usize,
+        nj: usize,
+        nk: usize,
+        x0: f64,
+        x1: f64,
+        y0: f64,
+        y1: f64,
+        z0: f64,
+        z1: f64,
     ) -> Block {
         let n = ni * nj * nk;
         let mut x = Vec::with_capacity(n);
         let mut y = Vec::with_capacity(n);
         let mut z = Vec::with_capacity(n);
-        let dx = if ni > 1 { (x1 - x0) / (ni as f64 - 1.0) } else { 0.0 };
-        let dy = if nj > 1 { (y1 - y0) / (nj as f64 - 1.0) } else { 0.0 };
-        let dz = if nk > 1 { (z1 - z0) / (nk as f64 - 1.0) } else { 0.0 };
+        let dx = if ni > 1 {
+            (x1 - x0) / (ni as f64 - 1.0)
+        } else {
+            0.0
+        };
+        let dy = if nj > 1 {
+            (y1 - y0) / (nj as f64 - 1.0)
+        } else {
+            0.0
+        };
+        let dz = if nk > 1 {
+            (z1 - z0) / (nk as f64 - 1.0)
+        } else {
+            0.0
+        };
         for k in 0..nk {
             for j in 0..nj {
                 for i in 0..ni {
@@ -408,16 +413,24 @@ mod tests {
         let fm = FaceMatch {
             block1: FaceRecord {
                 block_index: 0,
-                il: 2, jl: 0, kl: 0,
-                ih: 2, jh: 2, kh: 2,
+                il: 2,
+                jl: 0,
+                kl: 0,
+                ih: 2,
+                jh: 2,
+                kh: 2,
                 id: None,
                 u_physical: None,
                 v_physical: None,
             },
             block2: FaceRecord {
                 block_index: 1,
-                il: 0, jl: 0, kl: 0,
-                ih: 0, jh: 2, kh: 2,
+                il: 0,
+                jl: 0,
+                kl: 0,
+                ih: 0,
+                jh: 2,
+                kh: 2,
                 id: None,
                 u_physical: None,
                 v_physical: None,
