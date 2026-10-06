@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.3
+
+### Changed
+
+- Source and tests formatted with `cargo fmt`; no behavior or API change.
+
+### Added
+
+- Tests for binary and ASCII Plot3D read/write: round trips, the exact Fortran and raw
+  record layouts, reader tolerance across layouts, and malformed input. Two tests are
+  ignored because the Fortran reader requires one dimensions record per block.
+
 ## 0.3.2
 
 ### Added
