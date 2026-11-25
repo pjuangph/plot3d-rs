@@ -10,6 +10,7 @@ Rust utilities for reading, writing, and analysing NASA PLOT3D structured grids.
 - Rotate blocks with arbitrary axes and angles and detect rotational periodicity
 - Export meshes back to PLOT3D formats
 - Utilities for translational periodicity, block merging, and lightweight graph analyses
+- Mesh-quality battery (cell volume, skewness, aspect ratio, handedness) and geometry-only repair of folded grid lines
 
 Many algorithms mirror the behaviour of the Python utilities one-for-one, making it straightforward to port workflows between languages or compare outputs across implementations.
 
@@ -63,6 +64,70 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 ```
+
+## Mesh Repair: Untangling Folded Grid Lines
+
+A *folded* grid line has a node placed beyond its successor, so its edge points opposite to the
+same edge on the neighbouring parallel lines. It typically shows up in the first cell layer of a
+wall-resolved mesh, where the layer is thinner than the noise on the surface: the cells keep
+positive volume, but the face between two of them sees its owner and neighbour cell centres on the
+wrong sides (`a·d ≤ 0`), which a finite-volume solver must refuse.
+
+`untangle_mesh` (or `untangle_folded_lines` for one block) repairs this from the geometry alone,
+with no boundary-condition knowledge:
+
+1. **Detect** reversed interior faces (area vector against the owner→neighbour cell-centre vector)
+   and non-positive cell volumes, relative to each block's handedness (`find_inverted_geometry`).
+2. **Localise** each to the grid-line edges that oppose the mean of the same edge on the unfolded
+   neighbouring parallel lines.
+3. **Repair** by relocating one endpoint of each folded edge. A node on any block face is never
+   moved, so surfaces and inter-block point matches stay exact. The relocated node takes the
+   neighbouring lines' mean edge from the fixed anchor (`NeighbourMean`); where that would fold the
+   next edge along the line, it is placed on the chord to the next node in the neighbours'
+   edge-length ratio (`ChordRedistribution`).
+4. **Re-check** the block: no reversed face and no non-positive cell may remain.
+
+A clean block comes back bit-identical with an empty report. Anything that cannot be repaired
+this way (a fold whose edge lies on a block face, an ambiguous anchor, no healthy neighbouring
+line, inverted geometry left after the repair) is refused with an `UntangleError` naming every
+block and `(i, j, k)`, and nothing is changed.
+
+```rust
+use plot3d::{read_plot3d_ascii, untangle_mesh};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let blocks = read_plot3d_ascii("mesh.xyz")?;
+    match untangle_mesh(&blocks) {
+        Ok((_repaired, report)) => print!("{report}"), // per-block detail, see below
+        Err(refused) => eprint!("{refused}"),         // same detail plus every refusal
+    }
+    Ok(())
+}
+```
+
+The `untangle` example does this for a file and writes `<stem>_untangled.<ext>` and
+`<stem>_untangled_report.txt` next to it (it never overwrites an existing file):
+
+```text
+cargo run --release --example untangle -- mesh.xyz [--binary] [--raw] [--f32] [--big-endian]
+```
+
+Output on a synthetic two-block mesh whose second block has one first-layer node pushed 0.02
+beyond the wall it sits 0.01 below:
+
+```text
+untangle folded grid lines: scanned 2 block(s); 4 reversed interior face(s) and 0 non-positive cell(s) in 1 block(s), localised to 1 folded edge(s); 1 node(s) moved, max displacement 3.0000000000000027e-2
+
+block 1: 4 reversed face(s), 0 non-positive cell(s), 1 folded edge(s), 1 node(s) moved
+  reversed i-face: cell (1,3,1) -> (2,3,1), cos(a,d) -1.0000e0; folded j-edge (2,3,2)-(2,4,2), node (2,3,2) moved
+  reversed i-face: cell (1,3,2) -> (2,3,2), cos(a,d) -1.0000e0; folded j-edge (2,3,2)-(2,4,2), node (2,3,2) moved
+  reversed k-face: cell (1,3,1) -> (1,3,2), cos(a,d) -1.0000e0; folded j-edge (2,3,2)-(2,4,2), node (2,3,2) moved
+  reversed k-face: cell (2,3,1) -> (2,3,2), cos(a,d) -1.0000e0; folded j-edge (2,3,2)-(2,4,2), node (2,3,2) moved
+  moved node (2,3,2): (5.000000000000000e-1, 1.020000000000000e0, 5.000000000000000e-1) -> (5.000000000000000e-1, 9.900000000000000e-1, 5.000000000000000e-1), displacement 3.0000000000000027e-2 [NeighbourMean]
+  re-check: 0 reversed face(s), 0 non-positive cell(s)
+```
+
+Each list prints at most `UNTANGLE_REPORT_LIMIT` (1000) entries and counts the rest.
 
 ## Orientation & Permutation Matrices
 

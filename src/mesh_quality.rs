@@ -23,7 +23,10 @@
 //! volume is necessary for a usable cell but does not prove the hexahedron is
 //! free of folding or self-intersection; this battery is not a complete
 //! geometric-validity certificate. Left-handed blocks are *fixable* —
-//! [`make_right_handed`] flips them.
+//! [`make_right_handed`] flips them. Folded grid lines (a node placed beyond
+//! its successor, reversing interior faces) are *repairable* —
+//! [`untangle_folded_lines`] / [`untangle_mesh`] rebuild the folded edge from
+//! its neighbouring lines without moving any block-face node.
 
 /// Revision of the meaning of the findings [`run_all`] produces. Bumped
 /// whenever a check's severity, criterion or scope changes, so consumers that
@@ -346,6 +349,1098 @@ pub fn make_right_handed(block: &Block) -> (Block, Option<usize>) {
         Block::new(block.imax, block.jmax, block.kmax, x, y, z),
         Some(axis),
     )
+}
+
+// =============================================================================
+// Folded grid lines — geometry-only detection and repair
+// =============================================================================
+//
+// A folded grid line is one whose edge between two consecutive nodes points
+// opposite to the same edge on the neighbouring parallel lines: a node has
+// been placed beyond its successor. The cells on either side keep positive
+// volume, but the face between them sees its owner and neighbour centres on
+// the wrong sides (`a·d ≤ 0`), which a finite-volume solver must refuse.
+// The repair rebuilds the folded edge from its neighbours, moving only
+// block-interior nodes so block surfaces and inter-block point matches stay
+// bit-exact. It uses no boundary-condition knowledge.
+
+/// An interior face of one block whose area vector `a` does not point from
+/// its owner cell toward its neighbour cell: `cos∠(a, d) ≤ 0`, with `d` the
+/// owner→neighbour centre vector. `a` is
+/// [`compute_face_metrics`](crate::metrics::compute_face_metrics)' diagonal
+/// cross product and the centres are
+/// [`compute_cell_centers`](crate::metrics::compute_cell_centers)' 8-node
+/// means — the quantities [`build_flat_mesh`](crate::build_flat_mesh) hands a
+/// finite-volume solver.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReversedFace {
+    /// Block index.
+    pub block: usize,
+    /// Face family: `0` = i-face, `1` = j-face, `2` = k-face.
+    pub axis: usize,
+    /// Owner cell `(i, j, k)`; the neighbour is the next cell along `axis`.
+    pub owner: [usize; 3],
+    /// `cos∠(a, d)`, taken relative to the block's handedness (see
+    /// [`find_inverted_geometry`]).
+    pub cos: Float,
+}
+
+/// A cell whose divergence-theorem volume, taken relative to the block's
+/// handedness, is not positive (or is not finite).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NonPositiveCell {
+    /// Block index.
+    pub block: usize,
+    /// Cell `(i, j, k)`.
+    pub cell: [usize; 3],
+    /// Handedness-relative volume.
+    pub volume: Float,
+}
+
+/// A grid-line edge from node `start` to `start + 1` along `axis` whose
+/// vector `e` opposes the mean `m` of the same edge on the neighbouring
+/// parallel lines: `e·m ≤ 0`, with `m` taken over the neighbouring lines that
+/// are not themselves folded (a large fold would otherwise drag the mean of
+/// the healthy lines next to it).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FoldedEdge {
+    /// Block index.
+    pub block: usize,
+    /// Line direction: `0` = i, `1` = j, `2` = k.
+    pub axis: usize,
+    /// Lower-index endpoint `(i, j, k)`.
+    pub start: [usize; 3],
+    /// `e·m`, `m` the mean over the unfolded neighbouring lines (over all of
+    /// them when none is unfolded).
+    pub dot: Float,
+}
+
+/// One node relocated by [`untangle_folded_lines`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct MovedNode {
+    /// Block index.
+    pub block: usize,
+    /// Node `(i, j, k)`.
+    pub node: [usize; 3],
+    /// Coordinates before the repair.
+    pub old: [Float; 3],
+    /// Coordinates after the repair.
+    pub new: [Float; 3],
+    /// `|new − old|`.
+    pub displacement: Float,
+    /// How `new` was built.
+    pub construction: RepairConstruction,
+}
+
+/// How [`untangle_folded_lines`] placed a relocated node `n` on a folded
+/// edge `n`–`a` (`a` the fixed anchor).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepairConstruction {
+    /// `X(n) = X(a) − u`, with `u` the mean `n→a` edge over the healthy
+    /// neighbouring parallel lines: the folded edge takes its neighbours'
+    /// shape.
+    NeighbourMean,
+    /// Used when [`NeighbourMean`](Self::NeighbourMean) would fold the edge
+    /// on the other side of `n` (the anchor sits closer to the next node `f`
+    /// along the line than the neighbours' `n→a` edge is long — a dented
+    /// surface under a thin layer): `X(n) = X(f) + r (X(a) − X(f))` with
+    /// `r = |w| / (|w| + |u|)`, `w` the healthy-neighbour mean `f→n` edge. The
+    /// two edges keep the neighbours' length ratio on the chord `f→a`.
+    ChordRedistribution,
+}
+
+/// What [`untangle_folded_lines`] / [`untangle_mesh`] found and changed, per
+/// block. [`is_empty`](Self::is_empty) for a mesh that needed no repair. In
+/// an [`UntangleError`] it holds what was found before the refusal, and the
+/// moves listed there were planned, not applied.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UntangleReport {
+    /// Number of blocks examined.
+    pub blocks_scanned: usize,
+    /// Reversed interior faces found before the repair.
+    pub reversed_faces: Vec<ReversedFace>,
+    /// Non-positive-volume cells found before the repair.
+    pub nonpositive_cells: Vec<NonPositiveCell>,
+    /// Folded edges the inverted geometry was localised to.
+    pub folded_edges: Vec<FoldedEdge>,
+    /// Every relocated node.
+    pub moved: Vec<MovedNode>,
+    /// Largest entry of `moved[..].displacement` (`0` when nothing moved).
+    pub max_displacement: Float,
+    /// Blocks whose repaired geometry was re-checked.
+    pub rechecked_blocks: Vec<usize>,
+    /// Reversed faces left after the repair (non-empty only in a refusal).
+    pub remaining_reversed_faces: Vec<ReversedFace>,
+    /// Non-positive cells left after the repair (non-empty only in a refusal).
+    pub remaining_nonpositive_cells: Vec<NonPositiveCell>,
+}
+
+/// Entries printed per list in [`UntangleReport::format_report`] and
+/// [`UntangleError`]'s `Display` before the rest are only counted.
+pub const UNTANGLE_REPORT_LIMIT: usize = 1000;
+
+const AXIS_NAMES: [char; 3] = ['i', 'j', 'k'];
+
+fn fmt_ijk(n: [usize; 3]) -> String {
+    format!("({},{},{})", n[0], n[1], n[2])
+}
+
+fn fmt_xyz(p: [Float; 3]) -> String {
+    format!("({:.15e}, {:.15e}, {:.15e})", p[0], p[1], p[2])
+}
+
+/// Whether edge `(axis, start)` is one of the 12 edges of cell `c`.
+fn edge_of_cell(axis: usize, start: [usize; 3], c: [usize; 3]) -> bool {
+    start[axis] == c[axis]
+        && (0..3)
+            .filter(|&q| q != axis)
+            .all(|q| start[q] == c[q] || start[q] == c[q] + 1)
+}
+
+/// Prints at most [`UNTANGLE_REPORT_LIMIT`] lines of one kind, counting the rest.
+struct Bounded {
+    shown: usize,
+    hidden: usize,
+}
+
+impl Bounded {
+    fn new() -> Self {
+        Bounded {
+            shown: 0,
+            hidden: 0,
+        }
+    }
+    fn push(&mut self, s: &mut String, line: impl FnOnce() -> String) {
+        if self.shown < UNTANGLE_REPORT_LIMIT {
+            s.push_str(&line());
+            s.push('\n');
+            self.shown += 1;
+        } else {
+            self.hidden += 1;
+        }
+    }
+    fn tail(&self, s: &mut String, what: &str) {
+        if self.hidden > 0 {
+            s.push_str(&format!(
+                "  ... {} more {what} not shown (first {UNTANGLE_REPORT_LIMIT} listed)\n",
+                self.hidden
+            ));
+        }
+    }
+}
+
+impl UntangleReport {
+    /// True when nothing was found and nothing moved.
+    pub fn is_empty(&self) -> bool {
+        self.reversed_faces.is_empty()
+            && self.nonpositive_cells.is_empty()
+            && self.folded_edges.is_empty()
+            && self.moved.is_empty()
+            && self.remaining_reversed_faces.is_empty()
+            && self.remaining_nonpositive_cells.is_empty()
+    }
+
+    fn extend(&mut self, other: UntangleReport) {
+        self.blocks_scanned += other.blocks_scanned;
+        self.reversed_faces.extend(other.reversed_faces);
+        self.nonpositive_cells.extend(other.nonpositive_cells);
+        self.folded_edges.extend(other.folded_edges);
+        self.moved.extend(other.moved);
+        self.max_displacement = self.max_displacement.max(other.max_displacement);
+        self.rechecked_blocks.extend(other.rechecked_blocks);
+        self.remaining_reversed_faces
+            .extend(other.remaining_reversed_faces);
+        self.remaining_nonpositive_cells
+            .extend(other.remaining_nonpositive_cells);
+    }
+
+    /// Blocks that appear anywhere in the report, ascending.
+    fn blocks(&self) -> std::collections::BTreeSet<usize> {
+        let mut b = std::collections::BTreeSet::new();
+        b.extend(self.reversed_faces.iter().map(|f| f.block));
+        b.extend(self.nonpositive_cells.iter().map(|c| c.block));
+        b.extend(self.folded_edges.iter().map(|e| e.block));
+        b.extend(self.moved.iter().map(|m| m.block));
+        b.extend(self.remaining_reversed_faces.iter().map(|f| f.block));
+        b.extend(self.remaining_nonpositive_cells.iter().map(|c| c.block));
+        b
+    }
+
+    /// The summary line.
+    pub fn summary(&self) -> String {
+        let n_blocks = self
+            .reversed_faces
+            .iter()
+            .map(|f| f.block)
+            .chain(self.nonpositive_cells.iter().map(|c| c.block))
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        format!(
+            "untangle folded grid lines: scanned {} block(s); {} reversed interior face(s) and \
+             {} non-positive cell(s) in {} block(s), localised to {} folded edge(s); {} node(s) \
+             moved, max displacement {:e}",
+            self.blocks_scanned,
+            self.reversed_faces.len(),
+            self.nonpositive_cells.len(),
+            n_blocks,
+            self.folded_edges.len(),
+            self.moved.len(),
+            self.max_displacement
+        )
+    }
+
+    /// Plain-text report: the [`summary`](Self::summary) line, then per
+    /// block every reversed face (owner → neighbour cell, direction,
+    /// `cos(a,d)`, and the folded edge and node it was localised to), every
+    /// non-positive cell, every moved node (old → new, displacement,
+    /// construction), and the re-check result. Each list prints at most
+    /// [`UNTANGLE_REPORT_LIMIT`] entries and counts the rest.
+    pub fn format_report(&self) -> String {
+        let mut s = self.summary();
+        s.push('\n');
+        let mut faces = Bounded::new();
+        let mut cells = Bounded::new();
+        let mut moves = Bounded::new();
+        let mut left = Bounded::new();
+        for b in self.blocks() {
+            let bf: Vec<&ReversedFace> = self
+                .reversed_faces
+                .iter()
+                .filter(|f| f.block == b)
+                .collect();
+            let bc: Vec<&NonPositiveCell> = self
+                .nonpositive_cells
+                .iter()
+                .filter(|c| c.block == b)
+                .collect();
+            let be: Vec<&FoldedEdge> = self.folded_edges.iter().filter(|e| e.block == b).collect();
+            let bm: Vec<&MovedNode> = self.moved.iter().filter(|m| m.block == b).collect();
+            s.push_str(&format!(
+                "\nblock {b}: {} reversed face(s), {} non-positive cell(s), {} folded edge(s), \
+                 {} node(s) moved\n",
+                bf.len(),
+                bc.len(),
+                be.len(),
+                bm.len()
+            ));
+            // The folded edges of cell(s) `cs`, with the node each moves.
+            let localised = |cs: &[[usize; 3]]| -> String {
+                let hits: Vec<String> = be
+                    .iter()
+                    .filter(|e| cs.iter().any(|&c| edge_of_cell(e.axis, e.start, c)))
+                    .map(|e| {
+                        let end = step(e.start, e.axis);
+                        let node = bm
+                            .iter()
+                            .find(|m| m.node == e.start || m.node == end)
+                            .map(|m| format!(", node {} moved", fmt_ijk(m.node)))
+                            .unwrap_or_default();
+                        format!(
+                            "folded {}-edge {}-{}{node}",
+                            AXIS_NAMES[e.axis],
+                            fmt_ijk(e.start),
+                            fmt_ijk(end)
+                        )
+                    })
+                    .collect();
+                if hits.is_empty() {
+                    "not localised to a folded edge".to_string()
+                } else {
+                    hits.join("; ")
+                }
+            };
+            for f in &bf {
+                let nb = step(f.owner, f.axis);
+                faces.push(&mut s, || {
+                    format!(
+                        "  reversed {}-face: cell {} -> {}, cos(a,d) {:.4e}; {}",
+                        AXIS_NAMES[f.axis],
+                        fmt_ijk(f.owner),
+                        fmt_ijk(nb),
+                        f.cos,
+                        localised(&[f.owner, nb])
+                    )
+                });
+            }
+            for c in &bc {
+                cells.push(&mut s, || {
+                    format!(
+                        "  non-positive cell {}: volume {:e}; {}",
+                        fmt_ijk(c.cell),
+                        c.volume,
+                        localised(&[c.cell])
+                    )
+                });
+            }
+            for m in &bm {
+                moves.push(&mut s, || {
+                    format!(
+                        "  moved node {}: {} -> {}, displacement {:e} [{:?}]",
+                        fmt_ijk(m.node),
+                        fmt_xyz(m.old),
+                        fmt_xyz(m.new),
+                        m.displacement,
+                        m.construction
+                    )
+                });
+            }
+            let rf: Vec<&ReversedFace> = self
+                .remaining_reversed_faces
+                .iter()
+                .filter(|f| f.block == b)
+                .collect();
+            let rc: Vec<&NonPositiveCell> = self
+                .remaining_nonpositive_cells
+                .iter()
+                .filter(|c| c.block == b)
+                .collect();
+            if self.rechecked_blocks.contains(&b) {
+                s.push_str(&format!(
+                    "  re-check: {} reversed face(s), {} non-positive cell(s)\n",
+                    rf.len(),
+                    rc.len()
+                ));
+                for f in &rf {
+                    left.push(&mut s, || {
+                        format!(
+                            "    still reversed {}-face: cell {} -> {}, cos(a,d) {:.4e}",
+                            AXIS_NAMES[f.axis],
+                            fmt_ijk(f.owner),
+                            fmt_ijk(step(f.owner, f.axis)),
+                            f.cos
+                        )
+                    });
+                }
+                for c in &rc {
+                    left.push(&mut s, || {
+                        format!(
+                            "    still non-positive cell {}: volume {:e}",
+                            fmt_ijk(c.cell),
+                            c.volume
+                        )
+                    });
+                }
+            } else if !bf.is_empty() || !bc.is_empty() {
+                s.push_str("  re-check: not run (refused before repair)\n");
+            }
+        }
+        faces.tail(&mut s, "reversed face(s)");
+        cells.tail(&mut s, "non-positive cell(s)");
+        moves.tail(&mut s, "moved node(s)");
+        left.tail(&mut s, "remaining offender(s)");
+        s
+    }
+}
+
+impl std::fmt::Display for UntangleReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.format_report())
+    }
+}
+
+/// One reason a block was refused, located by block and node where possible.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Refusal {
+    /// Block index.
+    pub block: usize,
+    /// Node or cell `(i, j, k)` the reason refers to, if it refers to one.
+    pub node: Option<[usize; 3]>,
+    /// What could not be repaired.
+    pub reason: String,
+}
+
+/// [`untangle_folded_lines`] / [`untangle_mesh`] refused: nothing was
+/// changed. Carries every refusal found, not only the first, and the report
+/// of what was detected (moves in it were planned, not applied).
+#[derive(Debug, Clone, PartialEq)]
+pub struct UntangleError {
+    /// Every refusal, in block order.
+    pub refusals: Vec<Refusal>,
+    /// What was detected and planned before the refusal.
+    pub report: Box<UntangleReport>,
+}
+
+impl std::fmt::Display for UntangleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "untangle folded grid lines REFUSED at {} location(s); nothing was changed \
+             (moves below were planned, not applied)",
+            self.refusals.len()
+        )?;
+        f.write_str(&self.report.format_report())?;
+        writeln!(f, "\nrefusals:")?;
+        let mut s = String::new();
+        let mut shown = Bounded::new();
+        for r in &self.refusals {
+            shown.push(&mut s, || match r.node {
+                Some(n) => format!("  block {} {}: {}", r.block, fmt_ijk(n), r.reason),
+                None => format!("  block {}: {}", r.block, r.reason),
+            });
+        }
+        shown.tail(&mut s, "refusal(s)");
+        f.write_str(&s)
+    }
+}
+
+impl std::error::Error for UntangleError {}
+
+#[inline]
+fn node_dims(b: &Block) -> [usize; 3] {
+    [b.imax, b.jmax, b.kmax]
+}
+
+#[inline]
+fn node_xyz(b: &Block, n: [usize; 3]) -> [Float; 3] {
+    let (x, y, z) = b.xyz(n[0], n[1], n[2]);
+    [x, y, z]
+}
+
+#[inline]
+fn step(n: [usize; 3], axis: usize) -> [usize; 3] {
+    let mut m = n;
+    m[axis] += 1;
+    m
+}
+
+/// `+1` for a right-handed or degenerate block, `-1` for a left-handed one.
+/// Face area vectors and divergence volumes all flip sign with handedness,
+/// so this makes both checks independent of `(i,j,k)` orientation — the
+/// same verdict as running them after [`make_right_handed`].
+fn orientation_sign(b: &Block) -> Float {
+    if block_handedness(b) == Handedness::LeftHanded {
+        -1.0
+    } else {
+        1.0
+    }
+}
+
+fn face_area(
+    fm: &crate::metrics::FaceMetrics,
+    axis: usize,
+    f: [usize; 3],
+    ni: usize,
+    nj: usize,
+) -> [Float; 3] {
+    match axis {
+        0 => {
+            let id = f[0] + ni * f[1] + ni * (nj - 1) * f[2];
+            [fm.si_x[id], fm.si_y[id], fm.si_z[id]]
+        }
+        1 => {
+            let id = f[0] + (ni - 1) * f[1] + (ni - 1) * nj * f[2];
+            [fm.sj_x[id], fm.sj_y[id], fm.sj_z[id]]
+        }
+        _ => {
+            let id = f[0] + (ni - 1) * f[1] + (ni - 1) * (nj - 1) * f[2];
+            [fm.sk_x[id], fm.sk_y[id], fm.sk_z[id]]
+        }
+    }
+}
+
+/// Every reversed interior face and non-positive-volume cell of one block.
+///
+/// A face is reversed when `cos∠(a, d) ≤ 0` (see [`ReversedFace`]); a face
+/// whose cosine is undefined (zero area, coincident centres, non-finite
+/// value) is not counted. A cell is non-positive when its signed
+/// [`cell_volume_divergence`] is not `> 0` (the solver-side
+/// [`compute_cell_volumes`](crate::metrics::compute_cell_volumes) returns the
+/// magnitude, so it cannot see an inverted cell). Both are taken relative to the block's handedness, so a
+/// left-handed block is judged as if [`make_right_handed`] had been applied.
+/// A block with fewer than two nodes on any axis has no cells and reports
+/// nothing.
+pub fn find_inverted_geometry(
+    b: &Block,
+    block_index: usize,
+) -> (Vec<ReversedFace>, Vec<NonPositiveCell>) {
+    let (ni, nj, nk) = (b.imax, b.jmax, b.kmax);
+    let mut faces = Vec::new();
+    let mut cells = Vec::new();
+    if ni < 2 || nj < 2 || nk < 2 {
+        return (faces, cells);
+    }
+    let s = orientation_sign(b);
+    let nc = [ni - 1, nj - 1, nk - 1];
+    let cid = |c: [usize; 3]| (c[2] * nc[1] + c[1]) * nc[0] + c[0];
+    let (cx, cy, cz) = crate::metrics::compute_cell_centers(b);
+    let fm = crate::metrics::compute_face_metrics(b);
+
+    for k in 0..nc[2] {
+        for j in 0..nc[1] {
+            for i in 0..nc[0] {
+                let v = s * cell_volume_divergence(b, i, j, k);
+                if !(v > 0.0) {
+                    cells.push(NonPositiveCell {
+                        block: block_index,
+                        cell: [i, j, k],
+                        volume: v,
+                    });
+                }
+            }
+        }
+    }
+    for axis in 0..3 {
+        for k in 0..nc[2] {
+            for j in 0..nc[1] {
+                for i in 0..nc[0] {
+                    let owner = [i, j, k];
+                    if owner[axis] + 1 >= nc[axis] {
+                        continue;
+                    }
+                    let nb = step(owner, axis);
+                    // The face between `owner` and `nb` lies on node plane
+                    // `nb[axis]`; its other two indices are the owner's.
+                    let a = face_area(&fm, axis, nb, ni, nj);
+                    let (o, n) = (cid(owner), cid(nb));
+                    let d = [cx[n] - cx[o], cy[n] - cy[o], cz[n] - cz[o]];
+                    let norm = (dot(a, a) * dot(d, d)).sqrt();
+                    let cos = s * dot(a, d) / norm;
+                    if norm > 0.0 && cos.is_finite() && cos <= 0.0 {
+                        faces.push(ReversedFace {
+                            block: block_index,
+                            axis,
+                            owner,
+                            cos,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    (faces, cells)
+}
+
+/// Edge vector `X(n + ê_axis) − X(n)`.
+fn edge_vec(b: &Block, n: [usize; 3], axis: usize) -> [Float; 3] {
+    sub(node_xyz(b, step(n, axis)), node_xyz(b, n))
+}
+
+/// Starts of the same edge on the neighbouring parallel lines: `n ± ê_q`
+/// for each axis `q ≠ axis`, where that node exists.
+fn parallel_edge_starts(b: &Block, n: [usize; 3], axis: usize) -> Vec<[usize; 3]> {
+    let d = node_dims(b);
+    let mut out = Vec::with_capacity(4);
+    for q in 0..3 {
+        if q == axis {
+            continue;
+        }
+        if n[q] > 0 {
+            let mut m = n;
+            m[q] -= 1;
+            out.push(m);
+        }
+        if n[q] + 1 < d[q] {
+            out.push(step(n, q));
+        }
+    }
+    out
+}
+
+/// `e·m` for the edge at `n` along `axis`, `m` the mean of the same edge on
+/// every neighbouring parallel line. `None` when the edge has zero length (a
+/// collapsed line is not a fold), there are no neighbouring lines, the mean
+/// is zero, or the value is not finite.
+fn edge_fold_dot(b: &Block, n: [usize; 3], axis: usize) -> Option<Float> {
+    let e = edge_vec(b, n, axis);
+    if dot(e, e) == 0.0 {
+        return None;
+    }
+    let starts = parallel_edge_starts(b, n, axis);
+    if starts.is_empty() {
+        return None;
+    }
+    let mut m = [0.0 as Float; 3];
+    for s in &starts {
+        let v = edge_vec(b, *s, axis);
+        m = [m[0] + v[0], m[1] + v[1], m[2] + v[2]];
+    }
+    let w = 1.0 / starts.len() as Float;
+    let m = [m[0] * w, m[1] * w, m[2] * w];
+    if dot(m, m) == 0.0 {
+        return None;
+    }
+    let d = dot(e, m);
+    d.is_finite().then_some(d)
+}
+
+type EdgeKey = (usize, [usize; 3]);
+
+/// `e·m` for edge `(axis, n)` against `m`, the mean of the same edge over the
+/// neighbouring parallel lines not in `folded` with non-zero length. `None`
+/// when the edge has zero length or no such neighbour exists.
+fn edge_dot_healthy(
+    b: &Block,
+    folded: &std::collections::HashSet<EdgeKey>,
+    n: [usize; 3],
+    axis: usize,
+) -> Option<Float> {
+    let e = edge_vec(b, n, axis);
+    if dot(e, e) == 0.0 {
+        return None;
+    }
+    healthy_parallel_mean(b, folded, n, axis).map(|m| dot(e, m))
+}
+
+/// The folded edges of a block. A first pass flags every edge with
+/// `e·m ≤ 0` against the mean `m` of all its neighbouring parallel lines.
+/// A large fold drags that mean on the lines next to it, so flagged edges
+/// are then re-judged against the mean of their *unflagged* neighbours only,
+/// repeated until nothing changes. An edge with no unflagged neighbour stays
+/// flagged. The set only shrinks, so this terminates.
+fn classify_folded_edges(b: &Block) -> std::collections::HashSet<EdgeKey> {
+    let d = node_dims(b);
+    let mut folded = std::collections::HashSet::new();
+    for axis in 0..3 {
+        for k in 0..d[2] {
+            for j in 0..d[1] {
+                for i in 0..d[0] {
+                    let n = [i, j, k];
+                    if n[axis] + 1 < d[axis]
+                        && matches!(edge_fold_dot(b, n, axis), Some(v) if v <= 0.0)
+                    {
+                        folded.insert((axis, n));
+                    }
+                }
+            }
+        }
+    }
+    loop {
+        let keep: std::collections::HashSet<EdgeKey> = folded
+            .iter()
+            .copied()
+            .filter(|&(axis, n)| match edge_dot_healthy(b, &folded, n, axis) {
+                Some(v) => !(v > 0.0),
+                None => true,
+            })
+            .collect();
+        if keep.len() == folded.len() {
+            return keep;
+        }
+        folded = keep;
+    }
+}
+
+/// Mean of the same edge over the neighbouring parallel lines that are not
+/// in `folded` and have non-zero length. `None` when there is none.
+fn healthy_parallel_mean(
+    b: &Block,
+    folded: &std::collections::HashSet<EdgeKey>,
+    n: [usize; 3],
+    axis: usize,
+) -> Option<[Float; 3]> {
+    let mut m = [0.0 as Float; 3];
+    let mut count = 0usize;
+    for s in parallel_edge_starts(b, n, axis) {
+        let v = edge_vec(b, s, axis);
+        if !folded.contains(&(axis, s)) && dot(v, v) > 0.0 {
+            m = [m[0] + v[0], m[1] + v[1], m[2] + v[2]];
+            count += 1;
+        }
+    }
+    (count > 0).then(|| {
+        let w = 1.0 / count as Float;
+        [m[0] * w, m[1] * w, m[2] * w]
+    })
+}
+
+fn on_block_face(b: &Block, n: [usize; 3]) -> bool {
+    let d = node_dims(b);
+    (0..3).any(|q| n[q] == 0 || n[q] + 1 == d[q])
+}
+
+/// Whether any edge incident to node `n`, other than `exclude`, is folded.
+fn other_incident_edge_folded(
+    b: &Block,
+    folded: &std::collections::HashSet<EdgeKey>,
+    n: [usize; 3],
+    exclude: EdgeKey,
+) -> bool {
+    let d = node_dims(b);
+    for axis in 0..3 {
+        let mut starts = Vec::with_capacity(2);
+        if n[axis] + 1 < d[axis] {
+            starts.push(n);
+        }
+        if n[axis] > 0 {
+            let mut m = n;
+            m[axis] -= 1;
+            starts.push(m);
+        }
+        for s in starts {
+            if (axis, s) != exclude && folded.contains(&(axis, s)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// A planned relocation: new position, construction, and the nodes it is
+/// built from (which must themselves stay fixed).
+type PlannedMove = ([Float; 3], RepairConstruction, Vec<[usize; 3]>);
+
+/// Position for node `moved` on the folded edge to the fixed `anchor` along
+/// `axis`; `m` is the healthy-neighbour mean of that edge, oriented
+/// `start → start + 1`. Returns the position, the construction used and the
+/// nodes it was built from (which must themselves stay fixed).
+fn place_folded_node(
+    block: &Block,
+    folded: &std::collections::HashSet<EdgeKey>,
+    moved: [usize; 3],
+    anchor: [usize; 3],
+    axis: usize,
+    m: [Float; 3],
+) -> Result<PlannedMove, String> {
+    let up = anchor[axis] > moved[axis];
+    let neg = |v: [Float; 3]| [-v[0], -v[1], -v[2]];
+    // `u`: healthy n→a edge.
+    let u = if up { m } else { neg(m) };
+    let xa = node_xyz(block, anchor);
+    let p1 = sub(xa, u);
+    // `f`: the next node along the line beyond `moved`, away from the anchor.
+    let far = if up {
+        (moved[axis] > 0).then(|| {
+            let mut f = moved;
+            f[axis] -= 1;
+            f
+        })
+    } else {
+        (moved[axis] + 1 < node_dims(block)[axis]).then(|| step(moved, axis))
+    };
+    let Some(f) = far else {
+        return Ok((p1, RepairConstruction::NeighbourMean, vec![anchor]));
+    };
+    let w_start = if up { f } else { moved };
+    let Some(mw) = healthy_parallel_mean(block, folded, w_start, axis) else {
+        return Ok((p1, RepairConstruction::NeighbourMean, vec![anchor]));
+    };
+    // `w`: healthy f→n edge.
+    let w = if up { mw } else { neg(mw) };
+    let xf = node_xyz(block, f);
+    if dot(sub(p1, xf), w) > 0.0 {
+        return Ok((p1, RepairConstruction::NeighbourMean, vec![anchor]));
+    }
+    let c = sub(xa, xf);
+    if !(dot(c, w) > 0.0 && dot(c, u) > 0.0) {
+        return Err(format!(
+            "anchor ({},{},{}) does not lie beyond node ({},{},{}) along the line; rebuilding \
+             the two edges between them cannot unfold it",
+            anchor[0], anchor[1], anchor[2], f[0], f[1], f[2]
+        ));
+    }
+    let (lw, lu) = (norm(w), norm(u));
+    let r = lw / (lw + lu);
+    Ok((
+        [xf[0] + r * c[0], xf[1] + r * c[1], xf[2] + r * c[2]],
+        RepairConstruction::ChordRedistribution,
+        vec![anchor, f],
+    ))
+}
+
+/// Repair folded grid lines in one block, using geometry only.
+///
+/// 1. **Detect** reversed interior faces and non-positive cells
+///    ([`find_inverted_geometry`]). None found: the block is returned as an
+///    exact clone with an empty report.
+/// 2. **Localise** to the edges of the affected cells whose vector opposes
+///    the mean of the same edge on the unfolded neighbouring parallel lines
+///    ([`FoldedEdge`]).
+/// 3. **Repair** each folded edge by relocating one endpoint and keeping
+///    the other (the anchor) fixed. A node on any block face (an index at `0`
+///    or max) is never moved, so surfaces and inter-block point matches stay
+///    exact. With one endpoint on a block face the face node is the anchor;
+///    with both interior the anchor is the endpoint whose other incident
+///    edges are not folded. The relocated node takes the mean of the same
+///    edge over the *healthy* neighbouring lines
+///    ([`RepairConstruction::NeighbourMean`]), or, where that would fold the
+///    next edge along the line, is placed on the chord to the next node in
+///    the neighbours' edge-length ratio
+///    ([`RepairConstruction::ChordRedistribution`]).
+/// 4. **Re-check** the repaired block: no reversed face and no non-positive
+///    cell may remain.
+///
+/// Refused (no partial fix, `Err` naming every block and node): geometry not
+/// localisable to a folded edge; a folded edge with both endpoints on block
+/// faces; an ambiguous anchor; no healthy neighbouring line; an anchor that
+/// does not lie beyond the next node along the line; two different
+/// relocations of one node, or a relocation built from a moved node; and any
+/// inverted geometry left after the repair.
+pub fn untangle_folded_lines(
+    block: &Block,
+    block_index: usize,
+) -> Result<(Block, UntangleReport), UntangleError> {
+    let (reversed_faces, nonpositive_cells) = find_inverted_geometry(block, block_index);
+    if reversed_faces.is_empty() && nonpositive_cells.is_empty() {
+        return Ok((
+            block.clone(),
+            UntangleReport {
+                blocks_scanned: 1,
+                ..Default::default()
+            },
+        ));
+    }
+
+    let mut candidates = std::collections::BTreeSet::new();
+    let mut add_cell_edges = |c: [usize; 3]| {
+        for axis in 0..3 {
+            let (p, q) = ((axis + 1) % 3, (axis + 2) % 3);
+            for dp in 0..2 {
+                for dq in 0..2 {
+                    let mut s = c;
+                    s[p] += dp;
+                    s[q] += dq;
+                    candidates.insert((axis, s));
+                }
+            }
+        }
+    };
+    for f in &reversed_faces {
+        add_cell_edges(f.owner);
+        add_cell_edges(step(f.owner, f.axis));
+    }
+    for c in &nonpositive_cells {
+        add_cell_edges(c.cell);
+    }
+
+    let folded = classify_folded_edges(block);
+    let folded_edges: Vec<FoldedEdge> = candidates
+        .iter()
+        .filter(|key| folded.contains(key))
+        .map(|&(axis, start)| FoldedEdge {
+            block: block_index,
+            axis,
+            start,
+            dot: edge_dot_healthy(block, &folded, start, axis)
+                .or_else(|| edge_fold_dot(block, start, axis))
+                .unwrap_or(0.0),
+        })
+        .collect();
+    let mut report = UntangleReport {
+        blocks_scanned: 1,
+        reversed_faces,
+        nonpositive_cells,
+        folded_edges,
+        ..Default::default()
+    };
+
+    let mut refusals = Vec::new();
+    let refuse = |refusals: &mut Vec<Refusal>, node: Option<[usize; 3]>, reason: String| {
+        refusals.push(Refusal {
+            block: block_index,
+            node,
+            reason,
+        })
+    };
+    if report.folded_edges.is_empty() {
+        for f in &report.reversed_faces {
+            refuse(
+                &mut refusals,
+                Some(f.owner),
+                format!(
+                    "reversed {}-face (owner cell, cos {:.4e}) is not localisable to a folded \
+                     grid-line edge",
+                    AXIS_NAMES[f.axis], f.cos
+                ),
+            );
+        }
+        for c in &report.nonpositive_cells {
+            refuse(
+                &mut refusals,
+                Some(c.cell),
+                format!(
+                    "non-positive cell (volume {:e}) is not localisable to a folded grid-line edge",
+                    c.volume
+                ),
+            );
+        }
+        return Err(UntangleError {
+            refusals,
+            report: Box::new(report),
+        });
+    }
+
+    let mut moves: std::collections::BTreeMap<[usize; 3], PlannedMove> =
+        std::collections::BTreeMap::new();
+    for fe in &report.folded_edges {
+        let axis = fe.axis;
+        let (n0, n1) = (fe.start, step(fe.start, axis));
+        let Some(m) = healthy_parallel_mean(block, &folded, n0, axis) else {
+            refuse(
+                &mut refusals,
+                Some(n0),
+                format!(
+                    "folded {}-edge has no healthy neighbouring line to rebuild it from",
+                    AXIS_NAMES[axis]
+                ),
+            );
+            continue;
+        };
+        let (moved, anchor) = match (on_block_face(block, n0), on_block_face(block, n1)) {
+            (true, true) => {
+                refuse(
+                    &mut refusals,
+                    Some(n0),
+                    format!(
+                        "folded {}-edge has both endpoints on block faces; block-face nodes are \
+                         never moved",
+                        AXIS_NAMES[axis]
+                    ),
+                );
+                continue;
+            }
+            (true, false) => (n1, n0),
+            (false, true) => (n0, n1),
+            (false, false) => {
+                let key = (axis, fe.start);
+                match (
+                    other_incident_edge_folded(block, &folded, n0, key),
+                    other_incident_edge_folded(block, &folded, n1, key),
+                ) {
+                    (true, false) => (n0, n1),
+                    (false, true) => (n1, n0),
+                    _ => {
+                        refuse(
+                            &mut refusals,
+                            Some(n0),
+                            format!(
+                                "folded {}-edge with both endpoints interior has no unambiguous \
+                                 anchor (other folded edges at both or neither endpoint)",
+                                AXIS_NAMES[axis]
+                            ),
+                        );
+                        continue;
+                    }
+                }
+            }
+        };
+        match place_folded_node(block, &folded, moved, anchor, axis, m) {
+            Err(reason) => refuse(&mut refusals, Some(moved), reason),
+            Ok(plan) => match moves.get(&moved) {
+                Some(prev) if prev.0 != plan.0 => refuse(
+                    &mut refusals,
+                    Some(moved),
+                    "two folded edges ask for different relocations of this node".to_string(),
+                ),
+                Some(_) => {}
+                None => {
+                    moves.insert(moved, plan);
+                }
+            },
+        }
+    }
+    for (node, (_, _, from)) in &moves {
+        for f in from {
+            if moves.contains_key(f) {
+                refuse(
+                    &mut refusals,
+                    Some(*node),
+                    format!(
+                        "relocation is built from node ({},{},{}), which is itself relocated",
+                        f[0], f[1], f[2]
+                    ),
+                );
+            }
+        }
+    }
+    for (node, (new, construction, _)) in &moves {
+        let old = node_xyz(block, *node);
+        let displacement = norm(sub(*new, old));
+        report.max_displacement = report.max_displacement.max(displacement);
+        report.moved.push(MovedNode {
+            block: block_index,
+            node: *node,
+            old,
+            new: *new,
+            displacement,
+            construction: *construction,
+        });
+    }
+    if !refusals.is_empty() {
+        return Err(UntangleError {
+            refusals,
+            report: Box::new(report),
+        });
+    }
+
+    let (mut x, mut y, mut z) = (block.x.clone(), block.y.clone(), block.z.clone());
+    for m in &report.moved {
+        let id = block.idx(m.node[0], m.node[1], m.node[2]);
+        x[id] = m.new[0];
+        y[id] = m.new[1];
+        z[id] = m.new[2];
+    }
+    let repaired = Block::new(block.imax, block.jmax, block.kmax, x, y, z);
+
+    let (faces_after, cells_after) = find_inverted_geometry(&repaired, block_index);
+    report.rechecked_blocks.push(block_index);
+    if faces_after.is_empty() && cells_after.is_empty() {
+        return Ok((repaired, report));
+    }
+    for f in &faces_after {
+        refuse(
+            &mut refusals,
+            Some(f.owner),
+            format!(
+                "{}-face cell {} -> {} still reversed after repair, cos(a,d) {:.4e}",
+                AXIS_NAMES[f.axis],
+                fmt_ijk(f.owner),
+                fmt_ijk(step(f.owner, f.axis)),
+                f.cos
+            ),
+        );
+    }
+    for c in &cells_after {
+        refuse(
+            &mut refusals,
+            Some(c.cell),
+            format!(
+                "cell still non-positive after repair, volume {:e}",
+                c.volume
+            ),
+        );
+    }
+    report.remaining_reversed_faces = faces_after;
+    report.remaining_nonpositive_cells = cells_after;
+    Err(UntangleError {
+        refusals,
+        report: Box::new(report),
+    })
+}
+
+/// [`untangle_folded_lines`] over every block (block index = position in
+/// `blocks`). All-or-nothing: if any block is refused, every block's
+/// refusals are returned, with the report of every block (moves planned,
+/// not applied), and no repaired mesh is.
+pub fn untangle_mesh(blocks: &[Block]) -> Result<(Vec<Block>, UntangleReport), UntangleError> {
+    use rayon::prelude::*;
+    let results: Vec<_> = blocks
+        .par_iter()
+        .enumerate()
+        .map(|(bi, b)| untangle_folded_lines(b, bi))
+        .collect();
+    let mut out = Vec::with_capacity(blocks.len());
+    let mut report = UntangleReport::default();
+    let mut refusals = Vec::new();
+    for r in results {
+        match r {
+            Ok((b, rep)) => {
+                out.push(b);
+                report.extend(rep);
+            }
+            Err(e) => {
+                refusals.extend(e.refusals);
+                report.extend(*e.report);
+            }
+        }
+    }
+    if refusals.is_empty() {
+        Ok((out, report))
+    } else {
+        Err(UntangleError {
+            refusals,
+            report: Box::new(report),
+        })
+    }
 }
 
 // =============================================================================

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.0
+
+### Added
+
+- `untangle_folded_lines` / `untangle_mesh`: geometry-only repair of folded grid lines (a node
+  placed beyond its successor, which reverses interior faces without inverting a cell). Detects
+  reversed interior faces (`a·d ≤ 0`) and non-positive cell volumes relative to block handedness
+  (`find_inverted_geometry`), localises them to the grid-line edges that oppose their unfolded
+  neighbouring lines, and relocates one endpoint per edge — never a block-face node, so surfaces
+  and inter-block point matches stay exact — then re-checks the block. Refusals
+  (`UntangleError`) change nothing and name every block and `(i, j, k)`. A clean block is
+  returned bit-identical with an empty report.
+- `UntangleReport` prints a per-block log: every reversed face (owner → neighbour cell,
+  direction, `cos(a,d)`, and the folded edge and node it was localised to), every moved node
+  (old → new, displacement, construction), and the re-check result, bounded at
+  `UNTANGLE_REPORT_LIMIT` entries per list.
+- `examples/untangle.rs`: reads a Plot3D file, untangles it, writes `<stem>_untangled.<ext>`
+  and `<stem>_untangled_report.txt`, and reads the written mesh back to report the write's own
+  rounding.
+
 ## 0.3.3
 
 ### Changed

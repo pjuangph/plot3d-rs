@@ -178,9 +178,11 @@ pub use merge_blocks::{
 };
 pub use mesh_quality::{
     block_handedness, cell_aspect_ratio, cell_distinct_node_count, cell_signed_volume,
-    cell_skewness, element_type_inventory, make_right_handed, run_all as run_mesh_quality,
-    BlockElementSummary, CellLocation, ElementInventory, ElementType, Handedness,
-    MeshQualityReport, Severity, Thresholds, Violation, MESH_QUALITY_REVISION,
+    cell_skewness, element_type_inventory, find_inverted_geometry, make_right_handed,
+    run_all as run_mesh_quality, untangle_folded_lines, untangle_mesh, BlockElementSummary,
+    CellLocation, ElementInventory, ElementType, FoldedEdge, Handedness, MeshQualityReport,
+    MovedNode, NonPositiveCell, Refusal, RepairConstruction, ReversedFace, Severity, Thresholds,
+    UntangleError, UntangleReport, Violation, MESH_QUALITY_REVISION, UNTANGLE_REPORT_LIMIT,
 };
 pub use metrics::{compute_cell_centers, compute_cell_volumes, compute_face_metrics, FaceMetrics};
 pub use point_match::point_match;
