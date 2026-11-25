@@ -216,6 +216,7 @@ fn read_binary_fortran(
     Ok(blocks)
 }
 
+#[allow(clippy::chunks_exact_to_as_chunks)] // fixed-size decode loop kept on chunks_exact; as_chunks needs a newer MSRV
 fn read_vec_num(
     r: &mut impl Read,
     n: usize,

@@ -203,6 +203,7 @@ fn boundary_cell_index(face_val: usize, n_nodes: usize) -> Option<usize> {
 /// The face ranges from FaceRecord use node indices. The boundary cell along
 /// the constant axis is determined by whether the face is at the low or high
 /// end of that axis.
+#[allow(clippy::too_many_arguments)] // private; face geometry and orientation are distinct inputs
 fn build_cross_block_face_edges(
     b1: usize,
     face1: &crate::face_record::FaceRecord,

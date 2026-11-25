@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1
+
+### Changed
+
+- CI: `cargo clippy -- -D warnings` is clean. Lint rewrites are semantics-preserving; deliberate
+  NaN handling in negated comparisons is kept via `partial_cmp`. No behaviour or API change.
+
 ## 0.4.0
 
 ### Added

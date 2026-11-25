@@ -207,7 +207,7 @@ pub fn build_flat_mesh(
 
     // --- Step 3: build face lists ---
     // Pre-compute face metrics for all blocks (we need area vectors).
-    let all_face_metrics: Vec<_> = blocks.iter().map(|blk| compute_face_metrics(blk)).collect();
+    let all_face_metrics: Vec<_> = blocks.iter().map(compute_face_metrics).collect();
 
     // We will accumulate face data into these vectors.
     let mut face_owner: Vec<u32> = Vec::new();
@@ -547,6 +547,7 @@ fn boundary_face_centroid(
 ///
 /// The area vector is taken from block1's face metrics at the interface,
 /// pointing from block1 (owner) toward block2 (neighbor).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)] // private; row tuple layout is consumed positionally
 fn cross_block_face_data(
     b1: usize,
     face1: &FaceRecord,

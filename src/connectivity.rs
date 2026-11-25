@@ -1038,7 +1038,7 @@ pub(crate) fn revalidate_full_resolution(
     for fm in proposed {
         let mut outcome: Result<(), String> = Err("no transform supplied".to_string());
         for t in transforms {
-            outcome = certify_face_match(blocks, &fm, |p| t(p), tol).map(|_| ());
+            outcome = certify_face_match(blocks, &fm, t, tol).map(|_| ());
             if outcome.is_ok() {
                 break;
             }
@@ -1483,8 +1483,7 @@ pub fn connectivity_with_tol(blocks: &[Block], tol: Float) -> (Vec<FaceMatch>, V
     }
 
     let mut formatted = Vec::new();
-    let mut id_counter = 1;
-    for face in outer_faces {
+    for (id_counter, face) in (1..).zip(outer_faces) {
         formatted.push(FaceRecord {
             block_index: face.block_index().unwrap_or(usize::MAX),
             il: face.imin(),
@@ -1497,7 +1496,6 @@ pub fn connectivity_with_tol(blocks: &[Block], tol: Float) -> (Vec<FaceMatch>, V
             u_physical: None,
             v_physical: None,
         });
-        id_counter += 1;
     }
 
     (matches, formatted)

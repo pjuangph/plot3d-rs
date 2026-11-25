@@ -869,7 +869,10 @@ pub fn find_inverted_geometry(
         for j in 0..nc[1] {
             for i in 0..nc[0] {
                 let v = s * cell_volume_divergence(b, i, j, k);
-                if !(v > 0.0) {
+                if matches!(
+                    v.partial_cmp(&0.0),
+                    None | Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+                ) {
                     cells.push(NonPositiveCell {
                         block: block_index,
                         cell: [i, j, k],
@@ -1009,7 +1012,10 @@ fn classify_folded_edges(b: &Block) -> std::collections::HashSet<EdgeKey> {
             .iter()
             .copied()
             .filter(|&(axis, n)| match edge_dot_healthy(b, &folded, n, axis) {
-                Some(v) => !(v > 0.0),
+                Some(v) => matches!(
+                    v.partial_cmp(&0.0),
+                    None | Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+                ),
                 None => true,
             })
             .collect();
@@ -1952,7 +1958,10 @@ pub fn run_all(blocks: &[Block], t: &Thresholds, preset_name: &str) -> MeshQuali
                 }
                 continue;
             }
-            if !(sv > 0.0) {
+            if matches!(
+                sv.partial_cmp(&0.0),
+                None | Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+            ) {
                 degen_count += 1;
                 if cell_has_collapsed_edge(b, i, j, k) {
                     degen_coincident += 1;

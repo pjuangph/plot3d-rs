@@ -195,6 +195,7 @@ pub fn compute_cell_volumes(block: &Block) -> Vec<Float> {
                 // K-low  face (k   const): nodes n0, n1, n3, n2  => diag n0-n3, n1-n2
                 // K-high face (k+1 const): nodes n4, n5, n7, n6  => diag n4-n7, n6-n5
 
+                #[allow(clippy::type_complexity)] // local table of six quad faces
                 let faces: [([Float; 3], [Float; 3], [Float; 3], [Float; 3]); 6] = [
                     // I-low:  outward normal points in -i direction
                     // We use diagonal order so cross product points -i,

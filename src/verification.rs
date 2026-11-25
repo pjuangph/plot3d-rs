@@ -63,6 +63,7 @@ use crate::Float;
 ///
 /// Returns `(grid, nu, nv)` where `grid` has layout `grid[u * nv + v]`.
 /// Returns `None` if no constant axis is found (degenerate face).
+#[allow(clippy::type_complexity)] // public return type; changing it would break the API
 pub fn extract_canonical_grid(
     block: &Block,
     rec: &FaceRecord,

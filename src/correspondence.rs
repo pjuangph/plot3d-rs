@@ -294,7 +294,10 @@ where
             let (xb, yb, zb) = block_b.xyz(ib[0], ib[1], ib[2]);
             let ta = transform([xa, ya, za]);
             let d2 = (ta[0] - xb).powi(2) + (ta[1] - yb).powi(2) + (ta[2] - zb).powi(2);
-            if !(d2 <= worst.distance) {
+            if matches!(
+                d2.partial_cmp(&worst.distance),
+                None | Some(std::cmp::Ordering::Greater)
+            ) {
                 worst = NodeDiscrepancy {
                     distance: d2,
                     node_a: ia,
@@ -302,7 +305,10 @@ where
                 };
             }
             // NaN compares false, so a non-finite coordinate fails the node.
-            if !(d2 <= tol2) {
+            if matches!(
+                d2.partial_cmp(&tol2),
+                None | Some(std::cmp::Ordering::Greater)
+            ) {
                 passed = false;
                 if early_exit {
                     worst.distance = worst.distance.max(0.0).sqrt();

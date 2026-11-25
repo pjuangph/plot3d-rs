@@ -96,7 +96,7 @@ impl PointGrid3 {
                         let q = self.pts[i];
                         let d2 =
                             (p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2);
-                        if d2 <= tol2 && best.map_or(true, |(_, b)| d2 < b) {
+                        if d2 <= tol2 && best.is_none_or(|(_, b)| d2 < b) {
                             best = Some((i, d2));
                         }
                     }
@@ -173,7 +173,7 @@ impl PointGrid2 {
                     }
                     let q = self.pts[i];
                     let d2 = (p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2);
-                    if d2 <= tol2 && best.map_or(true, |(_, b)| d2 < b) {
+                    if d2 <= tol2 && best.is_none_or(|(_, b)| d2 < b) {
                         best = Some((i, d2));
                     }
                 }

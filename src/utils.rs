@@ -113,6 +113,7 @@ impl Endian {
             Endian::Big => BigEndian::write_u32(buf, v),
         }
     }
+    #[allow(clippy::chunks_exact_to_as_chunks)] // fixed-size decode loop kept on chunks_exact; as_chunks needs a newer MSRV
     pub fn read_f32_slice(buf: &[u8], e: Endian) -> Vec<f32> {
         let mut out = vec![0f32; buf.len() / 4];
         for (i, chunk) in buf.chunks_exact(4).enumerate() {
@@ -130,6 +131,7 @@ impl Endian {
         }
         out
     }
+    #[allow(clippy::chunks_exact_to_as_chunks)] // fixed-size decode loop kept on chunks_exact; as_chunks needs a newer MSRV
     pub fn read_f64_slice(buf: &[u8], e: Endian) -> Vec<f64> {
         let mut out = vec![0f64; buf.len() / 8];
         for (i, chunk) in buf.chunks_exact(8).enumerate() {
